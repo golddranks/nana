@@ -39,8 +39,6 @@ mod bp {
     // Mul/div: left-associative
     pub const MUL_L: u8 = 14;
     pub const MUL_R: u8 = 15;
-    // Unary prefix
-    pub const UNARY: u8 = 17;
     // Postfix call/field access
     pub const POSTFIX: u8 = 19;
 }
@@ -1458,8 +1456,8 @@ impl Parser {
         self.advance(); // consume 'import'
         self.expect(&Token::LParen)?;
         let name = match self.advance() {
-            Token::Str(s) => s,
-            tok => return Err(format!("expected string in import(), got {:?}", tok)),
+            Token::Ident(n) => n,
+            tok => return Err(format!("expected identifier in import(), got {:?}", tok)),
         };
         self.expect(&Token::RParen)?;
         Ok(Box::new(ExprKind::Import(name)))

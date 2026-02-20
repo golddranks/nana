@@ -7149,15 +7149,15 @@ fn probe21b_char_upper_lt_lower() {
 
 #[test]
 fn probe22a_import_string_errors() {
-    // import("something") should error with "import not available"
-    assert_error(r#"import("something")"#, "import not available");
+    // import("something") should be a parse error — only identifiers allowed
+    assert_parse_error(r#"import("something")"#, "expected identifier in import()");
 }
 
 #[test]
 fn probe22a_use_errors() {
     // use(something) desugars to import(something) >> let(something)
-    // which should also hit "import not available"
-    assert_error("use(foo)", "import not available");
+    // which should error with "module not provided"
+    assert_error("use(foo)", "module not provided");
 }
 
 // ── Area 2: Method calls piped vs normal ──
@@ -8349,4 +8349,270 @@ fn default_arm_not_last_error() {
         r#"{ 1 -> "one", "default", 2 -> "two" }"#,
         "default arm must be the last arm",
     );
+}
+
+// ── Import / module tests ─────────────────────────────────────────
+
+fn run_with_mods(source: &str, modules: &[(&str, Value)]) -> Value {
+    nana::run_with_modules(source, modules)
+        .unwrap_or_else(|e| panic!("program failed.\n  input: {source}\n  error: {e}"))
+}
+
+fn math_module() -> Value {
+    Value::Struct(vec![
+        ("pi".to_string(), Value::Int(3)),
+        ("e".to_string(), Value::Int(2)),
+    ])
+}
+
+#[test]
+fn import_basic_struct() {
+    let val = run_with_mods("import(math)", &[("math", math_module())]);
+    assert_eq!(val.to_string(), "(pi=3, e=2)");
+}
+
+#[test]
+fn use_sugar() {
+    // use(math) is sugar for import(math) >> let(math)
+    let val = run_with_mods("use(math); math.pi + math.e", &[("math", math_module())]);
+    assert_eq!(val, int(5));
+}
+
+#[test]
+fn import_use_field_access() {
+    let val = run_with_mods("use(math); math.pi", &[("math", math_module())]);
+    assert_eq!(val, int(3));
+}
+
+#[test]
+fn import_same_module_twice() {
+    // Importing the same module twice returns the same value
+    let val = run_with_mods(
+        "import(m) >> let(a); import(m) >> let(b); a == b",
+        &[("m", math_module())],
+    );
+    assert_eq!(val, T);
+}
+
+#[test]
+fn import_module_not_provided() {
+    assert_error("import(foo)", "module not provided: foo");
+}
+
+#[test]
+fn import_no_modules_error() {
+    // Using plain run() without modules should error on import
+    assert_error("import(foo)", "module not provided");
+}
+
+#[test]
+fn import_module_non_struct() {
+    // Module value can be anything — not required to be a struct
+    let val = run_with_mods(
+        "import(greeting)",
+        &[("greeting", Value::Str("hello world".to_string()))],
+    );
+    assert_eq!(val, s("hello world"));
+}
+
+#[test]
+fn import_module_with_function() {
+    // Module exports a function via a struct field
+    let double = nana::run("{ in * 2 }").unwrap();
+    let inc = nana::run("{ in + 1 }").unwrap();
+    let funcs = Value::Struct(vec![
+        ("double".to_string(), double),
+        ("inc".to_string(), inc),
+    ]);
+    let val = run_with_mods("use(funcs); 5 >> funcs.double >> funcs.inc", &[("funcs", funcs)]);
+    assert_eq!(val, int(11));
+}
+
+#[test]
+fn import_string_syntax_rejected() {
+    // import("math") with a string should be a parse error
+    assert_parse_error(r#"import("math")"#, "expected identifier in import()");
+}
+
+#[test]
+fn imports_function_extracts_names() {
+    let names = nana::imports("use(math); use(utils); import(math)").unwrap();
+    assert_eq!(names, vec!["math".to_string(), "utils".to_string()]);
+}
+
+#[test]
+fn imports_function_empty() {
+    let names = nana::imports("1 + 2").unwrap();
+    assert!(names.is_empty());
+}
+
+#[test]
+fn imports_function_nested() {
+    // Imports inside blocks are still collected
+    let names = nana::imports("{ import(foo) }; import(bar)").unwrap();
+    assert_eq!(names, vec!["foo".to_string(), "bar".to_string()]);
+}
+
+// ── String indexing methods ───────────────────────────────────────
+
+#[test]
+fn byte_get_ascii() {
+    assert_val(r#""hello".byte_get(0)"#, byte(b'h'));
+    assert_val(r#""hello".byte_get(4)"#, byte(b'o'));
+}
+
+#[test]
+fn byte_get_multibyte() {
+    // 'é' is 0xC3 0xA9 in UTF-8
+    assert_val(r#""héllo".byte_get(0)"#, byte(b'h'));
+    assert_val(r#""héllo".byte_get(1)"#, byte(0xC3));
+    assert_val(r#""héllo".byte_get(2)"#, byte(0xA9));
+    assert_val(r#""héllo".byte_get(3)"#, byte(b'l'));
+}
+
+#[test]
+fn byte_get_out_of_bounds() {
+    assert_error(r#""hello".byte_get(5)"#, "out of bounds");
+    assert_error(r#""".byte_get(0)"#, "out of bounds");
+}
+
+#[test]
+fn byte_get_negative() {
+    assert_error(r#""hello".byte_get(-1)"#, "negative index");
+}
+
+#[test]
+fn char_get_ascii() {
+    assert_val(r#""hello".char_get(0)"#, ch('h'));
+    assert_val(r#""hello".char_get(4)"#, ch('o'));
+}
+
+#[test]
+fn char_get_multibyte() {
+    assert_val(r#""héllo".char_get(0)"#, ch('h'));
+    assert_val(r#""héllo".char_get(1)"#, ch('é'));
+    assert_val(r#""héllo".char_get(2)"#, ch('l'));
+}
+
+#[test]
+fn char_get_out_of_bounds() {
+    assert_error(r#""hello".char_get(5)"#, "out of bounds");
+    assert_error(r#""".char_get(0)"#, "out of bounds");
+}
+
+#[test]
+fn char_get_negative() {
+    assert_error(r#""hello".char_get(-1)"#, "negative index");
+}
+
+// ── Type constructor builtins ─────────────────────────────────────
+
+#[test]
+fn byte_constructor() {
+    assert_val("byte(0)", byte(0));
+    assert_val("byte(65)", byte(65));
+    assert_val("byte(255)", byte(255));
+}
+
+#[test]
+fn byte_constructor_out_of_range() {
+    assert_error("byte(256)", "out of range");
+    assert_error("byte(-1)", "out of range");
+}
+
+#[test]
+fn int_constructor() {
+    assert_val("int(3.14)", int(3));
+    assert_val("int(b'A')", int(65));
+    assert_val("int('A')", int(65));
+    assert_val("int(true)", int(1));
+    assert_val("int(false)", int(0));
+    assert_val("int(42)", int(42));
+}
+
+#[test]
+fn float_constructor() {
+    assert_val("float(42)", float(42.0));
+    assert_val("float(3.14)", float(3.14));
+}
+
+#[test]
+fn char_constructor() {
+    assert_val("char(65)", ch('A'));
+    assert_val("char(0)", ch('\0'));
+    assert_val("char(b'z')", ch('z'));
+}
+
+#[test]
+fn char_constructor_invalid() {
+    assert_error("char(-1)", "negative value");
+    assert_error("char(1114112)", "not a valid Unicode scalar value"); // 0x110000
+    assert_error("char(55296)", "not a valid Unicode scalar value");  // 0xD800 surrogate
+}
+
+// ── ref_eq, val_eq, and function comparison ──────────────────────
+
+#[test]
+fn ref_eq_same_closure() {
+    // A closure compared with its own copy is the same identity
+    assert_val("let f = { in + 1 }; ref_eq(f, f)", T);
+}
+
+#[test]
+fn ref_eq_different_closures() {
+    // Two separate evaluations of identical code are different identities
+    assert_val("ref_eq({ in + 1 }, { in + 1 })", F);
+    assert_val("ref_eq({}, {})", F);
+}
+
+#[test]
+fn ref_eq_builtins() {
+    // Builtins are singletons — same name means same identity
+    assert_val("ref_eq(print, print)", T);
+    assert_val("ref_eq(print, len)", F);
+}
+
+#[test]
+fn ref_eq_non_functions() {
+    assert_val("ref_eq(1, 1)", T);
+    assert_val("ref_eq(1, 2)", F);
+    assert_val(r#"ref_eq("a", "a")"#, T);
+}
+
+#[test]
+fn ref_eq_cross_type() {
+    assert_val("ref_eq(1, true)", F);
+}
+
+#[test]
+fn val_eq_closures() {
+    // val_eq compares structure, not identity
+    assert_val("val_eq({ in + 1 }, { in + 1 })", T);
+    assert_val("val_eq({}, {})", T);
+    assert_val("val_eq({ in + 1 }, { in + 2 })", F);
+}
+
+#[test]
+fn val_eq_builtins() {
+    assert_val("val_eq(print, print)", T);
+    assert_val("val_eq(print, len)", F);
+}
+
+#[test]
+fn val_eq_non_functions() {
+    // For non-functions, val_eq behaves the same as ref_eq
+    assert_val("val_eq(1, 1)", T);
+    assert_val("val_eq(1, 2)", F);
+}
+
+#[test]
+fn function_eq_error() {
+    assert_error("{ in + 1 } == { in + 1 }", "cannot compare functions with ==; use ref_eq()");
+    assert_error("print == print", "cannot compare functions with ==; use ref_eq()");
+    assert_error("{ in + 1 } != { in + 2 }", "cannot compare functions with ==; use ref_eq()");
+}
+
+#[test]
+fn mismatched_type_compare_still_generic() {
+    assert_error(r#"1 == "hello""#, "cannot compare values");
 }

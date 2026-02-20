@@ -1,10 +1,13 @@
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
 use crate::ast::{BranchArm, Expr};
 
 pub type TagId = u64;
+
+// ── Environment ──────────────────────────────────────────────────
 
 #[derive(Clone)]
 struct Binding {
@@ -16,13 +19,26 @@ struct Binding {
 #[derive(Clone)]
 pub struct Env {
     bindings: Vec<Binding>,
+    modules: Rc<HashMap<String, Value>>,
 }
 
 impl Env {
     pub fn new() -> Self {
         Env {
             bindings: Vec::new(),
+            modules: Rc::new(HashMap::new()),
         }
+    }
+
+    pub fn with_modules(modules: HashMap<String, Value>) -> Self {
+        Env {
+            bindings: Vec::new(),
+            modules: Rc::new(modules),
+        }
+    }
+
+    pub fn get_module(&self, name: &str) -> Option<&Value> {
+        self.modules.get(name)
     }
 
     pub fn get(&self, name: &str) -> Option<&Value> {
@@ -37,13 +53,16 @@ impl Env {
     }
 
     pub fn bind(&self, name: String, value: Value) -> Env {
-        let mut new_env = self.clone();
-        new_env.bindings.push(Binding {
+        let mut new_bindings = self.bindings.clone();
+        new_bindings.push(Binding {
             name,
             value,
             used: Rc::new(Cell::new(false)),
         });
-        new_env
+        Env {
+            bindings: new_bindings,
+            modules: self.modules.clone(),
+        }
     }
 
     /// Return warnings for unused bindings that don't start with `_`.
@@ -89,10 +108,12 @@ pub enum Value {
     Array(Vec<Value>),
     Struct(Vec<(String, Value)>),
     Closure {
+        id: u64,
         body: Expr,
         env: Env,
     },
     BranchClosure {
+        id: u64,
         arms: Vec<BranchArm>,
         env: Env,
     },
@@ -114,6 +135,21 @@ impl Value {
         match self {
             Value::Str(s) => s.clone(),
             other => other.to_string(),
+        }
+    }
+
+    /// Structural equality: compares function bodies and environments,
+    /// not just identity. For non-function values, same as `PartialEq`.
+    pub fn val_eq(&self, other: &Value) -> bool {
+        match (self, other) {
+            (Value::Closure { body: b1, env: e1, .. }, Value::Closure { body: b2, env: e2, .. }) => {
+                b1 == b2 && e1 == e2
+            }
+            (
+                Value::BranchClosure { arms: a1, env: e1, .. },
+                Value::BranchClosure { arms: a2, env: e2, .. },
+            ) => a1 == a2 && e1 == e2,
+            _ => self == other,
         }
     }
 
@@ -237,13 +273,10 @@ impl PartialEq for Value {
             (Value::Unit, Value::Unit) => true,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Struct(a), Value::Struct(b)) => a == b,
-            (Value::Closure { body: b1, env: e1 }, Value::Closure { body: b2, env: e2 }) => {
-                b1 == b2 && e1 == e2
+            (Value::Closure { id: id1, .. }, Value::Closure { id: id2, .. }) => id1 == id2,
+            (Value::BranchClosure { id: id1, .. }, Value::BranchClosure { id: id2, .. }) => {
+                id1 == id2
             }
-            (
-                Value::BranchClosure { arms: a1, env: e1 },
-                Value::BranchClosure { arms: a2, env: e2 },
-            ) => a1 == a2 && e1 == e2,
             (
                 Value::Tagged {
                     id: id1,

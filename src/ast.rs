@@ -156,3 +156,89 @@ pub enum BranchBinding {
     Name(String),
     Discard,
 }
+
+/// Collect all module names referenced by `import(name)` in an AST.
+/// Returns a deduplicated list in first-occurrence order.
+pub fn collect_imports(expr: &Expr) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_imports_inner(expr, &mut names);
+    names
+}
+
+fn collect_imports_inner(expr: &Expr, names: &mut Vec<String>) {
+    match expr.as_ref() {
+        ExprKind::Import(name) => {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        ExprKind::Block(body) => collect_imports_inner(body, names),
+        ExprKind::BranchBlock(arms) => {
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_imports_inner(guard, names);
+                }
+                collect_imports_inner(&arm.body, names);
+                if let BranchPattern::Literal(lit) = &arm.pattern {
+                    collect_imports_inner(lit, names);
+                }
+            }
+        }
+        ExprKind::Array(elems) => {
+            for e in elems {
+                collect_imports_inner(e, names);
+            }
+        }
+        ExprKind::Struct(fields) => {
+            for f in fields {
+                collect_imports_inner(&f.value, names);
+            }
+        }
+        ExprKind::StringInterp(parts) => {
+            for part in parts {
+                if let StringInterpPart::Expr(e) = part {
+                    collect_imports_inner(e, names);
+                }
+            }
+        }
+        ExprKind::FieldAccess(e, _) => collect_imports_inner(e, names),
+        ExprKind::Call(func, arg) => {
+            collect_imports_inner(func, names);
+            collect_imports_inner(arg, names);
+        }
+        ExprKind::MethodCall { receiver, arg, .. } => {
+            collect_imports_inner(receiver, names);
+            collect_imports_inner(arg, names);
+        }
+        ExprKind::UnaryMinus(e) => collect_imports_inner(e, names),
+        ExprKind::BinOp(_, lhs, rhs) => {
+            collect_imports_inner(lhs, names);
+            collect_imports_inner(rhs, names);
+        }
+        ExprKind::Compare(_, lhs, rhs) => {
+            collect_imports_inner(lhs, names);
+            collect_imports_inner(rhs, names);
+        }
+        ExprKind::Pipe(lhs, rhs) => {
+            collect_imports_inner(lhs, names);
+            collect_imports_inner(rhs, names);
+        }
+        ExprKind::Let { body, .. } => collect_imports_inner(body, names),
+        ExprKind::LetArray { body, .. } => collect_imports_inner(body, names),
+        ExprKind::Range(start, end) => {
+            collect_imports_inner(start, names);
+            collect_imports_inner(end, names);
+        }
+        ExprKind::Group(inner) => collect_imports_inner(inner, names),
+        // Leaves — no children to recurse into
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Str(_)
+        | ExprKind::Char(_)
+        | ExprKind::Byte(_)
+        | ExprKind::Unit
+        | ExprKind::Ident(_)
+        | ExprKind::NewTag(_, _) => {}
+    }
+}

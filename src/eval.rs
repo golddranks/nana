@@ -1,5 +1,13 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::ast::*;
 use crate::value::*;
+
+static CLOSURE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn next_closure_id() -> u64 {
+    CLOSURE_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
 
 pub fn eval(expr: &Expr, env: &Env, input: &Value) -> Result<Value, String> {
     match expr.as_ref() {
@@ -34,12 +42,14 @@ pub fn eval(expr: &Expr, env: &Env, input: &Value) -> Result<Value, String> {
 
         // ── Block (lambda) ──
         ExprKind::Block(body) => Ok(Value::Closure {
+            id: next_closure_id(),
             body: body.clone(),
             env: env.clone(),
         }),
 
         // ── Branching block (pattern matching lambda) ──
         ExprKind::BranchBlock(arms) => Ok(Value::BranchClosure {
+            id: next_closure_id(),
             arms: arms.clone(),
             env: env.clone(),
         }),
@@ -215,7 +225,10 @@ pub fn eval(expr: &Expr, env: &Env, input: &Value) -> Result<Value, String> {
         }
 
         // ── Import ──
-        ExprKind::Import(name) => Err(format!("import not available: {}", name)),
+        ExprKind::Import(name) => env
+            .get_module(name)
+            .cloned()
+            .ok_or_else(|| format!("module not provided: {}", name)),
 
         // ── Group (transparent) ──
         ExprKind::Group(inner) => eval(inner, env, input),
@@ -225,10 +238,10 @@ pub fn eval(expr: &Expr, env: &Env, input: &Value) -> Result<Value, String> {
 /// Apply a function value to an argument.
 pub fn apply(func: &Value, arg: Value) -> Result<Value, String> {
     match func {
-        Value::Closure { body, env } => {
+        Value::Closure { body, env, .. } => {
             eval(body, env, &arg)
         }
-        Value::BranchClosure { arms, env } => {
+        Value::BranchClosure { arms, env, .. } => {
             eval_branch(&arg, arms, env, &arg)
         }
         Value::TagConstructor { id, name } => Ok(Value::Tagged {
@@ -752,6 +765,35 @@ fn eval_string_method(s: &str, method: &str, arg: Value) -> Result<Value, String
     match method {
         "byte_len" => Ok(Value::Int(s.len() as i64)),
         "char_len" => Ok(Value::Int(s.chars().count() as i64)),
+        "byte_get" => {
+            let idx = match arg {
+                Value::Int(i) => i,
+                _ => return Err("byte_get: expected integer index".to_string()),
+            };
+            if idx < 0 {
+                return Err(format!("byte_get: negative index: {}", idx));
+            }
+            let idx = idx as usize;
+            s.as_bytes()
+                .get(idx)
+                .copied()
+                .map(Value::Byte)
+                .ok_or_else(|| format!("byte_get: index {} out of bounds (byte_len {})", idx, s.len()))
+        }
+        "char_get" => {
+            let idx = match arg {
+                Value::Int(i) => i,
+                _ => return Err("char_get: expected integer index".to_string()),
+            };
+            if idx < 0 {
+                return Err(format!("char_get: negative index: {}", idx));
+            }
+            let idx = idx as usize;
+            s.chars()
+                .nth(idx)
+                .map(Value::Char)
+                .ok_or_else(|| format!("char_get: index {} out of bounds (char_len {})", idx, s.chars().count()))
+        }
         "as_bytes" => {
             let bytes = s.bytes().map(Value::Byte).collect();
             Ok(Value::Array(bytes))
@@ -905,6 +947,10 @@ fn eval_binop(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value, String> {
     }
 }
 
+fn is_function(v: &Value) -> bool {
+    matches!(v, Value::Closure { .. } | Value::BranchClosure { .. } | Value::BuiltinFn(_))
+}
+
 fn eval_compare(op: CmpOp, lhs: &Value, rhs: &Value) -> Result<Value, String> {
     match (lhs, rhs) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
@@ -1007,10 +1053,13 @@ fn eval_compare(op: CmpOp, lhs: &Value, rhs: &Value) -> Result<Value, String> {
                 _ => Err("cannot order structs".to_string()),
             }
         }
-        _ => Err(format!(
-            "cannot compare values: {} and {}",
-            lhs, rhs
-        )),
+        _ => {
+            if is_function(lhs) || is_function(rhs) {
+                Err("cannot compare functions with ==; use ref_eq()".to_string())
+            } else {
+                Err(format!("cannot compare values: {} and {}", lhs, rhs))
+            }
+        }
     }
 }
 
@@ -1178,6 +1227,54 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             }
             _ => Err("zip: expected (array, array)".to_string()),
         },
+        "byte" => match arg {
+            Value::Int(n) => {
+                if n < 0 || n > 255 {
+                    Err(format!("byte: value {} out of range (0..255)", n))
+                } else {
+                    Ok(Value::Byte(n as u8))
+                }
+            }
+            _ => Err("byte: expected int".to_string()),
+        },
+        "int" => match arg {
+            Value::Int(n) => Ok(Value::Int(n)),
+            Value::Float(f) => Ok(Value::Int(f as i64)),
+            Value::Byte(b) => Ok(Value::Int(b as i64)),
+            Value::Char(c) => Ok(Value::Int(c as u32 as i64)),
+            Value::Bool(b) => Ok(Value::Int(if b { 1 } else { 0 })),
+            _ => Err(format!("int: cannot convert {} to int", arg)),
+        },
+        "float" => match arg {
+            Value::Float(f) => Ok(Value::Float(f)),
+            Value::Int(n) => Ok(Value::Float(n as f64)),
+            _ => Err(format!("float: cannot convert {} to float", arg)),
+        },
+        "char" => match arg {
+            Value::Int(n) => {
+                if n < 0 {
+                    return Err(format!("char: negative value {}", n));
+                }
+                let n = n as u32;
+                char::from_u32(n)
+                    .map(Value::Char)
+                    .ok_or_else(|| format!("char: value {} is not a valid Unicode scalar value", n))
+            }
+            Value::Byte(b) => Ok(Value::Char(b as char)),
+            _ => Err(format!("char: cannot convert {} to char", arg)),
+        },
+        "ref_eq" => match arg {
+            Value::Struct(fields) if fields.len() == 2 => {
+                Ok(Value::Bool(fields[0].1 == fields[1].1))
+            }
+            _ => Err("ref_eq: expected (value, value)".to_string()),
+        },
+        "val_eq" => match arg {
+            Value::Struct(fields) if fields.len() == 2 => {
+                Ok(Value::Bool(fields[0].1.val_eq(&fields[1].1)))
+            }
+            _ => Err("val_eq: expected (value, value)".to_string()),
+        },
         _ => Err(format!("unknown builtin function: {}", name)),
     }
 }
@@ -1240,7 +1337,18 @@ fn has_toplevel_let(expr: &Expr) -> bool {
 /// Create the default environment with builtins.
 pub fn default_env() -> Env {
     let mut env = Env::new();
-    for name in &["not", "and", "or", "len", "print", "map", "filter", "fold", "zip"] {
+    for name in &["not", "and", "or", "len", "print", "map", "filter", "fold", "zip",
+                   "byte", "int", "float", "char", "ref_eq", "val_eq"] {
+        env = env.bind(name.to_string(), Value::BuiltinFn(name.to_string()));
+    }
+    env
+}
+
+/// Create the default environment with builtins and provided modules.
+pub fn default_env_with_modules(modules: std::collections::HashMap<String, Value>) -> Env {
+    let mut env = Env::with_modules(modules);
+    for name in &["not", "and", "or", "len", "print", "map", "filter", "fold", "zip",
+                   "byte", "int", "float", "char", "ref_eq", "val_eq"] {
         env = env.bind(name.to_string(), Value::BuiltinFn(name.to_string()));
     }
     env

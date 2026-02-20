@@ -72,7 +72,7 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | Array concatenation `+` | Implemented | |
 | Unary `-` | Implemented | |
 | Comparisons `== != < > <= >=` | Implemented | Primitives, arrays, structs, tags |
-| Function comparison rejection | Not implemented | Generic type mismatch error, not a specific message |
+| Function comparison rejection | Implemented | `==`/`!=` on functions gives specific error: "use ref_eq()" |
 | `and`, `or`, `not` as functions | Implemented | Builtins, not operators |
 | Branching blocks `{ pattern -> expr, ... }` | Implemented | Unified conditional / pattern matching form |
 | `if` guards in branch arms | Implemented | `pattern if guard -> expr` |
@@ -84,8 +84,8 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | Pipe prepend `value >> f(x)` = `f(value, x)` | Implemented | |
 | `;` sequencing | Implemented | |
 | Semicolons rejected in array/struct/call-arg | Implemented | `[1; 2]`, `(1, 2; 3)`, `f(1; 2)` are errors |
-| `import(name)` | Parsed only | Always errors at runtime: "import not available" |
-| `use(name)` | Parsed only | Desugars to import, which errors |
+| `import(name)` | Implemented | Identifier-only syntax; resolved via host-provided modules |
+| `use(name)` | Implemented | Desugars to `import(name) >> let(name)` |
 
 ---
 
@@ -136,8 +136,10 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | `arr.filter{ f }` | Implemented | |
 | `arr.fold(init, f)` | Implemented | Passes `(acc=, elem=)` struct to f |
 | `arr.zip(other)` | Implemented | |
-| `str.len()` | Implemented | Byte length |
-| UFCS (uniform function call syntax) | Not implemented | Spec says `>>` and `.method` are distinct |
+| `str.byte_len()` | Implemented | Returns byte length |
+| `str.char_len()` | Implemented | Returns Unicode codepoint count |
+| `str.byte_get(idx)` | Implemented | Returns `Byte` at byte offset |
+| `str.char_get(idx)` | Implemented | Returns `Char` at codepoint offset |
 
 ---
 
@@ -170,13 +172,15 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | `filter` | Implemented | Builtin function and array method |
 | `fold` | Implemented | Builtin function and array method |
 | `zip` | Implemented | Builtin function and array method |
-| `len` | Implemented | Builtin function and array/string method |
+| `len` | Implemented | Builtin function and array method |
 | `not` | Implemented | `not(bool)` |
 | `and` | Implemented | `and(bool, bool)` |
 | `or` | Implemented | `or(bool, bool)` |
 | `print` | Implemented | Side-effecting, returns `()` |
 | `get` | Implemented | Array method only (not a builtin function) |
 | `slice` | Implemented | Array method only (not a builtin function) |
+| `byte_len` | Implemented | String method; returns byte length |
+| `char_len` | Implemented | String method; returns codepoint count |
 | `as_bytes` | Implemented | String method; returns byte array |
 | `chars` | Implemented | String method; returns array of chars |
 | `split` | Implemented | String method; splits by delimiter |
@@ -186,9 +190,11 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | `ends_with` | Implemented | String method; checks suffix |
 | `replace` | Implemented | String method; takes `(pattern, replacement)` struct |
 | `str.slice(range)` | Implemented | String method; byte-based slicing |
-| `str.get(idx)` | Implemented | String method; returns single-char string |
-| Struct/tuple helpers (access, merge) | Not implemented | Only field access via `.` syntax |
-| Sum/tag combinators (`map_tag`, `bind_tag`) | Not implemented | |
+| `byte(n)` | Implemented | Builtin; converts int (0..255) to byte |
+| `int(x)` | Implemented | Builtin; converts float/byte/char/bool to int |
+| `float(x)` | Implemented | Builtin; converts int to float |
+| `char(n)` | Implemented | Builtin; converts int/byte to char (Unicode scalar validation) |
+| `ref_eq(a, b)` | Implemented | Builtin; structural equality for any values including functions |
 
 ---
 
@@ -196,10 +202,12 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 
 | Spec Feature | Status | Notes |
 |---|---|---|
-| `import(name)` syntax | Parsed only | Always errors: "import not available" |
-| `use(name)` sugar | Parsed only | Desugars correctly, but import always fails |
-| Module loading / resolution | Not implemented | No file system integration |
-| Same module yields same tag IDs | Not implemented | No module system |
+| `import(name)` syntax | Implemented | Identifier-only; string syntax is a parse error |
+| `use(name)` sugar | Implemented | Desugars to `import(name) >> let(name)` |
+| Static import analysis | Implemented | `nana::imports()` extracts module names from AST |
+| Host-provided modules | Implemented | `run_with_modules()` accepts `&[(&str, Value)]`; `Env` stores modules as `Rc<HashMap>` |
+| Modules as structs | Implemented | Modules are regular `Value`s (typically structs with fields) |
+| Same module yields same tag IDs | Implemented | Host provides same value; `import(x)` twice returns the same value |
 
 ---
 
@@ -249,13 +257,8 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 **Large / Architectural:**
 1. Static type system (type inference, occurs check, type errors at compile time)
 2. Resource types (clone restriction, borrow semantics)
-3. Module/import system (file resolution, module loading)
+3. Numeric literal coercion (byte from plain `4`, auto-widening) — requires type system
 4. WebAssembly compilation backend
 
-**Medium:**
-5. Numeric literal coercion (byte from plain `4`, auto-widening)
-
 **Small / Stdlib:**
-6. Struct/tuple helpers (`map_tag`, `bind_tag`, merge, etc.)
-7. Other bit-size numeric constructors
-8. Function comparison specific error message
+5. Other bit-size numeric constructors

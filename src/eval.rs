@@ -8,6 +8,19 @@ pub fn eval(expr: &Expr, env: &Env, input: &Value) -> Result<Value, String> {
         ExprKind::Float(f) => Ok(Value::Float(*f)),
         ExprKind::Bool(b) => Ok(Value::Bool(*b)),
         ExprKind::Str(s) => Ok(Value::Str(s.clone())),
+        ExprKind::StringInterp(parts) => {
+            let mut result = String::new();
+            for part in parts {
+                match part {
+                    StringInterpPart::Literal(s) => result.push_str(s),
+                    StringInterpPart::Expr(expr) => {
+                        let val = eval(expr, env, input)?;
+                        result.push_str(&val.print_string());
+                    }
+                }
+            }
+            Ok(Value::Str(result))
+        }
         ExprKind::Char(c) => Ok(Value::Char(*c)),
         ExprKind::Byte(b) => Ok(Value::Byte(*b)),
         ExprKind::Unit => Ok(Value::Unit),
@@ -552,10 +565,13 @@ fn bind_array_pattern(
     value: &Value,
     env: &Env,
 ) -> Result<Env, String> {
+    // For strings, convert to an array of single-character strings for destructuring
+    let string_parts: Vec<Value>;
     let elems = match value {
         Value::Array(e) => e,
-        Value::Str(_) => {
-            return Err("string destructuring not yet implemented".to_string());
+        Value::Str(s) => {
+            string_parts = s.chars().map(|c| Value::Str(c.to_string())).collect();
+            &string_parts
         }
         _ => return Err("cannot destructure non-array value with let[...]".to_string()),
     };
@@ -586,7 +602,16 @@ fn bind_array_pattern(
                 }
                 let rest = elems[pos..rest_end].to_vec();
                 if let Some(name) = name {
-                    new_env = new_env.bind(name.clone(), Value::Array(rest));
+                    let rest_val = if matches!(value, Value::Str(_)) {
+                        let s: String = rest.iter().map(|v| match v {
+                            Value::Str(s) => s.as_str(),
+                            _ => "",
+                        }).collect();
+                        Value::Str(s)
+                    } else {
+                        Value::Array(rest)
+                    };
+                    new_env = new_env.bind(name.clone(), rest_val);
                 }
                 pos = rest_end;
             }
@@ -717,9 +742,95 @@ fn eval_array_method(elems: &[Value], method: &str, arg: Value) -> Result<Value,
     }
 }
 
-fn eval_string_method(s: &str, method: &str, _arg: Value) -> Result<Value, String> {
+fn eval_string_method(s: &str, method: &str, arg: Value) -> Result<Value, String> {
     match method {
         "len" => Ok(Value::Int(s.len() as i64)),
+        "as_bytes" => {
+            let bytes = s.bytes().map(Value::Byte).collect();
+            Ok(Value::Array(bytes))
+        }
+        "chars" => {
+            let chars = s.chars().map(Value::Char).collect();
+            Ok(Value::Array(chars))
+        }
+        "split" => {
+            let delimiter = match arg {
+                Value::Str(d) => d,
+                _ => return Err("split: expected string delimiter".to_string()),
+            };
+            let parts: Vec<Value> = s.split(&delimiter).map(|p| Value::Str(p.to_string())).collect();
+            Ok(Value::Array(parts))
+        }
+        "trim" => Ok(Value::Str(s.trim().to_string())),
+        "contains" => {
+            let needle = match arg {
+                Value::Str(n) => n,
+                Value::Char(c) => c.to_string(),
+                _ => return Err("contains: expected string or char".to_string()),
+            };
+            Ok(Value::Bool(s.contains(&needle)))
+        }
+        "slice" => {
+            // arg should be a range struct (start=n, end=m) — byte indices
+            let (start, end) = match arg {
+                Value::Struct(fields) => {
+                    let s = fields.iter().find(|(l, _)| l == "start")
+                        .map(|(_, v)| v.clone())
+                        .ok_or("slice: expected range with 'start' field")?;
+                    let e = fields.iter().find(|(l, _)| l == "end")
+                        .map(|(_, v)| v.clone())
+                        .ok_or("slice: expected range with 'end' field")?;
+                    match (s, e) {
+                        (Value::Int(s), Value::Int(e)) => (s, e),
+                        _ => return Err("slice: start and end must be integers".to_string()),
+                    }
+                }
+                _ => return Err("slice: expected a range argument".to_string()),
+            };
+            if start < 0 || end < 0 {
+                return Err("slice: negative index".to_string());
+            }
+            let start = start as usize;
+            let end = end as usize;
+            if start > s.len() || end > s.len() || start > end {
+                return Err(format!("slice: indices {}..{} out of bounds (len {})", start, end, s.len()));
+            }
+            if !s.is_char_boundary(start) || !s.is_char_boundary(end) {
+                return Err("slice: index is not on a UTF-8 character boundary".to_string());
+            }
+            Ok(Value::Str(s[start..end].to_string()))
+        }
+        "starts_with" => {
+            let prefix = match arg {
+                Value::Str(p) => p,
+                _ => return Err("starts_with: expected string".to_string()),
+            };
+            Ok(Value::Bool(s.starts_with(&prefix)))
+        }
+        "ends_with" => {
+            let suffix = match arg {
+                Value::Str(p) => p,
+                _ => return Err("ends_with: expected string".to_string()),
+            };
+            Ok(Value::Bool(s.ends_with(&suffix)))
+        }
+        "replace" => {
+            // arg should be (pattern, replacement)
+            match arg {
+                Value::Struct(fields) if fields.len() == 2 => {
+                    let pattern = match &fields[0].1 {
+                        Value::Str(p) => p.clone(),
+                        _ => return Err("replace: first argument must be a string".to_string()),
+                    };
+                    let replacement = match &fields[1].1 {
+                        Value::Str(r) => r.clone(),
+                        _ => return Err("replace: second argument must be a string".to_string()),
+                    };
+                    Ok(Value::Str(s.replace(&pattern, &replacement)))
+                }
+                _ => Err("replace: expected (pattern, replacement)".to_string()),
+            }
+        }
         _ => Err(format!("no method '{}' on string", method)),
     }
 }
@@ -979,7 +1090,7 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             _ => Err("len: expected array or string".to_string()),
         },
         "print" => {
-            println!("{}", arg);
+            println!("{}", arg.print_string());
             Ok(Value::Unit)
         }
         "map" => match arg {

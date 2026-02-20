@@ -1,4 +1,10 @@
 #[derive(Debug, Clone, PartialEq)]
+pub enum StringPart {
+    Literal(String),
+    Expr(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Literals
     Int(i64),
@@ -6,6 +12,9 @@ pub enum Token {
     Str(String),
     Char(char),
     Byte(u8),
+
+    // Interpolated string: "hello, {name}!"
+    InterpStr(Vec<StringPart>),
 
     // Delimiters
     LParen,
@@ -254,6 +263,7 @@ impl Lexer {
                     Ok(Token::Underscore)
                 }
             }
+            '\\' if self.peek_at(1) == Some('\\') => self.lex_multiline_string(),
             c if c.is_alphabetic() => self.lex_ident_or_keyword(),
             _ => Err(format!("unexpected character: '{}'", ch)),
         }
@@ -261,30 +271,156 @@ impl Lexer {
 
     fn lex_string(&mut self) -> Result<Token, String> {
         self.advance(); // consume opening "
-        let mut s = String::new();
+        let mut current = String::new();
+        let mut parts: Vec<StringPart> = Vec::new();
+        let mut has_interp = false;
         loop {
             match self.advance() {
                 None => return Err("unterminated string literal".to_string()),
-                Some('"') => return Ok(Token::Str(s)),
+                Some('"') => {
+                    if has_interp {
+                        if !current.is_empty() {
+                            parts.push(StringPart::Literal(current));
+                        }
+                        return Ok(Token::InterpStr(parts));
+                    } else {
+                        return Ok(Token::Str(current));
+                    }
+                }
+                Some('{') => {
+                    // Start of interpolated expression
+                    has_interp = true;
+                    if !current.is_empty() {
+                        parts.push(StringPart::Literal(current));
+                        current = String::new();
+                    }
+                    // Collect expression source until matching '}'
+                    let expr_src = self.lex_interp_expr()?;
+                    parts.push(StringPart::Expr(expr_src));
+                }
                 Some('\\') => match self.advance() {
-                    Some('n') => s.push('\n'),
-                    Some('t') => s.push('\t'),
-                    Some('r') => s.push('\r'),
-                    Some('\\') => s.push('\\'),
-                    Some('"') => s.push('"'),
-                    Some('0') => s.push('\0'),
-                    Some('{') => s.push('{'),
-                    Some('}') => s.push('}'),
+                    Some('n') => current.push('\n'),
+                    Some('t') => current.push('\t'),
+                    Some('r') => current.push('\r'),
+                    Some('\\') => current.push('\\'),
+                    Some('"') => current.push('"'),
+                    Some('0') => current.push('\0'),
+                    Some('{') => current.push('{'),
+                    Some('}') => current.push('}'),
                     Some('x') => {
                         let b = self.lex_hex_byte()?;
-                        s.push(b as char);
+                        current.push(b as char);
                     }
                     Some(c) => return Err(format!("unknown escape sequence: \\{}", c)),
                     None => return Err("unterminated escape in string".to_string()),
                 },
-                Some(c) => s.push(c),
+                Some(c) => current.push(c),
             }
         }
+    }
+
+    /// Collect characters for an interpolated expression inside `{...}` in a string.
+    /// Handles nested braces, strings, and char literals so that `}` inside those
+    /// doesn't prematurely end the expression.
+    fn lex_interp_expr(&mut self) -> Result<String, String> {
+        let mut expr = String::new();
+        let mut depth = 1; // we already consumed the opening '{'
+        loop {
+            match self.advance() {
+                None => return Err("unterminated interpolation in string".to_string()),
+                Some('{') => {
+                    depth += 1;
+                    expr.push('{');
+                }
+                Some('}') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(expr);
+                    }
+                    expr.push('}');
+                }
+                Some('"') => {
+                    // Nested string literal — consume until closing "
+                    expr.push('"');
+                    loop {
+                        match self.advance() {
+                            None => return Err("unterminated string inside interpolation".to_string()),
+                            Some('\\') => {
+                                expr.push('\\');
+                                if let Some(c) = self.advance() {
+                                    expr.push(c);
+                                }
+                            }
+                            Some('"') => {
+                                expr.push('"');
+                                break;
+                            }
+                            Some(c) => expr.push(c),
+                        }
+                    }
+                }
+                Some('\'') => {
+                    // Char literal — consume until closing '
+                    expr.push('\'');
+                    match self.advance() {
+                        None => return Err("unterminated char inside interpolation".to_string()),
+                        Some('\\') => {
+                            expr.push('\\');
+                            if let Some(c) = self.advance() {
+                                expr.push(c);
+                            }
+                        }
+                        Some(c) => expr.push(c),
+                    }
+                    match self.advance() {
+                        Some('\'') => expr.push('\''),
+                        _ => return Err("expected closing ' in char literal inside interpolation".to_string()),
+                    }
+                }
+                Some('#') => {
+                    // Comment inside interpolation — consume until newline
+                    expr.push('#');
+                    while self.pos < self.input.len() && self.input[self.pos] != '\n' {
+                        expr.push(self.advance().unwrap());
+                    }
+                }
+                Some(c) => expr.push(c),
+            }
+        }
+    }
+
+    /// Lex a Zig-style multi-line string: each line starts with `\\`.
+    /// Lines are joined with newlines. Leading whitespace before `\\` on
+    /// continuation lines is stripped.
+    fn lex_multiline_string(&mut self) -> Result<Token, String> {
+        let mut s = String::new();
+        loop {
+            // Consume the `\\` prefix
+            if self.peek() == Some('\\') && self.peek_at(1) == Some('\\') {
+                self.advance(); // first '\'
+                self.advance(); // second '\'
+            } else {
+                break;
+            }
+            // Consume the rest of the line (until newline or EOF)
+            while self.pos < self.input.len() && self.input[self.pos] != '\n' {
+                s.push(self.advance().unwrap());
+            }
+            // Consume the newline if present
+            if self.peek() == Some('\n') {
+                self.advance();
+                s.push('\n');
+            }
+            // Skip whitespace on the next line to find the next `\\`
+            while self.peek().is_some_and(|c| c == ' ' || c == '\t') {
+                self.advance();
+            }
+        }
+        // Remove trailing newline (the last line's newline is an artifact)
+        if s.ends_with('\n') {
+            s.pop();
+        }
+        Ok(Token::Str(s))
     }
 
     fn lex_char(&mut self) -> Result<Token, String> {
@@ -368,6 +504,27 @@ impl Lexer {
             }
             let val =
                 i64::from_str_radix(&hex, 16).map_err(|e| format!("invalid hex literal: {}", e))?;
+            return Ok(Token::Int(val));
+        }
+
+        // Check for binary: 0b...
+        if self.peek() == Some('0') && self.peek_at(1) == Some('b') {
+            // Make sure it's not b' (byte literal prefix — but that's handled separately
+            // in next_token before lex_number, so 0b here is always binary)
+            self.advance(); // 0
+            self.advance(); // b
+            let mut bin = String::new();
+            while self.peek().is_some_and(|c| c == '0' || c == '1' || c == '_') {
+                let c = self.advance().unwrap();
+                if c != '_' {
+                    bin.push(c);
+                }
+            }
+            if bin.is_empty() {
+                return Err("expected binary digits after 0b".to_string());
+            }
+            let val =
+                i64::from_str_radix(&bin, 2).map_err(|e| format!("invalid binary literal: {}", e))?;
             return Ok(Token::Int(val));
         }
 

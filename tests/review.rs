@@ -4,6 +4,36 @@
 //! Tests that currently fail due to known bugs are marked #[ignore]
 //! with a comment referencing the bug. Remove #[ignore] once fixed.
 
+use nana::value::Value;
+
+const T: Value = Value::Bool(true);
+const F: Value = Value::Bool(false);
+const U: Value = Value::Unit;
+fn s(v: &str) -> Value {
+    Value::Str(v.to_string())
+}
+fn int(v: i64) -> Value {
+    Value::Int(v)
+}
+fn float(v: f64) -> Value {
+    Value::Float(v)
+}
+fn ch(v: char) -> Value {
+    Value::Char(v)
+}
+fn byte(v: u8) -> Value {
+    Value::Byte(v)
+}
+
+fn assert_val(input: &str, expected: Value) {
+    let result = nana::run(input);
+    let val = result.unwrap_or_else(|e| panic!("program failed.\n  input: {input}\n  error: {e}"));
+    assert_eq!(
+        val, expected,
+        "\n  input: {input}\n  expected: {expected}\n  got: {val}"
+    );
+}
+
 fn assert_output(input: &str, expected: &str) {
     let result = nana::run(input);
     let val = result.unwrap_or_else(|e| panic!("program failed.\n  input: {input}\n  error: {e}"));
@@ -11,6 +41,37 @@ fn assert_output(input: &str, expected: &str) {
     assert_eq!(
         output, expected,
         "\n  input: {input}\n  expected: {expected}\n  got: {output}"
+    );
+}
+
+fn assert_warnings(input: &str, expected_warnings: &[&str]) {
+    let result = nana::run_with_warnings(input);
+    let (_val, warnings) =
+        result.unwrap_or_else(|e| panic!("program failed.\n  input: {input}\n  error: {e}"));
+    assert_eq!(
+        warnings.len(),
+        expected_warnings.len(),
+        "\n  input: {input}\n  expected {} warnings but got {}: {:?}",
+        expected_warnings.len(),
+        warnings.len(),
+        warnings
+    );
+    for (w, expected) in warnings.iter().zip(expected_warnings.iter()) {
+        assert!(
+            w.contains(expected),
+            "\n  input: {input}\n  expected warning containing: {expected}\n  got: {w}"
+        );
+    }
+}
+
+fn assert_no_warnings(input: &str) {
+    let result = nana::run_with_warnings(input);
+    let (_val, warnings) =
+        result.unwrap_or_else(|e| panic!("program failed.\n  input: {input}\n  error: {e}"));
+    assert!(
+        warnings.is_empty(),
+        "\n  input: {input}\n  expected no warnings but got: {:?}",
+        warnings
     );
 }
 
@@ -26,8 +87,7 @@ fn assert_error(input: &str, expected_fragment: &str) {
 }
 
 fn assert_parses(input: &str) {
-    nana::parse(input)
-        .unwrap_or_else(|e| panic!("parse failed.\n  input: {input}\n  error: {e}"));
+    nana::parse(input).unwrap_or_else(|e| panic!("parse failed.\n  input: {input}\n  error: {e}"));
 }
 
 fn assert_parse_error(input: &str, expected_fragment: &str) {
@@ -47,7 +107,7 @@ fn assert_parse_error(input: &str, expected_fragment: &str) {
 
 #[test]
 fn baseline_complete_example() {
-    assert_output(
+    assert_val(
         r#"tag(Ok);
 tag(Err);
 
@@ -62,38 +122,38 @@ let safe_div = { in >> let(a, b);
   Ok(result) -> result,
   Err(_) -> 0
 }"#,
-        "333",
+        int(333),
     );
 }
 
 #[test]
 fn baseline_pipe_into_block() {
-    assert_output("3 >> { in + 1 }", "4");
+    assert_val("3 >> { in + 1 }", int(4));
 }
 
 #[test]
 fn baseline_block_sugar_plus() {
-    assert_output("3 >> { + 1 }", "4");
+    assert_val("3 >> { + 1 }", int(4));
 }
 
 #[test]
 fn baseline_block_sugar_mul() {
-    assert_output("3 >> { * 2 }", "6");
+    assert_val("3 >> { * 2 }", int(6));
 }
 
 #[test]
 fn baseline_block_sugar_div() {
-    assert_output("10 >> { / 2 }", "5");
+    assert_val("10 >> { / 2 }", int(5));
 }
 
 #[test]
 fn baseline_bind_lambda_apply() {
-    assert_output("{ in * 2 } >> let(f); 3 >> f", "6");
+    assert_val("{ in * 2 } >> let(f); 3 >> f", int(6));
 }
 
 #[test]
 fn baseline_let_binding() {
-    assert_output("1 >> let(x); x + 2", "3");
+    assert_val("1 >> let(x); x + 2", int(3));
 }
 
 #[test]
@@ -103,50 +163,47 @@ fn baseline_array_literal() {
 
 #[test]
 fn baseline_struct_field_access() {
-    assert_output("(a=1, b=2).a", "1");
+    assert_val("(a=1, b=2).a", int(1));
 }
 
 #[test]
 fn baseline_nested_blocks() {
-    assert_output("3 >> { in >> let(outer); 4 >> { outer + in } }", "7");
+    assert_val("3 >> { in >> let(outer); 4 >> { outer + in } }", int(7));
 }
 
 #[test]
 fn baseline_pipe_chain() {
-    assert_output("1 >> { in + 1 } >> { in * 3 }", "6");
+    assert_val("1 >> { in + 1 } >> { in * 3 }", int(6));
 }
 
 #[test]
 fn baseline_let_passthrough() {
-    assert_output("5 >> let(x) >> { in + 1 }", "6");
+    assert_val("5 >> let(x) >> { in + 1 }", int(6));
 }
 
 #[test]
 fn baseline_tag_and_branch() {
-    assert_output(
-        "tag(Foo); 42 >> Foo >> { Foo(x) -> x + 1 }",
-        "43",
-    );
+    assert_val("tag(Foo); 42 >> Foo >> { Foo(x) -> x + 1 }", int(43));
 }
 
 #[test]
 fn baseline_boolean_builtins() {
-    assert_output("and(true, false)", "false");
-    assert_output("or(true, false)", "true");
-    assert_output("not(true)", "false");
+    assert_val("and(true, false)", F);
+    assert_val("or(true, false)", T);
+    assert_val("not(true)", F);
 }
 
 #[test]
 fn baseline_array_builtins() {
-    assert_output("[1, 2, 3] >> len", "3");
+    assert_val("[1, 2, 3] >> len", int(3));
     assert_output("map([1, 2, 3], { in * 2 })", "[2, 4, 6]");
     assert_output("filter([1, 2, 3, 4], { in > 2 })", "[3, 4]");
-    assert_output("fold([1, 2, 3], 0, { in.acc + in.elem })", "6");
+    assert_val("fold([1, 2, 3], 0, { in.acc + in.elem })", int(6));
 }
 
 #[test]
 fn baseline_string_concat() {
-    assert_output(r#""hello" + " " + "world""#, "hello world");
+    assert_val(r#""hello" + " " + "world""#, s("hello world"));
 }
 
 #[test]
@@ -156,17 +213,17 @@ fn baseline_array_concat() {
 
 #[test]
 fn baseline_comparison_operators() {
-    assert_output("1 == 1", "true");
-    assert_output("1 != 2", "true");
-    assert_output("1 < 2", "true");
-    assert_output("2 > 1", "true");
-    assert_output("1 <= 1", "true");
-    assert_output("1 >= 1", "true");
+    assert_val("1 == 1", T);
+    assert_val("1 != 2", T);
+    assert_val("1 < 2", T);
+    assert_val("2 > 1", T);
+    assert_val("1 <= 1", T);
+    assert_val("1 >= 1", T);
 }
 
 #[test]
 fn baseline_unit() {
-    assert_output("()", "()");
+    assert_val("()", U);
 }
 
 #[test]
@@ -176,8 +233,8 @@ fn baseline_tuple() {
 
 #[test]
 fn baseline_branching_block_bool() {
-    assert_output("true >> { true -> 1, false -> 2 }", "1");
-    assert_output("false >> { true -> 1, false -> 2 }", "2");
+    assert_val("true >> { true -> 1, false -> 2 }", int(1));
+    assert_val("false >> { true -> 1, false -> 2 }", int(2));
 }
 
 #[test]
@@ -187,87 +244,87 @@ fn baseline_division_by_zero() {
 
 #[test]
 fn baseline_struct_destructuring() {
-    assert_output("(1, 2) >> let(a, b); a + b", "3");
+    assert_val("(1, 2) >> let(a, b); a + b", int(3));
 }
 
 #[test]
 fn baseline_array_destructuring() {
-    assert_output("[1, 2, 3] >> let[a, b, c]; a + b + c", "6");
+    assert_val("[1, 2, 3] >> let[a, b, c]; a + b + c", int(6));
 }
 
 #[test]
 fn baseline_array_rest_pattern() {
-    assert_output("[1, 2, 3, 4] >> let[first, ...rest]; first", "1");
+    assert_val("[1, 2, 3, 4] >> let[first, ...rest]; first", int(1));
     assert_output("[1, 2, 3, 4] >> let[first, ...rest]; rest", "[2, 3, 4]");
 }
 
 #[test]
 fn baseline_branch_with_guard() {
-    assert_output(
+    assert_val(
         "tag(N); 5 >> N >> { N(x) if x > 3 -> x, N(x) -> 0 }",
-        "5",
+        int(5),
     );
-    assert_output(
+    assert_val(
         "tag(N); 1 >> N >> { N(x) if x > 3 -> x, N(x) -> 0 }",
-        "0",
+        int(0),
     );
 }
 
 #[test]
 fn baseline_unary_minus() {
-    assert_output("-5", "-5");
-    assert_output("3 + -2", "1");
+    assert_val("-5", int(-5));
+    assert_val("3 + -2", int(1));
 }
 
 #[test]
 fn baseline_float_arithmetic() {
-    assert_output("1.5 + 2.5", "4.0");
-    assert_output("3.0 * 2.0", "6.0");
+    assert_val("1.5 + 2.5", float(4.0));
+    assert_val("3.0 * 2.0", float(6.0));
 }
 
 #[test]
 fn baseline_char_and_byte_literals() {
-    assert_output("'a'", "'a'");
+    assert_val("'a'", ch('a'));
 }
 
 #[test]
 fn baseline_string_escape_sequences() {
-    assert_output(r#""\n" >> len"#, "1");
-    assert_output(r#""\t" >> len"#, "1");
-    assert_output(r#""\\" >> len"#, "1");
-    assert_output(r#""hello\nworld" >> len"#, "11");
+    assert_val(r#""\n" >> len"#, int(1));
+    assert_val(r#""\t" >> len"#, int(1));
+    assert_val(r#""\\" >> len"#, int(1));
+    assert_val(r#""hello\nworld" >> len"#, int(11));
 }
 
 #[test]
 fn baseline_hex_integer() {
-    assert_output("0xFF", "255");
+    assert_val("0xFF", int(255));
 }
 
 #[test]
 fn baseline_array_get_method() {
-    assert_output("[10, 20, 30].get(1)", "20");
+    assert_val("[10, 20, 30].get(1)", int(20));
 }
 
 #[test]
 fn baseline_range_sugar() {
-    assert_output("(1..3).start", "1");
-    assert_output("(1..3).end", "3");
+    assert_val("(1..3).start", int(1));
+    assert_val("(1..3).end", int(3));
 }
 
 #[test]
 fn baseline_spread_in_struct() {
-    assert_output("(a=1, b=2) >> let(s); (a=99, ...s).a", "99");
-    assert_output("(a=1, b=2) >> let(s); (a=99, ...s).b", "2");
+    assert_val("(a=1, b=2) >> let(s); (a=99, ...s).a", int(99));
+    assert_val("(a=1, b=2) >> let(s); (a=99, ...s).b", int(2));
 }
 
 #[test]
 fn baseline_block_sugar_pipe() {
-    assert_output("{ in * 2 } >> let(f); 3 >> { >> f }", "6");
+    assert_val("{ in * 2 } >> let(f); 3 >> { >> f }", int(6));
 }
 
 #[test]
 fn baseline_semicolon_sequencing() {
-    assert_output("1; 2; 3", "3");
+    assert_val("1; 2; 3", int(3));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -279,14 +336,14 @@ fn bug1_block_sugar_minus() {
     // `-` at the start of a block is ambiguous (subtraction sugar vs unary negation).
     // It is a parse error. Users must write `{ in - 3 }` or `{ (-3) }`.
     assert_parse_error("10 >> { - 3 }", "ambiguous");
-    assert_output("10 >> { in - 3 }", "7");
-    assert_output("10 >> { (-3) }", "-3");
+    assert_val("10 >> { in - 3 }", int(7));
+    assert_val("10 >> { (-3) }", int(-3));
 }
 
 #[test]
 fn bug1_block_sugar_minus_complex() {
     assert_parse_error("100 >> { - 30 - 20 }", "ambiguous");
-    assert_output("100 >> { in - 30 - 20 }", "50");
+    assert_val("100 >> { in - 30 - 20 }", int(50));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -295,22 +352,22 @@ fn bug1_block_sugar_minus_complex() {
 
 #[test]
 fn bug2_multi_pipe_let_chain() {
-    assert_output("5 >> let(x) >> { in + 1 } >> let(y); x + y", "11");
+    assert_val("5 >> let(x) >> { in + 1 } >> let(y); x + y", int(11));
 }
 
 #[test]
 fn bug2_triple_let_chain() {
-    assert_output(
+    assert_val(
         "1 >> let(a) >> { in + 1 } >> let(b) >> { in + 1 } >> let(c); a + b + c",
-        "6",
+        int(6),
     );
 }
 
 #[test]
 fn bug2_let_chain_with_tag() {
-    assert_output(
+    assert_val(
         "tag(W); 5 >> let(x) >> W >> let(wrapped); wrapped >> { W(v) -> v + x }",
-        "10",
+        int(10),
     );
 }
 
@@ -368,7 +425,7 @@ fn spec1_div_then_mul_is_syntax_error() {
 
 #[test]
 fn spec1_mul_then_div_is_valid() {
-    assert_output("12 * 2 / 3", "8");
+    assert_val("12 * 2 / 3", int(8));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -391,12 +448,12 @@ fn spec2_chained_lt_is_syntax_error() {
 
 #[test]
 fn spec3_empty_block_is_callable() {
-    assert_output("5 >> {}", "()");
+    assert_val("5 >> {}", U);
 }
 
 #[test]
 fn spec3_empty_block_as_lambda() {
-    assert_output("{} >> let(f); 5 >> f", "()");
+    assert_val("{} >> let(f); 5 >> f", U);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -407,15 +464,15 @@ fn spec3_empty_block_as_lambda() {
 #[test]
 fn spec4_branch_in_is_scrutinee() {
     // `in` inside a branching arm body refers to the branching block's input
-    assert_output("42 >> { x -> in }", "42");
+    assert_val("42 >> { x -> in }", int(42));
 }
 
 #[test]
 fn spec4_outer_in_via_rebind() {
     // To use the outer block's `in`, rebind it before the branch
-    assert_output(
+    assert_val(
         "tag(Ok); 10 >> { in >> let(outer); outer >> Ok >> { Ok(x) -> outer + x } }",
-        "20",
+        int(20),
     );
 }
 
@@ -435,33 +492,30 @@ fn minor_trailing_comma_in_array() {
 
 #[test]
 fn minor_trailing_comma_in_struct() {
-    assert_output("(a=1, b=2,).a", "1");
+    assert_val("(a=1, b=2,).a", int(1));
 }
 
 #[test]
 fn minor_deeply_nested_pipes() {
-    assert_output(
+    assert_val(
         "1 >> { in + 1 } >> { in + 1 } >> { in + 1 } >> { in + 1 } >> { in + 1 }",
-        "6",
+        int(6),
     );
 }
 
 #[test]
 fn minor_let_discard() {
-    assert_output("5 >> let(_); 42", "42");
+    assert_val("5 >> let(_); 42", int(42));
 }
 
 #[test]
 fn minor_branch_discard_binding() {
-    assert_output("tag(X); 99 >> X >> { X(_) -> 0 }", "0");
+    assert_val("tag(X); 99 >> X >> { X(_) -> 0 }", int(0));
 }
 
 #[test]
 fn minor_non_exhaustive_branch() {
-    assert_error(
-        "tag(A); tag(B); 1 >> A >> { B(x) -> x }",
-        "no arm matched",
-    );
+    assert_error("tag(A); tag(B); 1 >> A >> { B(x) -> x }", "no arm matched");
 }
 
 #[test]
@@ -533,12 +587,12 @@ fn bug8_block_sugar_range() {
 
 #[test]
 fn spec6_array_eq() {
-    assert_output("[1, 2, 3] == [1, 2, 3]", "true");
+    assert_val("[1, 2, 3] == [1, 2, 3]", T);
 }
 
 #[test]
 fn spec6_array_neq() {
-    assert_output("[1, 2] != [1, 3]", "true");
+    assert_val("[1, 2] != [1, 3]", T);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -547,12 +601,12 @@ fn spec6_array_neq() {
 
 #[test]
 fn spec7_struct_eq() {
-    assert_output("(a=1, b=2) == (a=1, b=2)", "true");
+    assert_val("(a=1, b=2) == (a=1, b=2)", T);
 }
 
 #[test]
 fn spec7_struct_neq() {
-    assert_output("(a=1, b=2) != (a=1, b=3)", "true");
+    assert_val("(a=1, b=2) != (a=1, b=3)", T);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -571,37 +625,37 @@ fn spec8_float_div_by_zero() {
 
 #[test]
 fn r2_closure_captures_env() {
-    assert_output("1 >> let(x); { in + x } >> let(f); 10 >> f", "11");
+    assert_val("1 >> let(x); { in + x } >> let(f); 10 >> f", int(11));
 }
 
 #[test]
 fn r2_shadowing() {
-    assert_output("1 >> let(x); 2 >> let(x); x", "2");
+    assert_val("1 >> let(x); 2 >> let(x); x", int(2));
 }
 
 #[test]
 fn r2_block_sugar_comparison() {
-    assert_output("5 >> { == 5 }", "true");
-    assert_output("5 >> { != 5 }", "false");
-    assert_output("5 >> { > 3 }", "true");
-    assert_output("5 >> { < 3 }", "false");
+    assert_val("5 >> { == 5 }", T);
+    assert_val("5 >> { != 5 }", F);
+    assert_val("5 >> { > 3 }", T);
+    assert_val("5 >> { < 3 }", F);
 }
 
 #[test]
 fn r2_nested_field_access() {
-    assert_output("(a=(b=42)).a.b", "42");
+    assert_val("(a=(b=42)).a.b", int(42));
 }
 
 #[test]
 fn r2_positional_field_access() {
-    assert_output("(10, 20, 30).1", "20");
+    assert_val("(10, 20, 30).1", int(20));
 }
 
 #[test]
 fn r2_struct_as_module() {
-    assert_output(
+    assert_val(
         "(add = { in >> let(a, b); a + b }) >> let(math); (3, 2) >> math.add",
-        "5",
+        int(5),
     );
 }
 
@@ -617,7 +671,7 @@ fn r2_no_payload_tag() {
 
 #[test]
 fn r2_labeled_struct_destructuring() {
-    assert_output("(a=1, b=2) >> let(a=x, b=y); x + y", "3");
+    assert_val("(a=1, b=2) >> let(a=x, b=y); x + y", int(3));
 }
 
 #[test]
@@ -632,7 +686,7 @@ fn r2_pipe_prepend_args() {
 
 #[test]
 fn r2_comments() {
-    assert_output("1 + 2 # comment", "3");
+    assert_val("1 + 2 # comment", int(3));
 }
 
 #[test]
@@ -643,7 +697,7 @@ fn r2_out_of_bounds_get() {
 #[test]
 fn r2_paren_scope_limits_let() {
     // DESIGN.md: "parentheses limit let scope; evaluates to 4"
-    assert_output("1 >> let(x); (2 >> let(y); y + 1) + x", "4");
+    assert_val("1 >> let(x); (2 >> let(y); y + 1) + x", int(4));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -753,13 +807,16 @@ fn bug13_array_discard_way_out_of_bounds() {
 #[test]
 fn bug14_labeled_destructure_pipe_through() {
     // let(a=x, ...) binds field 'a' to variable 'x'; passthrough is the original struct
-    assert_output("(a=1, b=2) >> let(a=x, ...) >> { in.a + 10 }", "11");
+    assert_val("(a=1, b=2) >> let(a=x, ...) >> { in.a + 10 }", int(11));
 }
 
 #[test]
 fn bug14_labeled_destructure_pipe_through_different_name() {
     // Passthrough is the original struct
-    assert_output("(name=42, other=0) >> let(name=val, ...) >> { in.name * 2 }", "84");
+    assert_val(
+        "(name=42, other=0) >> let(name=val, ...) >> { in.name * 2 }",
+        int(84),
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -817,15 +874,15 @@ fn bug21_spread_positional_reindex() {
 
 #[test]
 fn bug21_spread_positional_field_access() {
-    assert_output("(1, 2, 3) >> let(s); (99, ...s).0", "99");
-    assert_output("(1, 2, 3) >> let(s); (99, ...s).1", "1");
-    assert_output("(1, 2, 3) >> let(s); (99, ...s).2", "2");
-    assert_output("(1, 2, 3) >> let(s); (99, ...s).3", "3");
+    assert_val("(1, 2, 3) >> let(s); (99, ...s).0", int(99));
+    assert_val("(1, 2, 3) >> let(s); (99, ...s).1", int(1));
+    assert_val("(1, 2, 3) >> let(s); (99, ...s).2", int(2));
+    assert_val("(1, 2, 3) >> let(s); (99, ...s).3", int(3));
 }
 
 #[test]
 fn bug21_spread_positional_equality() {
-    assert_output("(10, 20) >> let(s); (99, ...s) == (99, 10, 20)", "true");
+    assert_val("(10, 20) >> let(s); (99, ...s) == (99, 10, 20)", T);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -853,17 +910,17 @@ fn bug23_array_extra_elements() {
 
 #[test]
 fn bug23_array_extra_elements_with_rest_ok() {
-    assert_output("[1, 2, 3] >> let[a, b, ...]; a + b", "3");
+    assert_val("[1, 2, 3] >> let[a, b, ...]; a + b", int(3));
 }
 
 #[test]
 fn bug23_array_extra_elements_with_discard_ok() {
-    assert_output("[1, 2, 3] >> let[a, b, _]; a + b", "3");
+    assert_val("[1, 2, 3] >> let[a, b, _]; a + b", int(3));
 }
 
 #[test]
 fn bug23_array_exact_match_ok() {
-    assert_output("[1, 2, 3] >> let[a, b, c]; a + b + c", "6");
+    assert_val("[1, 2, 3] >> let[a, b, c]; a + b + c", int(6));
 }
 
 #[test]
@@ -873,17 +930,17 @@ fn bug23_struct_extra_fields() {
 
 #[test]
 fn bug23_struct_extra_fields_with_rest_ok() {
-    assert_output("(a=1, b=2, c=3) >> let(a=x, ...rest); x", "1");
+    assert_val("(a=1, b=2, c=3) >> let(a=x, ...rest); x", int(1));
 }
 
 #[test]
 fn bug23_struct_extra_fields_with_discard_rest_ok() {
-    assert_output("(a=1, b=2, c=3) >> let(a=x, ...); x", "1");
+    assert_val("(a=1, b=2, c=3) >> let(a=x, ...); x", int(1));
 }
 
 #[test]
 fn bug23_struct_exact_match_ok() {
-    assert_output("(a=1, b=2) >> let(a=x, b=y); x + y", "3");
+    assert_val("(a=1, b=2) >> let(a=x, b=y); x + y", int(3));
 }
 
 #[test]
@@ -926,33 +983,33 @@ fn bug24_struct_struct_add_not_allowed() {
 
 #[test]
 fn bug26_named_struct_eq_order_insensitive() {
-    assert_output("(a=1, b=2) == (b=2, a=1)", "true");
+    assert_val("(a=1, b=2) == (b=2, a=1)", T);
 }
 
 #[test]
 fn bug26_named_struct_neq_order_insensitive() {
-    assert_output("(a=1, b=2) != (b=2, a=1)", "false");
+    assert_val("(a=1, b=2) != (b=2, a=1)", F);
 }
 
 #[test]
 fn bug26_named_struct_different_values() {
-    assert_output("(a=1, b=2) == (a=1, b=3)", "false");
+    assert_val("(a=1, b=2) == (a=1, b=3)", F);
 }
 
 #[test]
 fn bug26_named_struct_different_fields() {
-    assert_output("(a=1, b=2) == (a=1, c=2)", "false");
+    assert_val("(a=1, b=2) == (a=1, c=2)", F);
 }
 
 #[test]
 fn bug26_positional_struct_still_order_sensitive() {
-    assert_output("(1, 2) == (1, 2)", "true");
-    assert_output("(1, 2) == (2, 1)", "false");
+    assert_val("(1, 2) == (1, 2)", T);
+    assert_val("(1, 2) == (2, 1)", F);
 }
 
 #[test]
 fn bug26_mixed_positional_named_order_sensitive() {
-    assert_output("(1, a=2) == (1, a=2)", "true");
+    assert_val("(1, a=2) == (1, a=2)", T);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -961,22 +1018,22 @@ fn bug26_mixed_positional_named_order_sensitive() {
 
 #[test]
 fn bug27_rest_positional_reindex() {
-    assert_output("(10, 20, 30) >> let(x, ...rest); rest.0", "20");
+    assert_val("(10, 20, 30) >> let(x, ...rest); rest.0", int(20));
 }
 
 #[test]
 fn bug27_rest_positional_reindex_second() {
-    assert_output("(10, 20, 30) >> let(x, ...rest); rest.1", "30");
+    assert_val("(10, 20, 30) >> let(x, ...rest); rest.1", int(30));
 }
 
 #[test]
 fn bug27_rest_positional_reindex_equality() {
-    assert_output("(10, 20, 30) >> let(x, ...rest); rest == (20, 30)", "true");
+    assert_val("(10, 20, 30) >> let(x, ...rest); rest == (20, 30)", T);
 }
 
 #[test]
 fn bug27_rest_named_fields_unchanged() {
-    assert_output("(a=1, b=2, c=3) >> let(a=x, ...rest); rest.b", "2");
+    assert_val("(a=1, b=2, c=3) >> let(a=x, ...rest); rest.b", int(2));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1052,12 +1109,12 @@ fn bug30_div_mul_still_error() {
 
 #[test]
 fn bug30_mul_div_still_valid() {
-    assert_output("6 * 2 / 3", "4");
+    assert_val("6 * 2 / 3", int(4));
 }
 
 #[test]
 fn bug30_parenthesized_div_div_ok() {
-    assert_output("(12 / 3) / 2", "2");
+    assert_val("(12 / 3) / 2", int(2));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1066,20 +1123,17 @@ fn bug30_parenthesized_div_div_ok() {
 
 #[test]
 fn bug31_positional_destruct_on_named_struct_errors() {
-    assert_error(
-        "(a=1, b=2) >> let(x, y)",
-        "",
-    );
+    assert_error("(a=1, b=2) >> let(x, y)", "");
 }
 
 #[test]
 fn bug31_positional_destruct_on_positional_struct_ok() {
-    assert_output("(10, 20) >> let(x, y); x + y", "30");
+    assert_val("(10, 20) >> let(x, y); x + y", int(30));
 }
 
 #[test]
 fn bug31_named_destruct_on_named_struct_ok() {
-    assert_output("(a=1, b=2) >> let(a=x, b=y); x + y", "3");
+    assert_val("(a=1, b=2) >> let(a=x, b=y); x + y", int(3));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1088,17 +1142,17 @@ fn bug31_named_destruct_on_named_struct_ok() {
 
 #[test]
 fn let_sugar_basic() {
-    assert_output("let x = 1; x + 2", "3");
+    assert_val("let x = 1; x + 2", int(3));
 }
 
 #[test]
 fn let_sugar_complex() {
-    assert_output("let x = 1 + 2; x * 3", "9");
+    assert_val("let x = 1 + 2; x * 3", int(9));
 }
 
 #[test]
 fn let_sugar_chained() {
-    assert_output("let x = 1; let y = 2; x + y", "3");
+    assert_val("let x = 1; let y = 2; x + y", int(3));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1107,63 +1161,60 @@ fn let_sugar_chained() {
 
 #[test]
 fn branch_bool_true() {
-    assert_output("true >> { true -> 1, false -> 2 }", "1");
+    assert_val("true >> { true -> 1, false -> 2 }", int(1));
 }
 
 #[test]
 fn branch_bool_false() {
-    assert_output("false >> { true -> 1, false -> 2 }", "2");
+    assert_val("false >> { true -> 1, false -> 2 }", int(2));
 }
 
 #[test]
 fn branch_literal_int() {
-    assert_output("1 >> { 0 -> 10, 1 -> 20, _ -> 30 }", "20");
+    assert_val("1 >> { 0 -> 10, 1 -> 20, _ -> 30 }", int(20));
 }
 
 #[test]
 fn branch_literal_string() {
-    assert_output(r#""hello" >> { "hello" -> 1, _ -> 0 }"#, "1");
+    assert_val(r#""hello" >> { "hello" -> 1, _ -> 0 }"#, int(1));
 }
 
 #[test]
 fn branch_discard() {
-    assert_output("42 >> { _ -> 99 }", "99");
+    assert_val("42 >> { _ -> 99 }", int(99));
 }
 
 #[test]
 fn branch_binding() {
-    assert_output("42 >> { x -> x + 1 }", "43");
+    assert_val("42 >> { x -> x + 1 }", int(43));
 }
 
 #[test]
 fn branch_tag_pattern() {
-    assert_output(
+    assert_val(
         "tag(Ok); tag(Err); 42 >> Ok >> { Ok(x) -> x, Err(_) -> 0 }",
-        "42",
+        int(42),
     );
 }
 
 #[test]
 fn branch_tag_no_payload() {
-    assert_output(
+    assert_val(
         "tag(Done); tag(NotDone); () >> Done >> { Done -> 1, NotDone -> 0 }",
-        "1",
+        int(1),
     );
 }
 
 #[test]
 fn branch_as_function() {
     // Branching block is a function — can be stored and called
-    assert_output(
-        "{ true -> 1, false -> 0 } >> let(f); true >> f",
-        "1",
-    );
+    assert_val("{ true -> 1, false -> 0 } >> let(f); true >> f", int(1));
 }
 
 #[test]
 fn branch_in_available() {
     // `in` is available in branch arm bodies
-    assert_output("42 >> { x -> in }", "42");
+    assert_val("42 >> { x -> in }", int(42));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1172,8 +1223,8 @@ fn branch_in_available() {
 
 #[test]
 fn method_get() {
-    assert_output("[10, 20, 30].get(0)", "10");
-    assert_output("[10, 20, 30].get(2)", "30");
+    assert_val("[10, 20, 30].get(0)", int(10));
+    assert_val("[10, 20, 30].get(2)", int(30));
 }
 
 #[test]
@@ -1183,7 +1234,7 @@ fn method_slice() {
 
 #[test]
 fn method_len() {
-    assert_output("[1, 2, 3].len()", "3");
+    assert_val("[1, 2, 3].len()", int(3));
 }
 
 #[test]
@@ -1198,7 +1249,7 @@ fn method_filter() {
 
 #[test]
 fn method_fold() {
-    assert_output("[1, 2, 3].fold(0, { in.acc + in.elem })", "6");
+    assert_val("[1, 2, 3].fold(0, { in.acc + in.elem })", int(6));
 }
 
 #[test]
@@ -1208,7 +1259,7 @@ fn method_zip() {
 
 #[test]
 fn method_string_len() {
-    assert_output(r#""hello".len()"#, "5");
+    assert_val(r#""hello".len()"#, int(5));
 }
 
 #[test]
@@ -1223,7 +1274,7 @@ fn method_chained() {
 #[test]
 fn call_with_block() {
     // f{block} calls f with the block as argument
-    assert_output("{ in } >> let(f); f{ in + 1 } >> let(g); 5 >> g", "6");
+    assert_val("{ in } >> let(f); f{ in + 1 } >> let(g); 5 >> g", int(6));
 }
 
 #[test]
@@ -1249,13 +1300,13 @@ fn unary_minus_restriction() {
 #[test]
 fn dual_let_by_name() {
     // (x=1, y=2) >> let(x, y) — names match struct fields, bind by name
-    assert_output("(x=1, y=2) >> let(x, y); x + y", "3");
+    assert_val("(x=1, y=2) >> let(x, y); x + y", int(3));
 }
 
 #[test]
 fn dual_let_by_position() {
     // (1, 2) >> let(a, b) — no name match, bind positionally
-    assert_output("(1, 2) >> let(a, b); a + b", "3");
+    assert_val("(1, 2) >> let(a, b); a + b", int(3));
 }
 
 #[test]
@@ -1276,22 +1327,31 @@ fn dual_let_partial_name_error() {
 #[test]
 fn bug32_negative_int_pattern() {
     // { -1 -> ... } should work as a branch pattern
-    assert_output("0 >> { -1 -> \"neg\", 0 -> \"zero\", _ -> \"pos\" }", "zero");
+    assert_val(
+        "0 >> { -1 -> \"neg\", 0 -> \"zero\", _ -> \"pos\" }",
+        s("zero"),
+    );
 }
 
 #[test]
 fn bug32_negative_int_pattern_matches() {
-    assert_output("-1 >> { -1 -> \"neg\", 0 -> \"zero\", _ -> \"pos\" }", "neg");
+    assert_val(
+        "-1 >> { -1 -> \"neg\", 0 -> \"zero\", _ -> \"pos\" }",
+        s("neg"),
+    );
 }
 
 #[test]
 fn bug32_negative_int_pattern_fallthrough() {
-    assert_output("5 >> { -1 -> \"neg\", 0 -> \"zero\", _ -> \"pos\" }", "pos");
+    assert_val(
+        "5 >> { -1 -> \"neg\", 0 -> \"zero\", _ -> \"pos\" }",
+        s("pos"),
+    );
 }
 
 #[test]
 fn bug32_negative_float_pattern() {
-    assert_output("-1.5 >> { -1.5 -> \"match\", _ -> \"no\" }", "match");
+    assert_val("-1.5 >> { -1.5 -> \"match\", _ -> \"no\" }", s("match"));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1302,15 +1362,21 @@ fn bug32_negative_float_pattern() {
 #[test]
 fn bug33_fold_consistent_named_fields() {
     // Both builtin and method fold use acc/elem named fields
-    assert_output("[1, 2, 3].fold(0, { in.acc + in.elem })", "6");
-    assert_output("fold([1, 2, 3], 0, { in.acc + in.elem })", "6");
+    assert_val("[1, 2, 3].fold(0, { in.acc + in.elem })", int(6));
+    assert_val("fold([1, 2, 3], 0, { in.acc + in.elem })", int(6));
 }
 
 #[test]
 fn bug33_fold_named_destructuring() {
     // Destructuring with matching names should work
-    assert_output("[1, 2, 3].fold(0, { in >> let(acc, elem); acc + elem })", "6");
-    assert_output("fold([1, 2, 3], 0, { in >> let(acc, elem); acc + elem })", "6");
+    assert_val(
+        "[1, 2, 3].fold(0, { in >> let(acc, elem); acc + elem })",
+        int(6),
+    );
+    assert_val(
+        "fold([1, 2, 3], 0, { in >> let(acc, elem); acc + elem })",
+        int(6),
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1321,18 +1387,18 @@ fn bug33_fold_named_destructuring() {
 #[test]
 fn bug34_let_sugar_no_semicolon() {
     // `let x = 5` at the end of a program should return 5, not ()
-    assert_output("let x = 5", "5");
+    assert_val("let x = 5", int(5));
 }
 
 #[test]
 fn bug34_let_sugar_no_semicolon_expr() {
-    assert_output("let x = 1 + 2", "3");
+    assert_val("let x = 1 + 2", int(3));
 }
 
 #[test]
 fn bug34_let_sugar_no_semicolon_in_block() {
     // Inside a block, `{ let x = 5 }` should return 5
-    assert_output("3 >> { let x = in + 1 }", "4");
+    assert_val("3 >> { let x = in + 1 }", int(4));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1353,14 +1419,14 @@ fn bug35_range_chaining_is_error() {
 
 #[test]
 fn bug35_single_range_still_works() {
-    assert_output("(1..3).start", "1");
-    assert_output("(1..3).end", "3");
+    assert_val("(1..3).start", int(1));
+    assert_val("(1..3).end", int(3));
 }
 
 #[test]
 fn bug35_parenthesized_range_range_ok() {
     // You can explicitly parenthesize if you really want nested ranges
-    assert_output("((1..2)..3).start.start", "1");
+    assert_val("((1..2)..3).start.start", int(1));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1382,15 +1448,15 @@ fn bug36_block_minus_is_ambiguous_error() {
 #[test]
 fn bug36_explicit_negation_in_block() {
     // Use parentheses for unary negation in a block
-    assert_output("5 >> { (-1) }", "-1");
-    assert_output("5 >> { (-in) }", "-5");
+    assert_val("5 >> { (-1) }", int(-1));
+    assert_val("5 >> { (-in) }", int(-5));
 }
 
 #[test]
 fn bug36_explicit_subtraction_in_block() {
     // Use explicit `in` for subtraction in a block
-    assert_output("5 >> { in - 3 }", "2");
-    assert_output("5 >> { in - 1 }", "4");
+    assert_val("5 >> { in - 3 }", int(2));
+    assert_val("5 >> { in - 1 }", int(4));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1466,9 +1532,8 @@ fn bug38_string_in_tagged_display() {
 
 #[test]
 fn bug38_standalone_string_no_quotes() {
-    // A standalone string should display without quotes (it IS the output)
-    let result = nana::run(r#""hello""#).unwrap();
-    assert_eq!(result.to_string(), "hello");
+    // A standalone string value
+    assert_val(r#""hello""#, s("hello"));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1490,10 +1555,7 @@ fn bug39_let_sugar_with_tag() {
 #[test]
 fn bug39_let_sugar_with_tag_then_branch() {
     // After `let x = tag(Foo)`, both Foo and x should refer to the constructor
-    assert_output(
-        "let x = tag(Foo); 42 >> x >> { Foo(v) -> v + 1 }",
-        "43",
-    );
+    assert_val("let x = tag(Foo); 42 >> x >> { Foo(v) -> v + 1 }", int(43));
 }
 
 #[test]
@@ -1506,9 +1568,9 @@ fn bug39_tag_in_block_before_semicolon() {
 #[test]
 fn bug39_nested_tag_in_let_sugar() {
     // Multiple levels of nesting
-    assert_output(
+    assert_val(
         "let f = tag(Ok); let g = tag(Err); 1 >> f >> { Ok(x) -> x, Err(_) -> 0 }",
-        "1",
+        int(1),
     );
 }
 
@@ -1527,49 +1589,49 @@ fn bug39_nested_tag_in_let_sugar() {
 #[test]
 fn bug40_let_sugar_with_inner_let_both_in_scope() {
     // `let x = 42 >> let(y); x + y` — both x and y should be 42
-    assert_output("let x = 42 >> let(y); x + y", "84");
+    assert_val("let x = 42 >> let(y); x + y", int(84));
 }
 
 #[test]
 fn bug40_let_sugar_with_inner_let_x_defined() {
     // x should be defined and equal to y
-    assert_output("let x = 42 >> let(y); x", "42");
+    assert_val("let x = 42 >> let(y); x", int(42));
 }
 
 #[test]
 fn bug40_let_sugar_with_inner_let_y_defined() {
     // y should also be defined
-    assert_output("let x = 42 >> let(y); y", "42");
+    assert_val("let x = 42 >> let(y); y", int(42));
 }
 
 #[test]
 fn bug40_let_sugar_inner_let_no_semicolon() {
     // Without `;`, everything should work (this always worked)
-    assert_output("let x = 42 >> let(y)", "42");
+    assert_val("let x = 42 >> let(y)", int(42));
 }
 
 #[test]
 fn bug40_let_sugar_inner_let_with_pipe() {
     // `let x = 42 >> let(y) >> { in + 1 }; x` — x should be 43
-    assert_output("let x = 42 >> let(y) >> { in + 1 }; x", "43");
+    assert_val("let x = 42 >> let(y) >> { in + 1 }; x", int(43));
 }
 
 #[test]
 fn bug40_let_sugar_with_inner_let_array() {
     // `let x = [1,2] >> let[a,b]; a + b` — a, b, and x should be in scope
-    assert_output("let x = [1, 2] >> let[a, b]; a + b", "3");
+    assert_val("let x = [1, 2] >> let[a, b]; a + b", int(3));
 }
 
 #[test]
 fn bug40_let_sugar_with_inner_let_array_x_defined() {
     // x should be the passthrough value from let[a,b]
-    assert_output("let x = [10, 20] >> let[a, b]; a", "10");
+    assert_val("let x = [10, 20] >> let[a, b]; a", int(10));
 }
 
 #[test]
 fn bug40_existing_pipe_let_chain_unchanged() {
     // `100 >> let(a); 42 >> let(b); a + b` should still work
-    assert_output("100 >> let(a); 42 >> let(b); a + b", "142");
+    assert_val("100 >> let(a); 42 >> let(b); a + b", int(142));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1583,21 +1645,21 @@ fn bug40_existing_pipe_let_chain_unchanged() {
 #[test]
 fn bug41_triple_let_chain_in_sugar() {
     // `let x = 42 >> let(y) >> let(z)` — all three should be 42
-    assert_output("let x = 42 >> let(y) >> let(z)", "42");
+    assert_val("let x = 42 >> let(y) >> let(z)", int(42));
 }
 
 #[test]
 fn bug41_triple_let_chain_all_in_scope() {
     // x, y, z should all be in scope for the continuation
-    assert_output("let x = 42 >> let(y) >> let(z); x + y + z", "126");
+    assert_val("let x = 42 >> let(y) >> let(z); x + y + z", int(126));
 }
 
 #[test]
 fn bug41_let_sugar_tag_chain() {
     // Chained tag and let bindings inside let sugar
-    assert_output(
+    assert_val(
         "let ok = tag(Ok); let err = tag(Err); 42 >> ok >> { Ok(x) -> x }",
-        "42",
+        int(42),
     );
 }
 
@@ -1614,7 +1676,7 @@ fn bug41_let_sugar_tag_chain() {
 
 #[test]
 fn bug42_let_array_discard_first() {
-    assert_output("[1, 2, 3] >> let[_, b, c]; b + c", "5");
+    assert_val("[1, 2, 3] >> let[_, b, c]; b + c", int(5));
 }
 
 #[test]
@@ -1625,7 +1687,7 @@ fn bug42_let_array_discard_first_passthrough() {
 
 #[test]
 fn bug42_let_array_discard_middle() {
-    assert_output("[1, 2, 3] >> let[a, _, c]; a + c", "4");
+    assert_val("[1, 2, 3] >> let[a, _, c]; a + c", int(4));
 }
 
 #[test]
@@ -1637,7 +1699,7 @@ fn bug42_let_array_discard_middle_passthrough() {
 #[test]
 fn bug42_let_struct_discard_passthrough() {
     // Struct destructure with discard also shouldn't crash
-    assert_output("(1, 2, 3) >> let(_, b, c); b + c", "5");
+    assert_val("(1, 2, 3) >> let(_, b, c); b + c", int(5));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1651,12 +1713,12 @@ fn bug42_let_struct_discard_passthrough() {
 #[test]
 fn bug43_let_array_passthrough_is_array() {
     // Passthrough should be an array, not a struct
-    assert_output("[1, 2, 3] >> let[a, b, c] >> len", "3");
+    assert_val("[1, 2, 3] >> let[a, b, c] >> len", int(3));
 }
 
 #[test]
 fn bug43_let_array_passthrough_get() {
-    assert_output("[10, 20, 30] >> let[a, b, c] >> { in.get(0) }", "10");
+    assert_val("[10, 20, 30] >> let[a, b, c] >> { in.get(0) }", int(10));
 }
 
 #[test]
@@ -1666,23 +1728,26 @@ fn bug43_let_array_passthrough_identity() {
 
 #[test]
 fn bug43_let_array_passthrough_with_rest() {
-    assert_output("[1, 2, 3, 4] >> let[first, ...rest] >> len", "4");
+    assert_val("[1, 2, 3, 4] >> let[first, ...rest] >> len", int(4));
 }
 
 #[test]
 fn bug43_let_array_passthrough_with_rest_identity() {
-    assert_output("[1, 2, 3, 4] >> let[first, ...rest] >> { in }", "[1, 2, 3, 4]");
+    assert_output(
+        "[1, 2, 3, 4] >> let[first, ...rest] >> { in }",
+        "[1, 2, 3, 4]",
+    );
 }
 
 #[test]
 fn bug43_let_array_single_passthrough() {
-    assert_output("[42] >> let[x] >> { in + 1 }", "43");
+    assert_val("[42] >> let[x] >> { in + 1 }", int(43));
 }
 
 #[test]
 fn bug43_let_sugar_array_passthrough() {
     // `let x = [1, 2] >> let[a, b]; x` — x should be [1, 2] not (a=1, b=2)
-    assert_output("let x = [1, 2] >> let[a, b]; x >> len", "2");
+    assert_val("let x = [1, 2] >> let[a, b]; x >> len", int(2));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1694,28 +1759,28 @@ fn bug43_let_sugar_array_passthrough() {
 
 #[test]
 fn bug44_trailing_semi() {
-    assert_output("42;", "()");
+    assert_val("42;", U);
 }
 
 #[test]
 fn bug44_trailing_semi_after_let() {
-    assert_output("let x = 1;", "()");
+    assert_val("let x = 1;", U);
 }
 
 #[test]
 fn bug44_trailing_semi_after_tag() {
-    assert_output("tag(Ok);", "()");
+    assert_val("tag(Ok);", U);
 }
 
 #[test]
 fn bug44_trailing_semi_sequence() {
-    assert_output("1; 2; 3;", "()");
+    assert_val("1; 2; 3;", U);
 }
 
 #[test]
 fn bug44_trailing_semi_in_block() {
     // Block with trailing semi — the block is a function, when called body evaluates to ()
-    assert_output("5 >> { 42; }", "()");
+    assert_val("5 >> { 42; }", U);
 }
 
 #[test]
@@ -1732,39 +1797,33 @@ fn bug44_trailing_semi_preserves_bindings() {
 #[test]
 fn bug45_struct_field_call_named() {
     // Struct with a function field, called via .field(args)
-    assert_output(
+    assert_val(
         "let math = (add = { in >> let(a, b); a + b }); math.add(3, 4)",
-        "7",
+        int(7),
     );
 }
 
 #[test]
 fn bug45_struct_field_call_positional() {
     // Positional struct field that is a function
-    assert_output("let pair = ({ in + 1 }, { in * 2 }); pair.0(5)", "6");
+    assert_val("let pair = ({ in + 1 }, { in * 2 }); pair.0(5)", int(6));
 }
 
 #[test]
 fn bug45_struct_field_call_positional_second() {
-    assert_output("let pair = ({ in + 1 }, { in * 2 }); pair.1(5)", "10");
+    assert_val("let pair = ({ in + 1 }, { in * 2 }); pair.1(5)", int(10));
 }
 
 #[test]
 fn bug45_struct_field_call_block_syntax() {
     // .field{ block } on struct should access field and call with block
-    assert_output(
-        "let s = (f = { in >> let(x); x + 1 }); s.f(10)",
-        "11",
-    );
+    assert_val("let s = (f = { in >> let(x); x + 1 }); s.f(10)", int(11));
 }
 
 #[test]
 fn bug45_struct_field_call_array_syntax() {
     // .field[array] on struct should access field and call with array
-    assert_output(
-        "let s = (f = { in.len() }); s.f[1, 2, 3]",
-        "3",
-    );
+    assert_val("let s = (f = { in.len() }); s.f[1, 2, 3]", int(3));
 }
 
 #[test]
@@ -1775,15 +1834,15 @@ fn bug45_method_still_works_on_array() {
 
 #[test]
 fn bug45_method_still_works_on_string() {
-    assert_output(r#""hello".len()"#, "5");
+    assert_val(r#""hello".len()"#, int(5));
 }
 
 #[test]
 fn bug45_struct_as_module() {
     // The "struct as module" pattern from DESIGN.md
-    assert_output(
+    assert_val(
         "let m = (double = { in * 2 }, inc = { in + 1 }); 5 >> m.double >> m.inc",
-        "11",
+        int(11),
     );
 }
 
@@ -1794,22 +1853,22 @@ fn bug45_struct_as_module() {
 
 #[test]
 fn bug46_escaped_open_brace() {
-    assert_output(r#""\{""#, "{");
+    assert_val(r#""\{""#, s("{"));
 }
 
 #[test]
 fn bug46_escaped_close_brace() {
-    assert_output(r#""\}""#, "}");
+    assert_val(r#""\}""#, s("}"));
 }
 
 #[test]
 fn bug46_escaped_braces_in_context() {
-    assert_output(r#""Hello, \{world\}!""#, "Hello, {world}!");
+    assert_val(r#""Hello, \{world\}!""#, s("Hello, {world}!"));
 }
 
 #[test]
 fn bug46_mixed_escapes() {
-    assert_output(r#""\{\n\}""#, "{\n}");
+    assert_val(r#""\{\n\}""#, s("{\n}"));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1820,19 +1879,19 @@ fn bug46_mixed_escapes() {
 #[test]
 fn bug47_named_struct_discard_last() {
     // Discard the second field of a named struct
-    assert_output("(x=1, y=2) >> let(x, _); x", "1");
+    assert_val("(x=1, y=2) >> let(x, _); x", int(1));
 }
 
 #[test]
 fn bug47_named_struct_discard_first() {
     // Discard the first field of a named struct
-    assert_output("(x=1, y=2) >> let(_, y); y", "2");
+    assert_val("(x=1, y=2) >> let(_, y); y", int(2));
 }
 
 #[test]
 fn bug47_named_struct_discard_middle() {
     // Discard a middle field of a named struct
-    assert_output("(x=1, y=2, z=3) >> let(x, _, z); x + z", "4");
+    assert_val("(x=1, y=2, z=3) >> let(x, _, z); x + z", int(4));
 }
 
 #[test]
@@ -1844,7 +1903,7 @@ fn bug47_named_struct_all_discards() {
 #[test]
 fn bug47_positional_struct_discard_still_works() {
     // Positional discard should still work as before
-    assert_output("(1, 2, 3) >> let(_, b, c); b + c", "5");
+    assert_val("(1, 2, 3) >> let(_, b, c); b + c", int(5));
 }
 
 #[test]
@@ -1861,19 +1920,19 @@ fn bug47_positional_struct_all_discards() {
 #[test]
 fn bug48_labeled_discard_binding() {
     // Discard a labeled field
-    assert_output("(a=1, b=2) >> let(a=x, b=_); x", "1");
+    assert_val("(a=1, b=2) >> let(a=x, b=_); x", int(1));
 }
 
 #[test]
 fn bug48_labeled_discard_first() {
     // Discard the first labeled field
-    assert_output("(a=1, b=2) >> let(a=_, b=y); y", "2");
+    assert_val("(a=1, b=2) >> let(a=_, b=y); y", int(2));
 }
 
 #[test]
 fn bug48_labeled_discard_multiple() {
     // Multiple discards in labeled destructure
-    assert_output("(a=1, b=2, c=3) >> let(a=_, b=y, c=_); y", "2");
+    assert_val("(a=1, b=2, c=3) >> let(a=_, b=y, c=_); y", int(2));
 }
 
 #[test]
@@ -1890,34 +1949,37 @@ fn bug48_labeled_all_discards() {
 
 #[test]
 fn bug49_unit_branch_pattern_match() {
-    assert_output(r#"() >> { () -> "unit", _ -> "other" }"#, "unit");
+    assert_val(r#"() >> { () -> "unit", _ -> "other" }"#, s("unit"));
 }
 
 #[test]
 fn bug49_unit_branch_pattern_no_match() {
-    assert_output(r#"42 >> { () -> "unit", _ -> "other" }"#, "other");
+    assert_val(r#"42 >> { () -> "unit", _ -> "other" }"#, s("other"));
 }
 
 #[test]
 fn bug49_unit_branch_as_closure() {
-    assert_output(r#"let f = { () -> "empty", x -> "something" }; f()"#, "empty");
+    assert_val(
+        r#"let f = { () -> "empty", x -> "something" }; f()"#,
+        s("empty"),
+    );
 }
 
 #[test]
 fn bug49_mixed_type_literal_fallthrough() {
     // Different types in literal patterns should fall through, not error
-    assert_output(
+    assert_val(
         r#""hello" >> { 42 -> "int", "hello" -> "found", _ -> "other" }"#,
-        "found",
+        s("found"),
     );
 }
 
 #[test]
 fn bug49_unit_pattern_with_guard_syntax() {
     // Ensure () pattern doesn't interfere with other patterns
-    assert_output(
+    assert_val(
         r#"true >> { () -> "unit", true -> "yes", false -> "no" }"#,
-        "yes",
+        s("yes"),
     );
 }
 
@@ -1928,19 +1990,19 @@ fn bug49_unit_pattern_with_guard_syntax() {
 
 #[test]
 fn bug50_let_discard_sugar() {
-    assert_output(r#"let _ = 42; "done""#, "done");
+    assert_val(r#"let _ = 42; "done""#, s("done"));
 }
 
 #[test]
 fn bug50_let_discard_preserves_scope() {
-    assert_output("let x = 10; let _ = x + 1; x", "10");
+    assert_val("let x = 10; let _ = x + 1; x", int(10));
 }
 
 #[test]
 fn bug50_let_discard_evaluates_expr() {
     // The expression should still be evaluated (e.g., side effects)
     // We verify by ensuring no error occurs
-    assert_output("let _ = 1 + 2; 99", "99");
+    assert_val("let _ = 1 + 2; 99", int(99));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1951,28 +2013,25 @@ fn bug50_let_discard_evaluates_expr() {
 #[test]
 fn bug51_pipe_into_struct_field_method_no_args() {
     // 5 >> obj.transform() should be obj.transform(5)
-    assert_output(
+    assert_val(
         "let obj = (transform = { in * 2 }); 5 >> obj.transform()",
-        "10",
+        int(10),
     );
 }
 
 #[test]
 fn bug51_pipe_into_struct_field_method_with_args() {
     // 5 >> math.add(3) should be math.add(5, 3)
-    assert_output(
+    assert_val(
         "let math = (add = { in >> let(a, b); a + b }); 5 >> math.add(3)",
-        "8",
+        int(8),
     );
 }
 
 #[test]
 fn bug51_pipe_into_builtin_method() {
     // [1, 2, 3] >> [4, 5, 6].zip() should be [4, 5, 6].zip([1, 2, 3])
-    assert_output(
-        "[1, 2, 3] >> [4, 5, 6].zip()",
-        "[(4, 1), (5, 2), (6, 3)]",
-    );
+    assert_output("[1, 2, 3] >> [4, 5, 6].zip()", "[(4, 1), (5, 2), (6, 3)]");
 }
 
 #[test]
@@ -1984,9 +2043,9 @@ fn bug51_regular_method_still_works() {
 #[test]
 fn bug51_pipe_into_struct_method_block_syntax() {
     // 5 >> obj.f{block} should prepend piped value
-    assert_output(
+    assert_val(
         "let obj = (apply = { in >> let(val, func); func(val) }); 5 >> obj.apply{ in + 1 }",
-        "6",
+        int(6),
     );
 }
 
@@ -1994,60 +2053,39 @@ fn bug51_pipe_into_struct_method_block_syntax() {
 
 #[test]
 fn bug52_write_nested_escapes_newline() {
-    assert_output(
-        r#"["hello\nworld"]"#,
-        r#"["hello\nworld"]"#,
-    );
+    assert_output(r#"["hello\nworld"]"#, r#"["hello\nworld"]"#);
 }
 
 #[test]
 fn bug52_write_nested_escapes_tab() {
-    assert_output(
-        r#"["hello\tworld"]"#,
-        r#"["hello\tworld"]"#,
-    );
+    assert_output(r#"["hello\tworld"]"#, r#"["hello\tworld"]"#);
 }
 
 #[test]
 fn bug52_write_nested_escapes_quote() {
-    assert_output(
-        r#"["a\"b"]"#,
-        r#"["a\"b"]"#,
-    );
+    assert_output(r#"["a\"b"]"#, r#"["a\"b"]"#);
 }
 
 #[test]
 fn bug52_write_nested_escapes_in_struct() {
-    assert_output(
-        r#"("line1\nline2", 42)"#,
-        r#"("line1\nline2", 42)"#,
-    );
+    assert_output(r#"("line1\nline2", 42)"#, r#"("line1\nline2", 42)"#);
 }
 
 #[test]
 fn bug52_write_nested_escapes_in_tagged() {
-    assert_output(
-        r#"tag(W); "a\tb" >> W"#,
-        r#"W("a\tb")"#,
-    );
+    assert_output(r#"tag(W); "a\tb" >> W"#, r#"W("a\tb")"#);
 }
 
 // ── BUG-53: destructuring error should name the missing field ───────────────
 
 #[test]
 fn bug53_error_names_missing_field() {
-    assert_error(
-        "(a=1, b=2, c=3) >> let(a, d)",
-        "field 'd' not found",
-    );
+    assert_error("(a=1, b=2, c=3) >> let(a, d)", "field 'd' not found");
 }
 
 #[test]
 fn bug53_error_names_first_missing_when_multiple() {
-    assert_error(
-        "(a=1, b=2) >> let(a, x)",
-        "field 'x' not found",
-    );
+    assert_error("(a=1, b=2) >> let(a, x)", "field 'x' not found");
 }
 
 // ── BUG-55: () should be destructurable as empty struct ─────────────────────
@@ -2061,19 +2099,19 @@ fn bug55_unit_destructure_rest() {
 #[test]
 fn bug55_unit_destructure_discard_rest() {
     // Discarding rest of empty struct should work
-    assert_output("() >> let(...); 42", "42");
+    assert_val("() >> let(...); 42", int(42));
 }
 
 #[test]
 fn bug55_unit_destructure_only_rest() {
     // Just a rest pattern on unit
-    assert_output("() >> let(...r); r == ()", "true");
+    assert_val("() >> let(...r); r == ()", T);
 }
 
 #[test]
 fn bug55_unit_single_name_binds_whole() {
     // let(x) is a single-name pattern, not destructuring — binds the whole value
-    assert_output("() >> let(x); x", "()");
+    assert_val("() >> let(x); x", U);
 }
 
 #[test]
@@ -2102,27 +2140,18 @@ fn bug54_paren_scopes_inner_let_z() {
 
 #[test]
 fn bug54_paren_let_x_still_bound() {
-    assert_output(
-        "let x = (42 >> let(y) >> let(z)); x",
-        "42",
-    );
+    assert_output("let x = (42 >> let(y) >> let(z)); x", "42");
 }
 
 #[test]
 fn bug54_nonparen_let_nesting_still_works() {
     // Without parens, inner lets should still be in scope (by design)
-    assert_output(
-        "let x = 42 >> let(y) >> let(z); x + y + z",
-        "126",
-    );
+    assert_output("let x = 42 >> let(y) >> let(z); x + y + z", "126");
 }
 
 #[test]
 fn bug54_tag_sugar_still_works_with_let() {
-    assert_output(
-        "let x = tag(Foo); 42 >> Foo",
-        "Foo(42)",
-    );
+    assert_output("let x = tag(Foo); 42 >> Foo", "Foo(42)");
 }
 
 #[test]
@@ -2158,7 +2187,7 @@ fn bug65_nonparen_tag_still_works() {
 
 #[test]
 fn edge1_empty_string_length() {
-    assert_output(r#""" >> len"#, "0");
+    assert_val(r#""" >> len"#, int(0));
 }
 
 // ── Edge case 2: string + non-string should error ───────────────────────────
@@ -2238,7 +2267,7 @@ fn edge10_fold_nondestruct_function_errors() {
 #[test]
 fn edge11_call_function_with_unit() {
     // f() passes () as the argument. { in } returns its input, so f() returns ().
-    assert_output("{ in } >> let(f); f()", "()");
+    assert_val("{ in } >> let(f); f()", U);
 }
 
 // ── Edge case 12: pipe into fold method ─────────────────────────────────────
@@ -2247,7 +2276,7 @@ fn edge11_call_function_with_unit() {
 fn edge12_pipe_into_fold_method() {
     // 0 >> [1,2,3].fold({ in.acc + in.elem }) — piped value prepends to args,
     // so this becomes [1,2,3].fold(0, { in.acc + in.elem })
-    assert_output("0 >> [1,2,3].fold({ in.acc + in.elem })", "6");
+    assert_val("0 >> [1,2,3].fold({ in.acc + in.elem })", int(6));
 }
 
 // ── Edge case 13: calling tag constructor with unit via () ──────────────────
@@ -2262,7 +2291,7 @@ fn edge13_tag_constructor_with_unit() {
 
 #[test]
 fn edge14_pipe_into_not() {
-    assert_output("true >> not", "false");
+    assert_val("true >> not", F);
 }
 
 // ── Edge case 15: piping tuple into and ─────────────────────────────────────
@@ -2271,14 +2300,14 @@ fn edge14_pipe_into_not() {
 fn edge15_pipe_tuple_into_and() {
     // (true, false) >> and = and(true, false) — but and takes a struct with two
     // boolean fields, so piping the tuple works.
-    assert_output("(true, false) >> and", "false");
+    assert_val("(true, false) >> and", F);
 }
 
 // ── Edge case 16: shadowing via let sugar ───────────────────────────────────
 
 #[test]
 fn edge16_let_shadowing() {
-    assert_output("let x = 1; let x = 2; x", "2");
+    assert_val("let x = 1; let x = 2; x", int(2));
 }
 
 // ── Edge case 17: chained methods with explicit in ──────────────────────────
@@ -2309,13 +2338,13 @@ fn edge18_bare_tag_constructor_not_matched() {
 #[test]
 fn edge18_unit_tagged_branch_matching_correct_form() {
     // The correct way: use () >> None or None() to create the tagged value.
-    assert_output(
+    assert_val(
         r#"tag(None); tag(Some); () >> None >> { None -> "empty", Some(x) -> x }"#,
-        "empty",
+        s("empty"),
     );
-    assert_output(
+    assert_val(
         r#"tag(None); tag(Some); None() >> { None -> "empty", Some(x) -> x }"#,
-        "empty",
+        s("empty"),
     );
 }
 
@@ -2323,7 +2352,7 @@ fn edge18_unit_tagged_branch_matching_correct_form() {
 
 #[test]
 fn edge19_empty_array_length() {
-    assert_output("[].len()", "0");
+    assert_val("[].len()", int(0));
 }
 
 // ── Edge case 20: map over empty array ──────────────────────────────────────
@@ -2340,17 +2369,17 @@ fn edge20_map_empty_array() {
 
 #[test]
 fn bug56_empty_program() {
-    assert_output("", "()");
+    assert_val("", U);
 }
 
 #[test]
 fn bug56_whitespace_only_program() {
-    assert_output("   \n\n  ", "()");
+    assert_val("   \n\n  ", U);
 }
 
 #[test]
 fn bug56_comment_only_program() {
-    assert_output("# just a comment", "()");
+    assert_val("# just a comment", U);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2380,13 +2409,13 @@ fn bug58_byte_hex_escape_7f() {
 #[test]
 fn bug58_byte_hex_escape_printable() {
     // 0x41 = 'A', printable — should display as b'A'
-    assert_output(r"b'\x41'", "b'A'");
+    assert_val(r"b'\x41'", byte(b'A'));
 }
 
 #[test]
 fn bug58_char_hex_escape() {
     // \x41 in char = 'A'
-    assert_output(r"'\x41'", "'A'");
+    assert_val(r"'\x41'", ch('A'));
 }
 
 #[test]
@@ -2490,17 +2519,17 @@ fn bug59_repl_struct_rest_pattern() {
 
 #[test]
 fn bug60_string_hex_escape_basic() {
-    assert_output(r#""\x41""#, "A");
+    assert_val(r#""\x41""#, s("A"));
 }
 
 #[test]
 fn bug60_string_hex_escape_null() {
-    assert_output(r#""\x00" >> len"#, "1");
+    assert_val(r#""\x00" >> len"#, int(1));
 }
 
 #[test]
 fn bug60_string_hex_escape_mixed() {
-    assert_output(r#""\x48\x65\x6c\x6c\x6f""#, "Hello");
+    assert_val(r#""\x48\x65\x6c\x6c\x6f""#, s("Hello"));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2513,13 +2542,13 @@ fn bug60_string_hex_escape_mixed() {
 #[test]
 fn bug61_trailing_comma_single_is_value() {
     // (1,) should be the same as (1) = just 1
-    assert_output("(1,)", "1");
+    assert_val("(1,)", int(1));
 }
 
 #[test]
 fn bug61_trailing_comma_single_in_expr() {
     // (1 + 2,) should be 3
-    assert_output("(1 + 2,)", "3");
+    assert_val("(1 + 2,)", int(3));
 }
 
 #[test]
@@ -2531,7 +2560,7 @@ fn bug61_trailing_comma_multi_still_struct() {
 #[test]
 fn bug61_trailing_comma_named_still_struct() {
     // (a=1, b=2,) is a struct with trailing comma
-    assert_output("(a=1, b=2,).a", "1");
+    assert_val("(a=1, b=2,).a", int(1));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2542,19 +2571,19 @@ fn bug61_trailing_comma_named_still_struct() {
 #[test]
 fn bug62_call_trailing_comma_passes_value() {
     // f(1,) should pass 1 to f, not a struct
-    assert_output("{ in } >> let(f); f(1,)", "1");
+    assert_val("{ in } >> let(f); f(1,)", int(1));
 }
 
 #[test]
 fn bug62_call_trailing_comma_arithmetic() {
     // f(1 + 2,) should pass 3, not a struct
-    assert_output("{ in * 2 } >> let(f); f(1 + 2,)", "6");
+    assert_val("{ in * 2 } >> let(f); f(1 + 2,)", int(6));
 }
 
 #[test]
 fn bug62_call_multi_arg_trailing_comma_still_struct() {
     // f(1, 2,) should still pass (1, 2) struct
-    assert_output("{ in >> let(a, b); a + b } >> let(f); f(1, 2,)", "3");
+    assert_val("{ in >> let(a, b); a + b } >> let(f); f(1, 2,)", int(3));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2564,51 +2593,93 @@ fn bug62_call_multi_arg_trailing_comma_still_struct() {
 // ── String Interpolation (DESIGN.md says {expr} inside strings) ──
 
 #[test]
-fn string_interpolation_not_implemented() {
+fn string_interpolation_basic() {
     // DESIGN.md says: "String interpolation via {expr} inside string literals:
     // "Hello, {name}!" evaluates the expression and converts the result to a string."
-    //
-    // However, the lexer (lex_string) treats { as a regular character,
-    // so no interpolation occurs. The string is literal.
     let name_binding = r#"let name = "world"; "Hello, {name}!""#;
-    // If interpolation worked, result would be "Hello, world!"
-    // Since it doesn't, the literal string "Hello, {name}!" is returned.
-    assert_output(name_binding, "Hello, {name}!");
+    assert_val(name_binding, s("Hello, world!"));
 }
 
 #[test]
-fn string_interpolation_with_int_not_implemented() {
-    // Another interpolation test: {1 + 2} inside a string
-    // Should produce "result: 3" if interpolation worked,
-    // but actually produces the literal string "result: {1 + 2}"
-    assert_output(r#""result: {1 + 2}""#, "result: {1 + 2}");
+fn string_interpolation_with_expr() {
+    // {1 + 2} inside a string evaluates the expression
+    assert_val(r#""result: {1 + 2}""#, s("result: 3"));
+}
+
+#[test]
+fn string_interpolation_multiple_parts() {
+    assert_val(
+        r#"let a = 1; let b = 2; "{a} + {b} = {a + b}""#,
+        s("1 + 2 = 3"),
+    );
+}
+
+#[test]
+fn string_interpolation_bool() {
+    assert_val(r#""it is {true}""#, s("it is true"));
+}
+
+#[test]
+fn string_interpolation_nested_string() {
+    // Interpolating a string value — should produce unquoted result
+    assert_val(r#"let x = "hi"; "say {x}""#, s("say hi"));
+}
+
+#[test]
+fn string_interpolation_escaped_brace() {
+    // \{ produces a literal brace, not interpolation
+    assert_val(r#""\{not interpolated\}""#, s("{not interpolated}"));
+}
+
+#[test]
+fn string_interpolation_empty_string_parts() {
+    // Interpolation at start and end of string
+    assert_val(r#"let x = 42; "{x}""#, s("42"));
+}
+
+#[test]
+fn string_interpolation_adjacent() {
+    // Two interpolations next to each other
+    assert_val(r#"let a = "x"; let b = "y"; "{a}{b}""#, s("xy"));
+}
+
+#[test]
+fn string_interpolation_with_pipe() {
+    // Expression with pipe inside interpolation
+    assert_val(r#"let f = { in + 1 }; "result: {3 >> f}""#, s("result: 4"));
+}
+
+#[test]
+fn string_no_interpolation_plain() {
+    // A plain string with no braces stays as Token::Str, not InterpStr
+    assert_val(r#""hello world""#, s("hello world"));
 }
 
 // ── String Concatenation ─────────────────────────────────────────
 
 #[test]
 fn string_concat_basic() {
-    assert_output(r#""abc" + "def""#, "abcdef");
+    assert_val(r#""abc" + "def""#, s("abcdef"));
 }
 
 #[test]
 fn string_concat_empty_left() {
-    assert_output(r#""" + "abc""#, "abc");
+    assert_val(r#""" + "abc""#, s("abc"));
 }
 
 #[test]
 fn string_concat_empty_right() {
-    assert_output(r#""abc" + """#, "abc");
+    assert_val(r#""abc" + """#, s("abc"));
 }
 
 #[test]
 fn string_concat_both_empty() {
-    assert_output(r#""" + """#, "");
+    assert_val(r#""" + """#, s(""));
 }
 
 #[test]
 fn string_concat_chained() {
-    assert_output(r#""a" + "b" + "c""#, "abc");
+    assert_val(r#""a" + "b" + "c""#, s("abc"));
 }
 
 // ── String Length ────────────────────────────────────────────────
@@ -2616,67 +2687,67 @@ fn string_concat_chained() {
 #[test]
 fn string_len_method() {
     // .len() method on string
-    assert_output(r#""hello".len()"#, "5");
+    assert_val(r#""hello".len()"#, int(5));
 }
 
 #[test]
 fn string_len_piped() {
     // len as a piped builtin function
-    assert_output(r#""hello" >> len"#, "5");
+    assert_val(r#""hello" >> len"#, int(5));
 }
 
 #[test]
 fn string_len_empty() {
-    assert_output(r#""".len()"#, "0");
+    assert_val(r#""".len()"#, int(0));
 }
 
 #[test]
 fn string_len_empty_piped() {
-    assert_output(r#""" >> len"#, "0");
+    assert_val(r#""" >> len"#, int(0));
 }
 
 #[test]
 fn string_len_with_escapes() {
     // "\n" is one byte, so "ab\ncd" has length 5
-    assert_output(r#""ab\ncd".len()"#, "5");
+    assert_val(r#""ab\ncd".len()"#, int(5));
 }
 
 #[test]
 fn string_len_null_byte() {
     // "\0" is one byte
-    assert_output(r#""\0".len()"#, "1");
+    assert_val(r#""\0".len()"#, int(1));
 }
 
 // ── String Comparison: Equality ─────────────────────────────────
 
 #[test]
 fn string_eq_same() {
-    assert_output(r#""abc" == "abc""#, "true");
+    assert_val(r#""abc" == "abc""#, T);
 }
 
 #[test]
 fn string_eq_different() {
-    assert_output(r#""abc" == "def""#, "false");
+    assert_val(r#""abc" == "def""#, F);
 }
 
 #[test]
 fn string_neq_different() {
-    assert_output(r#""abc" != "def""#, "true");
+    assert_val(r#""abc" != "def""#, T);
 }
 
 #[test]
 fn string_neq_same() {
-    assert_output(r#""abc" != "abc""#, "false");
+    assert_val(r#""abc" != "abc""#, F);
 }
 
 #[test]
 fn string_eq_empty() {
-    assert_output(r#""" == """#, "true");
+    assert_val(r#""" == """#, T);
 }
 
 #[test]
 fn string_neq_empty_vs_nonempty() {
-    assert_output(r#""" != "a""#, "true");
+    assert_val(r#""" != "a""#, T);
 }
 
 // ── String Comparison: Ordering ─────────────────────────────────
@@ -2684,54 +2755,54 @@ fn string_neq_empty_vs_nonempty() {
 #[test]
 fn string_lt_true() {
     // Lexicographic: "abc" < "abd" because 'c' < 'd'
-    assert_output(r#""abc" < "abd""#, "true");
+    assert_val(r#""abc" < "abd""#, T);
 }
 
 #[test]
 fn string_lt_false() {
-    assert_output(r#""abd" < "abc""#, "false");
+    assert_val(r#""abd" < "abc""#, F);
 }
 
 #[test]
 fn string_gt_true() {
-    assert_output(r#""def" > "abc""#, "true");
+    assert_val(r#""def" > "abc""#, T);
 }
 
 #[test]
 fn string_gt_false() {
-    assert_output(r#""abc" > "def""#, "false");
+    assert_val(r#""abc" > "def""#, F);
 }
 
 #[test]
 fn string_le_equal() {
-    assert_output(r#""abc" <= "abc""#, "true");
+    assert_val(r#""abc" <= "abc""#, T);
 }
 
 #[test]
 fn string_le_less() {
-    assert_output(r#""abc" <= "abd""#, "true");
+    assert_val(r#""abc" <= "abd""#, T);
 }
 
 #[test]
 fn string_ge_equal() {
-    assert_output(r#""abc" >= "abc""#, "true");
+    assert_val(r#""abc" >= "abc""#, T);
 }
 
 #[test]
 fn string_ge_greater() {
-    assert_output(r#""abd" >= "abc""#, "true");
+    assert_val(r#""abd" >= "abc""#, T);
 }
 
 #[test]
 fn string_lt_prefix() {
     // "abc" < "abcd" — shorter string is less than longer prefix-match
-    assert_output(r#""abc" < "abcd""#, "true");
+    assert_val(r#""abc" < "abcd""#, T);
 }
 
 #[test]
 fn string_gt_prefix() {
     // "abcd" > "abc" — longer string with same prefix is greater
-    assert_output(r#""abcd" > "abc""#, "true");
+    assert_val(r#""abcd" > "abc""#, T);
 }
 
 // ── Empty String ────────────────────────────────────────────────
@@ -2739,17 +2810,17 @@ fn string_gt_prefix() {
 #[test]
 fn empty_string_standalone() {
     // An empty string should display as empty (no quotes in standalone display)
-    assert_output(r#""""#, "");
+    assert_val(r#""""#, s(""));
 }
 
 #[test]
 fn empty_string_len() {
-    assert_output(r#""" >> len"#, "0");
+    assert_val(r#""" >> len"#, int(0));
 }
 
 #[test]
 fn empty_string_concat_left() {
-    assert_output(r#""" + "abc""#, "abc");
+    assert_val(r#""" + "abc""#, s("abc"));
 }
 
 #[test]
@@ -2758,92 +2829,320 @@ fn empty_string_in_array() {
     assert_output(r#"["", "a"]"#, r#"["", "a"]"#);
 }
 
+// ── Multi-line Strings (Zig-style) ──────────────────────────────
+
+#[test]
+fn multiline_string_single_line() {
+    assert_val("\\\\hello", s("hello"));
+}
+
+#[test]
+fn multiline_string_two_lines() {
+    assert_val("\\\\hello\n\\\\world", s("hello\nworld"));
+}
+
+#[test]
+fn multiline_string_with_indentation() {
+    // Leading whitespace before \\ on continuation lines is stripped
+    assert_val("\\\\first\n    \\\\second", s("first\nsecond"));
+}
+
+#[test]
+fn multiline_string_len() {
+    // "ab\ncd" has length 5 (2 + newline + 2)
+    assert_val("\\\\ab\n\\\\cd\n>> len", int(5));
+}
+
+#[test]
+fn multiline_string_in_let() {
+    // The \\ lines form the string, then the next non-\\ line continues the program
+    assert_val("let s =\n\\\\hello\n\\\\world\n; s", s("hello\nworld"));
+}
+
+#[test]
+fn multiline_string_as_argument() {
+    assert_val("len(\n\\\\abc\n)", int(3));
+}
+
 // ── String Escape Sequences ─────────────────────────────────────
 
 #[test]
 fn string_escape_newline() {
     // "\n" is a single newline character
-    assert_output(r#""\n" >> len"#, "1");
+    assert_val(r#""\n" >> len"#, int(1));
 }
 
 #[test]
 fn string_escape_tab() {
-    assert_output(r#""\t" >> len"#, "1");
+    assert_val(r#""\t" >> len"#, int(1));
 }
 
 #[test]
 fn string_escape_carriage_return() {
-    assert_output(r#""\r" >> len"#, "1");
+    assert_val(r#""\r" >> len"#, int(1));
 }
 
 #[test]
 fn string_escape_backslash() {
-    assert_output(r#""\\" >> len"#, "1");
+    assert_val(r#""\\" >> len"#, int(1));
 }
 
 #[test]
 fn string_escape_quote() {
-    assert_output(r#""\"" >> len"#, "1");
+    assert_val(r#""\"" >> len"#, int(1));
 }
 
 #[test]
 fn string_escape_null() {
-    assert_output(r#""\0" >> len"#, "1");
+    assert_val(r#""\0" >> len"#, int(1));
 }
 
 #[test]
 fn string_escape_all_combined() {
     // "\n\t\r\\\"\0" should be 6 bytes
-    assert_output(r#""\n\t\r\\\"\0" >> len"#, "6");
+    assert_val(r#""\n\t\r\\\"\0" >> len"#, int(6));
 }
 
 // ── String Brace Escapes ────────────────────────────────────────
 
 #[test]
 fn string_escaped_open_brace() {
-    assert_output(r#""\{""#, "{");
+    assert_val(r#""\{""#, s("{"));
 }
 
 #[test]
 fn string_escaped_close_brace() {
-    assert_output(r#""\}""#, "}");
+    assert_val(r#""\}""#, s("}"));
 }
 
 #[test]
 fn string_escaped_both_braces() {
-    assert_output(r#""\{\}""#, "{}");
+    assert_val(r#""\{\}""#, s("{}"));
 }
 
 #[test]
 fn string_escaped_braces_with_text() {
-    assert_output(r#""fn\{body\}""#, "fn{body}");
+    assert_val(r#""fn\{body\}""#, s("fn{body}"));
 }
 
 #[test]
-fn string_unescaped_braces_literal() {
-    // Unescaped { and } inside a string — since interpolation is NOT implemented,
-    // these are just literal characters passed through by the lexer.
-    assert_output(r#""{hello}""#, "{hello}");
+fn string_interp_variable() {
+    // Unescaped { } in a string triggers interpolation.
+    // With a defined variable, the expression is evaluated and stringified.
+    assert_val(r#"let hello = "world"; "{hello}""#, s("world"));
+}
+
+#[test]
+fn string_interp_undefined_errors() {
+    // Unescaped { } in a string with undefined variable is a runtime error.
+    assert_error(r#""{hello}""#, "undefined variable");
+}
+
+// ── String Methods ───────────────────────────────────────────────
+
+#[test]
+fn string_as_bytes() {
+    assert_output(r#""abc".as_bytes()"#, "[b'a', b'b', b'c']");
+}
+
+#[test]
+fn string_as_bytes_empty() {
+    assert_output(r#""".as_bytes()"#, "[]");
+}
+
+#[test]
+fn string_chars() {
+    assert_output(r#""hi".chars()"#, "['h', 'i']");
+}
+
+#[test]
+fn string_chars_empty() {
+    assert_output(r#""".chars()"#, "[]");
+}
+
+#[test]
+fn string_split_basic() {
+    assert_output(r#""a,b,c".split(",")"#, r#"["a", "b", "c"]"#);
+}
+
+#[test]
+fn string_split_no_match() {
+    assert_output(r#""abc".split(",")"#, r#"["abc"]"#);
+}
+
+#[test]
+fn string_split_empty_delimiter() {
+    // Rust's split("") splits between every character (plus edges)
+    assert_output(r#""ab".split("")"#, r#"["", "a", "b", ""]"#);
+}
+
+#[test]
+fn string_trim_spaces() {
+    assert_val(r#""  hello  ".trim()"#, s("hello"));
+}
+
+#[test]
+fn string_trim_no_whitespace() {
+    assert_val(r#""hello".trim()"#, s("hello"));
+}
+
+#[test]
+fn string_contains_true() {
+    assert_val(r#""hello world".contains("world")"#, T);
+}
+
+#[test]
+fn string_contains_false() {
+    assert_val(r#""hello".contains("xyz")"#, F);
+}
+
+#[test]
+fn string_contains_char() {
+    assert_val(r#""hello".contains('l')"#, T);
+}
+
+#[test]
+fn string_starts_with_true() {
+    assert_val(r#""hello".starts_with("hel")"#, T);
+}
+
+#[test]
+fn string_starts_with_false() {
+    assert_val(r#""hello".starts_with("world")"#, F);
+}
+
+#[test]
+fn string_ends_with_true() {
+    assert_val(r#""hello".ends_with("llo")"#, T);
+}
+
+#[test]
+fn string_ends_with_false() {
+    assert_val(r#""hello".ends_with("hel")"#, F);
+}
+
+#[test]
+fn string_replace_basic() {
+    assert_val(r#""hello world".replace("world", "nana")"#, s("hello nana"));
+}
+
+#[test]
+fn string_replace_multiple() {
+    assert_val(r#""aaa".replace("a", "bb")"#, s("bbbbbb"));
+}
+
+#[test]
+fn string_slice_basic() {
+    assert_val(r#""hello".slice(1..3)"#, s("el"));
+}
+
+#[test]
+fn string_slice_full() {
+    assert_val(r#""abc".slice(0..3)"#, s("abc"));
+}
+
+#[test]
+fn string_slice_out_of_bounds() {
+    assert_error(r#""abc".slice(0..5)"#, "out of bounds");
+}
+
+#[test]
+fn string_method_chain() {
+    // trim then split
+    assert_output(r#""  a,b  ".trim().split(",")"#, r#"["a", "b"]"#);
+}
+
+// ── String Destructuring ─────────────────────────────────────────
+
+#[test]
+fn string_destructure_basic() {
+    assert_val(r#""abc" >> let[a, b, c]; a"#, s("a"));
+}
+
+#[test]
+fn string_destructure_second_char() {
+    assert_val(r#""abc" >> let[a, b, c]; b"#, s("b"));
+}
+
+#[test]
+fn string_destructure_with_rest() {
+    assert_val(r#""hello" >> let[first, ...rest]; first"#, s("h"));
+}
+
+#[test]
+fn string_destructure_rest_is_string() {
+    // ...rest captures remaining characters as a string
+    assert_val(r#""hi" >> let[h, ...rest]; rest"#, s("i"));
+}
+
+#[test]
+fn string_destructure_head_tail() {
+    assert_val(r#""abc" >> let[_, ...tail]; tail"#, s("bc"));
+}
+
+#[test]
+fn string_destructure_too_few_elements() {
+    assert_error(r#""ab" >> let[a, b, c]"#, "not enough elements");
+}
+
+#[test]
+fn string_destructure_too_many_elements() {
+    assert_error(r#""abcd" >> let[a, b]"#, "too many elements");
+}
+
+#[test]
+fn string_destructure_empty_string() {
+    assert_val(r#""" >> let[...rest]; rest"#, s(""));
+}
+
+#[test]
+fn string_destructure_let_sugar() {
+    assert_val(r#"let s = "xy"; s >> let[x, y]; x"#, s("x"));
+}
+
+#[test]
+fn string_destructure_concat_parts() {
+    // Destructured parts are strings, so they can be concatenated back
+    assert_val(r#""abc" >> let[a, b, c]; a + b + c"#, s("abc"));
+}
+
+// ── let [...] = expr sugar ──────────────────────────────────────
+
+#[test]
+fn let_array_assign_sugar_basic() {
+    assert_val(r#"let [a, b, c] = "abc"; b"#, s("b"));
+}
+
+#[test]
+fn let_array_assign_sugar_rest() {
+    assert_val(r#"let [a, ...rest] = "hello"; a"#, s("h"));
+}
+
+#[test]
+fn let_array_assign_sugar_array() {
+    assert_val("let [x, y] = [10, 20]; x + y", int(30));
+}
+
+#[test]
+fn let_struct_assign_sugar() {
+    assert_val("let (a, b) = (1, 2); a + b", int(3));
 }
 
 // ── Strings in Structs ──────────────────────────────────────────
 
 #[test]
 fn string_in_positional_struct() {
-    assert_output(
-        r#"(a="hello", b="world")"#,
-        r#"(a="hello", b="world")"#,
-    );
+    assert_output(r#"(a="hello", b="world")"#, r#"(a="hello", b="world")"#);
 }
 
 #[test]
 fn string_in_struct_field_access() {
-    assert_output(r#"(a="hello", b="world").a"#, "hello");
+    assert_val(r#"(a="hello", b="world").a"#, s("hello"));
 }
 
 #[test]
 fn string_in_struct_field_access_b() {
-    assert_output(r#"(a="hello", b="world").b"#, "world");
+    assert_val(r#"(a="hello", b="world").b"#, s("world"));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2855,25 +3154,25 @@ fn string_in_struct_field_access_b() {
 #[test]
 fn probe20a_spec_basic_binding() {
     // DESIGN.md: `1 >> let(x); x + 2` evaluates to 3
-    assert_output("1 >> let(x); x + 2", "3");
+    assert_val("1 >> let(x); x + 2", int(3));
 }
 
 #[test]
 fn probe20a_spec_let_sugar() {
     // DESIGN.md: `let x = 1; x + 2` (sugar form, same result)
-    assert_output("let x = 1; x + 2", "3");
+    assert_val("let x = 1; x + 2", int(3));
 }
 
 #[test]
 fn probe20a_spec_chained_bindings() {
     // DESIGN.md: `1 >> let(x); x >> { in + 1 } >> let(y); x + y` evaluates to 3
-    assert_output("1 >> let(x); x >> { in + 1 } >> let(y); x + y", "3");
+    assert_val("1 >> let(x); x >> { in + 1 } >> let(y); x + y", int(3));
 }
 
 #[test]
 fn probe20a_spec_paren_scope_limits_let() {
     // DESIGN.md: `1 >> let(x); (2 >> let(y); y + 1) + x` evaluates to 4
-    assert_output("1 >> let(x); (2 >> let(y); y + 1) + x", "4");
+    assert_val("1 >> let(x); (2 >> let(y); y + 1) + x", int(4));
 }
 
 #[test]
@@ -2881,7 +3180,7 @@ fn probe20a_spec_let_returns_value_through_pipe() {
     // DESIGN.md: `value >> let(x) >> log` — let returns its value, pipes onward.
     // Testing with print: 42 >> let(x) >> print prints 42 and returns ().
     // Then `; x` evaluates to 42.
-    assert_output("42 >> let(x) >> print; x", "42");
+    assert_val("42 >> let(x) >> print; x", int(42));
 }
 
 // ── 2. let(x) returns x through pipes ───────────────────────────
@@ -2889,13 +3188,13 @@ fn probe20a_spec_let_returns_value_through_pipe() {
 #[test]
 fn probe20a_let_passthrough_into_block() {
     // 5 >> let(x) >> { in + 10 } — let(x) returns 5, then 5 + 10 = 15
-    assert_output("5 >> let(x) >> { in + 10 }", "15");
+    assert_val("5 >> let(x) >> { in + 10 }", int(15));
 }
 
 #[test]
 fn probe20a_let_passthrough_double_bind() {
     // 5 >> let(x) >> let(y); x + y — both x and y are 5, so 10
-    assert_output("5 >> let(x) >> let(y); x + y", "10");
+    assert_val("5 >> let(x) >> let(y); x + y", int(10));
 }
 
 // ── 3. Multiple bindings with pipes ─────────────────────────────
@@ -2915,7 +3214,7 @@ fn probe20a_triple_let_chain_in_pipes() {
 #[test]
 fn probe20a_tag_in_pipe_chain() {
     // tag(Ok); 42 >> Ok >> { Ok(x) -> x + 1, _ -> 0 } should be 43
-    assert_output("tag(Ok); 42 >> Ok >> { Ok(x) -> x + 1, _ -> 0 }", "43");
+    assert_val("tag(Ok); 42 >> Ok >> { Ok(x) -> x + 1, _ -> 0 }", int(43));
 }
 
 // ── 5. Nested block scoping ─────────────────────────────────────
@@ -2923,7 +3222,7 @@ fn probe20a_tag_in_pipe_chain() {
 #[test]
 fn probe20a_nested_block_scoping() {
     // let x = 10; (let x = 20; x) + x — inner x = 20, outer x = 10, result = 30
-    assert_output("let x = 10; (let x = 20; x) + x", "30");
+    assert_val("let x = 10; (let x = 20; x) + x", int(30));
 }
 
 // ── 6. Shadowing ────────────────────────────────────────────────
@@ -2931,13 +3230,13 @@ fn probe20a_nested_block_scoping() {
 #[test]
 fn probe20a_shadowing_basic() {
     // let x = 1; let x = 2; x — shadowed, result = 2
-    assert_output("let x = 1; let x = 2; x", "2");
+    assert_val("let x = 1; let x = 2; x", int(2));
 }
 
 #[test]
 fn probe20a_shadowing_preserves_old_capture() {
     // let x = 1; let y = x + 1; let x = 10; y — y captured old x = 1, so y = 2
-    assert_output("let x = 1; let y = x + 1; let x = 10; y", "2");
+    assert_val("let x = 1; let y = x + 1; let x = 10; y", int(2));
 }
 
 // ── 7. let inside block body ────────────────────────────────────
@@ -2945,7 +3244,7 @@ fn probe20a_shadowing_preserves_old_capture() {
 #[test]
 fn probe20a_let_inside_block_body() {
     // 10 >> { let x = in + 1; let y = x * 2; y } — x=11, y=22, result=22
-    assert_output("10 >> { let x = in + 1; let y = x * 2; y }", "22");
+    assert_val("10 >> { let x = in + 1; let y = x * 2; y }", int(22));
 }
 
 // ── 8. Array destructuring in pipe ──────────────────────────────
@@ -2954,7 +3253,7 @@ fn probe20a_let_inside_block_body() {
 fn probe20a_array_destruct_in_pipe() {
     // [10, 20, 30] >> let[a, ...rest]; a + rest.len()
     // a=10, rest=[20, 30], rest.len()=2, result=12
-    assert_output("[10, 20, 30] >> let[a, ...rest]; a + rest.len()", "12");
+    assert_val("[10, 20, 30] >> let[a, ...rest]; a + rest.len()", int(12));
 }
 
 // ── 9. Complex pipe chain ending with branch ────────────────────
@@ -2973,7 +3272,7 @@ fn probe20a_complex_pipe_branch() {
 #[test]
 fn probe20a_empty_branch_body() {
     // true >> { true -> (), false -> () } should be ()
-    assert_output("true >> { true -> (), false -> () }", "()");
+    assert_val("true >> { true -> (), false -> () }", U);
 }
 
 // ── 11. Pipe through multiple functions ─────────────────────────
@@ -2982,7 +3281,10 @@ fn probe20a_empty_branch_body() {
 fn probe20a_pipe_through_multiple_functions() {
     // let double = { in * 2 }; let add1 = { in + 1 }; 3 >> double >> add1
     // 3 * 2 = 6, 6 + 1 = 7
-    assert_output("let double = { in * 2 }; let add1 = { in + 1 }; 3 >> double >> add1", "7");
+    assert_val(
+        "let double = { in * 2 }; let add1 = { in + 1 }; 3 >> double >> add1",
+        int(7),
+    );
 }
 
 // ── 12. Block that captures and uses outer binding ──────────────
@@ -2990,12 +3292,12 @@ fn probe20a_pipe_through_multiple_functions() {
 #[test]
 fn probe20a_block_captures_outer_binding() {
     // let x = 5; let f = { in + x }; 10 >> f — should be 15
-    assert_output("let x = 5; let f = { in + x }; 10 >> f", "15");
+    assert_val("let x = 5; let f = { in + x }; 10 >> f", int(15));
 }
 
 #[test]
 fn string_in_struct_len_via_field() {
-    assert_output(r#"(a="hello", b="world").a >> len"#, "5");
+    assert_val(r#"(a="hello", b="world").a >> len"#, int(5));
 }
 
 // ── Strings in Arrays ───────────────────────────────────────────
@@ -3007,17 +3309,17 @@ fn string_array_literal() {
 
 #[test]
 fn string_array_get() {
-    assert_output(r#"["a", "b", "c"].get(0)"#, "a");
+    assert_val(r#"["a", "b", "c"].get(0)"#, s("a"));
 }
 
 #[test]
 fn string_array_get_last() {
-    assert_output(r#"["a", "b", "c"].get(2)"#, "c");
+    assert_val(r#"["a", "b", "c"].get(2)"#, s("c"));
 }
 
 #[test]
 fn string_array_len() {
-    assert_output(r#"["a", "b", "c"].len()"#, "3");
+    assert_val(r#"["a", "b", "c"].len()"#, int(3));
 }
 
 #[test]
@@ -3032,17 +3334,17 @@ fn string_array_map_len() {
 fn string_method_len_returns_byte_count() {
     // .len() returns byte count, not character count
     // ASCII strings: byte count == character count
-    assert_output(r#""hello".len()"#, "5");
+    assert_val(r#""hello".len()"#, int(5));
 }
 
 #[test]
 fn string_method_len_single_char() {
-    assert_output(r#""x".len()"#, "1");
+    assert_val(r#""x".len()"#, int(1));
 }
 
 #[test]
 fn string_method_len_after_concat() {
-    assert_output(r#"("abc" + "def").len()"#, "6");
+    assert_val(r#"("abc" + "def").len()"#, int(6));
 }
 
 // ── String Comparison Ordering ──────────────────────────────────
@@ -3050,24 +3352,24 @@ fn string_method_len_after_concat() {
 #[test]
 fn string_order_abc_lt_abd() {
     // Last character differs: 'c' < 'd'
-    assert_output(r#""abc" < "abd""#, "true");
+    assert_val(r#""abc" < "abd""#, T);
 }
 
 #[test]
 fn string_order_case_sensitive() {
     // 'A' (65) < 'a' (97) in byte ordering
-    assert_output(r#""A" < "a""#, "true");
+    assert_val(r#""A" < "a""#, T);
 }
 
 #[test]
 fn string_order_empty_lt_nonempty() {
     // Empty string is less than any non-empty string
-    assert_output(r#""" < "a""#, "true");
+    assert_val(r#""" < "a""#, T);
 }
 
 #[test]
 fn string_order_same_not_lt() {
-    assert_output(r#""abc" < "abc""#, "false");
+    assert_val(r#""abc" < "abc""#, F);
 }
 
 // ── Cross-type String Errors ────────────────────────────────────
@@ -3099,19 +3401,19 @@ fn string_eq_int_error() {
 fn probe17_let_returns_value_into_block() {
     // Per spec: let(x) returns x, so `1 >> let(x) >> { in + 1 }` should give 2.
     // The piped value 1 is bound to x, then 1 flows into { in + 1 }.
-    assert_output("1 >> let(x) >> { in + 1 }", "2");
+    assert_val("1 >> let(x) >> { in + 1 }", int(2));
 }
 
 #[test]
 fn probe17_let_returns_value_into_add() {
     // `5 >> let(x) >> { in + x }` — in is 5, x is 5, result is 10
-    assert_output("5 >> let(x) >> { in + x }", "10");
+    assert_val("5 >> let(x) >> { in + x }", int(10));
 }
 
 #[test]
 fn probe17_let_returns_value_into_tag() {
     // `42 >> let(x) >> W` — let passthrough, then wrap in W tag
-    assert_output("tag(W); 42 >> let(x) >> W >> { W(v) -> v }", "42");
+    assert_val("tag(W); 42 >> let(x) >> W >> { W(v) -> v }", int(42));
 }
 
 // ── 2. Semicolon sequencing with complex expressions ────────────
@@ -3119,25 +3421,25 @@ fn probe17_let_returns_value_into_tag() {
 #[test]
 fn probe17_semicolon_arithmetic_sequencing() {
     // `1 + 2; 3 + 4` should evaluate 1+2 (discard), then 3+4 = 7
-    assert_output("1 + 2; 3 + 4", "7");
+    assert_val("1 + 2; 3 + 4", int(7));
 }
 
 #[test]
 fn probe17_semicolon_let_chain() {
     // `let x = 1; let y = 2; x + y` should be 3
-    assert_output("let x = 1; let y = 2; x + y", "3");
+    assert_val("let x = 1; let y = 2; x + y", int(3));
 }
 
 #[test]
 fn probe17_semicolon_three_exprs() {
     // `1; 2; 3` should give 3 (last expression)
-    assert_output("1; 2; 3", "3");
+    assert_val("1; 2; 3", int(3));
 }
 
 #[test]
 fn probe17_semicolon_with_pipe() {
     // `let x = 10; x >> { in * 2 }` should be 20
-    assert_output("let x = 10; x >> { in * 2 }", "20");
+    assert_val("let x = 10; x >> { in * 2 }", int(20));
 }
 
 // ── 3. Block sugar edge cases ───────────────────────────────────
@@ -3145,49 +3447,49 @@ fn probe17_semicolon_with_pipe() {
 #[test]
 fn probe17_block_sugar_mul() {
     // `5 >> { * 2 }` is sugar for `5 >> { in * 2 }` = 10
-    assert_output("5 >> { * 2 }", "10");
+    assert_val("5 >> { * 2 }", int(10));
 }
 
 #[test]
 fn probe17_block_sugar_add() {
     // `5 >> { + 3 }` is sugar for `5 >> { in + 3 }` = 8
-    assert_output("5 >> { + 3 }", "8");
+    assert_val("5 >> { + 3 }", int(8));
 }
 
 #[test]
 fn probe17_block_sugar_eq() {
     // `5 >> { == 5 }` is sugar for `5 >> { in == 5 }` = true
-    assert_output("5 >> { == 5 }", "true");
+    assert_val("5 >> { == 5 }", T);
 }
 
 #[test]
 fn probe17_block_sugar_neq() {
     // `5 >> { != 3 }` is sugar for `5 >> { in != 3 }` = true
-    assert_output("5 >> { != 3 }", "true");
+    assert_val("5 >> { != 3 }", T);
 }
 
 #[test]
 fn probe17_block_sugar_gt() {
     // `5 >> { > 3 }` is sugar for `5 >> { in > 3 }` = true
-    assert_output("5 >> { > 3 }", "true");
+    assert_val("5 >> { > 3 }", T);
 }
 
 #[test]
 fn probe17_block_sugar_lt() {
     // `5 >> { < 10 }` is sugar for `5 >> { in < 10 }` = true
-    assert_output("5 >> { < 10 }", "true");
+    assert_val("5 >> { < 10 }", T);
 }
 
 #[test]
 fn probe17_block_sugar_gte() {
     // `5 >> { >= 5 }` is sugar for `5 >> { in >= 5 }` = true
-    assert_output("5 >> { >= 5 }", "true");
+    assert_val("5 >> { >= 5 }", T);
 }
 
 #[test]
 fn probe17_block_sugar_lte() {
     // `5 >> { <= 5 }` is sugar for `5 >> { in <= 5 }` = true
-    assert_output("5 >> { <= 5 }", "true");
+    assert_val("5 >> { <= 5 }", T);
 }
 
 #[test]
@@ -3199,7 +3501,7 @@ fn probe17_block_sugar_array_concat() {
 #[test]
 fn probe17_block_sugar_string_concat() {
     // `"hi" >> { + " world" }` is sugar for `"hi" >> { in + " world" }` = "hi world"
-    assert_output(r#""hi" >> { + " world" }"#, "hi world");
+    assert_val(r#""hi" >> { + " world" }"#, s("hi world"));
 }
 
 // ── 4. Nested blocks ────────────────────────────────────────────
@@ -3208,19 +3510,19 @@ fn probe17_block_sugar_string_concat() {
 fn probe17_nested_block_inner_in() {
     // `3 >> { in >> { in + 1 } }` — outer block receives 3,
     // pipes it to inner block, inner block's `in` is 3, result is 4
-    assert_output("3 >> { in >> { in + 1 } }", "4");
+    assert_val("3 >> { in >> { in + 1 } }", int(4));
 }
 
 #[test]
 fn probe17_nested_block_let_then_use() {
     // `3 >> { in >> let(x); x + 1 }` — bind the inner in to x, then x + 1 = 4
-    assert_output("3 >> { in >> let(x); x + 1 }", "4");
+    assert_val("3 >> { in >> let(x); x + 1 }", int(4));
 }
 
 #[test]
 fn probe17_nested_block_outer_in_rebind() {
     // Outer block's `in` is 10, rebind to `outer`, inner block adds `outer` and `in`
-    assert_output("10 >> { in >> let(outer); 5 >> { outer + in } }", "15");
+    assert_val("10 >> { in >> let(outer); 5 >> { outer + in } }", int(15));
 }
 
 // ── 5. Range ────────────────────────────────────────────────────
@@ -3234,13 +3536,13 @@ fn probe17_range_produces_struct() {
 #[test]
 fn probe17_range_fields_accessible() {
     // Can access start and end fields from a range, and add them
-    assert_output("1..3 >> let(r); r.start + r.end", "4");
+    assert_val("1..3 >> let(r); r.start + r.end", int(4));
 }
 
 #[test]
 fn probe17_range_in_parentheses() {
     // `(1..3).start` should give 1
-    assert_output("(1..3).start", "1");
+    assert_val("(1..3).start", int(1));
 }
 
 // ── 6. Pipe into method calls ───────────────────────────────────
@@ -3280,13 +3582,13 @@ fn probe17_div_then_div_syntax_error() {
 #[test]
 fn probe17_mul_then_div_ok() {
     // `a * b / c` is valid per spec
-    assert_output("12 * 2 / 3", "8");
+    assert_val("12 * 2 / 3", int(8));
 }
 
 #[test]
 fn probe17_div_with_parens_ok() {
     // Parenthesized division is fine
-    assert_output("(10 / 2) * 5", "25");
+    assert_val("(10 / 2) * 5", int(25));
 }
 
 // ── 8. Unary minus restriction: -a.f() is syntax error ──────────
@@ -3307,7 +3609,7 @@ fn probe17_unary_minus_call_syntax_error() {
 #[test]
 fn probe17_unary_minus_parenthesized_ok() {
     // `-(expr)` is valid
-    assert_output("-(3 + 2)", "-5");
+    assert_val("-(3 + 2)", int(-5));
 }
 
 // ── 9. tag(Name) produces unique tags ───────────────────────────
@@ -3336,9 +3638,9 @@ fn probe17_same_name_tags_still_unique() {
     // Even if we shadow a tag name, the old and new are different.
     // tag(X) twice: the second X shadows the first, but values tagged
     // with the second X should match the new X pattern.
-    assert_output(
+    assert_val(
         r#"tag(X); 1 >> X >> let(v1); tag(X); 2 >> X >> let(v2); v2 >> { X(n) -> n * 100 }"#,
-        "200",
+        int(200),
     );
 }
 
@@ -3356,29 +3658,29 @@ fn probe17_shadowed_tag_old_value_no_match() {
 #[test]
 fn probe17_empty_block_returns_unit() {
     // `5 >> {}` should evaluate to `()`
-    assert_output("5 >> {}", "()");
+    assert_val("5 >> {}", U);
 }
 
 #[test]
 fn probe17_empty_block_as_stored_function() {
     // Store empty block in a variable, apply it
-    assert_output("{} >> let(f); 42 >> f", "()");
+    assert_val("{} >> let(f); 42 >> f", U);
 }
 
 #[test]
 fn probe17_empty_block_ignores_input_string() {
     // Empty block ignores any input type
-    assert_output(r#""hello" >> {}"#, "()");
+    assert_val(r#""hello" >> {}"#, U);
 }
 
 #[test]
 fn probe17_empty_block_ignores_input_array() {
-    assert_output("[1, 2, 3] >> {}", "()");
+    assert_val("[1, 2, 3] >> {}", U);
 }
 
 #[test]
 fn probe17_empty_block_ignores_input_struct() {
-    assert_output("(a=1, b=2) >> {}", "()");
+    assert_val("(a=1, b=2) >> {}", U);
 }
 
 // ── Additional edge cases discovered during analysis ────────────
@@ -3386,50 +3688,50 @@ fn probe17_empty_block_ignores_input_struct() {
 #[test]
 fn probe17_let_in_pipe_preserves_input_for_later() {
     // `1 >> let(x); 2 >> let(y); x + y` — both x and y should be accessible
-    assert_output("1 >> let(x); 2 >> let(y); x + y", "3");
+    assert_val("1 >> let(x); 2 >> let(y); x + y", int(3));
 }
 
 #[test]
 fn probe17_pipe_through_multiple_lets() {
     // Value flows through let, into block, into another let
-    assert_output("10 >> let(a) >> { in + 5 } >> let(b); a + b", "25");
+    assert_val("10 >> let(a) >> { in + 5 } >> let(b); a + b", int(25));
 }
 
 #[test]
 fn probe17_block_sugar_pipe_into_function() {
     // `{ >> f }` is sugar for `{ in >> f }`
-    assert_output("{ in * 3 } >> let(f); 5 >> { >> f }", "15");
+    assert_val("{ in * 3 } >> let(f); 5 >> { >> f }", int(15));
 }
 
 #[test]
 fn probe17_semicolon_discards_first_value() {
     // Semicolon sequences: first expression is evaluated and discarded
-    assert_output("42; 99", "99");
+    assert_val("42; 99", int(99));
 }
 
 #[test]
 fn probe17_let_scope_extends_to_block_end() {
     // Let scope extends to the end of the block, not just to the next semicolon
-    assert_output("1 >> let(x); 2 >> let(y); 3 >> let(z); x + y + z", "6");
+    assert_val("1 >> let(x); 2 >> let(y); 3 >> let(z); x + y + z", int(6));
 }
 
 #[test]
 fn probe17_nested_block_in_does_not_leak() {
     // `in` in inner block refers to inner block's input, not outer
-    assert_output("10 >> { 20 >> { in } }", "20");
+    assert_val("10 >> { 20 >> { in } }", int(20));
 }
 
 #[test]
 fn probe17_block_sugar_with_div() {
     // `10 >> { / 2 }` is sugar for `10 >> { in / 2 }` = 5
-    assert_output("10 >> { / 2 }", "5");
+    assert_val("10 >> { / 2 }", int(5));
 }
 
 #[test]
 fn probe17_range_field_names() {
     // Range should have exactly `start` and `end` fields
-    assert_output("(0..10).start", "0");
-    assert_output("(0..10).end", "10");
+    assert_val("(0..10).start", int(0));
+    assert_val("(0..10).end", int(10));
 }
 
 #[test]
@@ -3441,13 +3743,13 @@ fn probe17_block_sugar_dotdot_range() {
 #[test]
 fn probe17_let_binding_complex_expr() {
     // Let sugar with a complex expression on the right
-    assert_output("let x = 3 + 4; x * 2", "14");
+    assert_val("let x = 3 + 4; x * 2", int(14));
 }
 
 #[test]
 fn probe17_pipe_into_comparison_block() {
     // Pipe into a block that does comparison and branches
-    assert_output("5 >> { in > 3 } >> { true -> 1, false -> 0 }", "1");
+    assert_val("5 >> { in > 3 } >> { true -> 1, false -> 0 }", int(1));
 }
 
 #[test]
@@ -3463,13 +3765,13 @@ fn probe17_empty_block_in_chain_produces_unit() {
 fn probe17_in_after_semicolon_in_block() {
     // Inside a block, after a semicolon, `in` should still refer to the block's input.
     // `5 >> { 99; in }` — 99 is discarded, `in` should still be 5.
-    assert_output("5 >> { 99; in }", "5");
+    assert_val("5 >> { 99; in }", int(5));
 }
 
 #[test]
 fn probe17_in_after_let_semicolon_in_block() {
     // Inside a block: `5 >> { let x = 10; in + x }` — `in` should be 5, x is 10
-    assert_output("5 >> { let x = 10; in + x }", "15");
+    assert_val("5 >> { let x = 10; in + x }", int(15));
 }
 
 #[test]
@@ -3477,13 +3779,13 @@ fn probe17_in_not_corrupted_by_semicolon_sequence() {
     // Top-level: `in` refers to program input which is Unit.
     // After semicolon, `in` should remain as program input.
     // In a block: `7 >> { 1; 2; in }` should give 7.
-    assert_output("7 >> { 1; 2; in }", "7");
+    assert_val("7 >> { 1; 2; in }", int(7));
 }
 
 #[test]
 fn probe17_let_sugar_preserves_in_in_block() {
     // `8 >> { let y = in + 1; y * 2 }` — `in` is 8, y is 9, result is 18
-    assert_output("8 >> { let y = in + 1; y * 2 }", "18");
+    assert_val("8 >> { let y = in + 1; y * 2 }", int(18));
 }
 
 // ── Probes: closure captures and scoping ────────────────────────
@@ -3491,7 +3793,7 @@ fn probe17_let_sugar_preserves_in_in_block() {
 #[test]
 fn probe17_closure_captures_outer_let() {
     // A closure should capture variables from its lexical scope
-    assert_output("let x = 10; { in + x } >> let(f); 5 >> f", "15");
+    assert_val("let x = 10; { in + x } >> let(f); 5 >> f", int(15));
 }
 
 #[test]
@@ -3504,7 +3806,10 @@ fn probe17_closure_does_not_see_later_bindings() {
 #[test]
 fn probe17_shadowed_variable_in_closure() {
     // A closure captures the value of x at the time it's defined
-    assert_output("let x = 1; { in + x } >> let(f); let x = 100; 5 >> f", "6");
+    assert_val(
+        "let x = 1; { in + x } >> let(f); let x = 100; 5 >> f",
+        int(6),
+    );
 }
 
 // ── Probes: struct/tuple edge cases ─────────────────────────────
@@ -3512,22 +3817,22 @@ fn probe17_shadowed_variable_in_closure() {
 #[test]
 fn probe17_single_elem_paren_is_not_tuple() {
     // `(1)` is just the parenthesized expression 1, not a tuple
-    assert_output("(1)", "1");
-    assert_output("(1) + 2", "3");
+    assert_val("(1)", int(1));
+    assert_val("(1) + 2", int(3));
 }
 
 #[test]
 fn probe17_unit_equality() {
     // () == () should be true
-    assert_output("() == ()", "true");
+    assert_val("() == ()", T);
 }
 
 #[test]
 fn probe17_struct_field_access_positional() {
     // Positional fields should be accessible by number
-    assert_output("(10, 20, 30).0", "10");
-    assert_output("(10, 20, 30).1", "20");
-    assert_output("(10, 20, 30).2", "30");
+    assert_val("(10, 20, 30).0", int(10));
+    assert_val("(10, 20, 30).1", int(20));
+    assert_val("(10, 20, 30).2", int(30));
 }
 
 // ── Probes: method calls on piped values ────────────────────────
@@ -3535,13 +3840,13 @@ fn probe17_struct_field_access_positional() {
 #[test]
 fn probe17_direct_method_on_piped_array() {
     // Direct method call via pipe chain: build array, get length
-    assert_output("[1, 2, 3, 4, 5].len()", "5");
+    assert_val("[1, 2, 3, 4, 5].len()", int(5));
 }
 
 #[test]
 fn probe17_method_on_let_bound_value() {
     // Bind an array, then call a method on it
-    assert_output("[1, 2, 3] >> let(arr); arr.len()", "3");
+    assert_val("[1, 2, 3] >> let(arr); arr.len()", int(3));
 }
 
 #[test]
@@ -3555,13 +3860,13 @@ fn probe17_method_map_with_explicit_in() {
 #[test]
 fn probe17_block_sugar_add_with_multiplication() {
     // `{ + 3 * 2 }` should be `{ in + 3 * 2 }` = `{ in + 6 }` (due to precedence)
-    assert_output("5 >> { + 3 * 2 }", "11");
+    assert_val("5 >> { + 3 * 2 }", int(11));
 }
 
 #[test]
 fn probe17_block_sugar_mul_with_addition() {
     // `{ * 2 + 1 }` should be `{ in * 2 + 1 }` = `{ (in * 2) + 1 }` = 11
-    assert_output("5 >> { * 2 + 1 }", "11");
+    assert_val("5 >> { * 2 + 1 }", int(11));
 }
 
 // ── Probes: pipe into various expression types ──────────────────
@@ -3569,19 +3874,19 @@ fn probe17_block_sugar_mul_with_addition() {
 #[test]
 fn probe17_pipe_into_variable_holding_function() {
     // `10 >> f` where f is a function
-    assert_output("{ in + 5 } >> let(f); 10 >> f", "15");
+    assert_val("{ in + 5 } >> let(f); 10 >> f", int(15));
 }
 
 #[test]
 fn probe17_pipe_into_tag_constructor() {
     // `42 >> MyTag` wraps the value
-    assert_output("tag(MyTag); 42 >> MyTag >> { MyTag(x) -> x }", "42");
+    assert_val("tag(MyTag); 42 >> MyTag >> { MyTag(x) -> x }", int(42));
 }
 
 #[test]
 fn probe17_pipe_into_builtin() {
     // `[1, 2, 3] >> len` should give 3
-    assert_output("[1, 2, 3] >> len", "3");
+    assert_val("[1, 2, 3] >> len", int(3));
 }
 
 // ── Probes: complex let chain interactions ──────────────────────
@@ -3589,19 +3894,19 @@ fn probe17_pipe_into_builtin() {
 #[test]
 fn probe17_let_destructure_then_use_both() {
     // Destructure a struct, then use both fields
-    assert_output("(a=3, b=7) >> let(a, b); a * b", "21");
+    assert_val("(a=3, b=7) >> let(a, b); a * b", int(21));
 }
 
 #[test]
 fn probe17_let_array_destructure_then_use() {
     // Destructure an array, use elements
-    assert_output("[10, 20, 30] >> let[a, b, c]; a + b + c", "60");
+    assert_val("[10, 20, 30] >> let[a, b, c]; a + b + c", int(60));
 }
 
 #[test]
 fn probe17_let_chain_array_then_struct() {
     // Array destructure followed by struct construction and access
-    assert_output("[1, 2] >> let[a, b]; (x=a, y=b).x + (x=a, y=b).y", "3");
+    assert_val("[1, 2] >> let[a, b]; (x=a, y=b).x + (x=a, y=b).y", int(3));
 }
 
 // ── Probes: edge cases in branch matching ───────────────────────
@@ -3609,19 +3914,25 @@ fn probe17_let_chain_array_then_struct() {
 #[test]
 fn probe17_branch_int_literal() {
     // Branching on integer literals
-    assert_output("2 >> { 1 -> 10, 2 -> 20, 3 -> 30 }", "20");
+    assert_val("2 >> { 1 -> 10, 2 -> 20, 3 -> 30 }", int(20));
 }
 
 #[test]
 fn probe17_branch_string_literal() {
     // Branching on string literals
-    assert_output(r#""hello" >> { "hello" -> 1, "world" -> 2, _ -> 0 }"#, "1");
+    assert_val(
+        r#""hello" >> { "hello" -> 1, "world" -> 2, _ -> 0 }"#,
+        int(1),
+    );
 }
 
 #[test]
 fn probe17_branch_with_guard_and_in() {
     // Guard can use `in`
-    assert_output("tag(N); 5 >> N >> { N(x) if in == N(5) -> 99, N(x) -> 0 }", "99");
+    assert_val(
+        "tag(N); 5 >> N >> { N(x) if in == N(5) -> 99, N(x) -> 0 }",
+        int(99),
+    );
 }
 
 // ── Probes: division edge cases ─────────────────────────────────
@@ -3630,13 +3941,13 @@ fn probe17_branch_with_guard_and_in() {
 fn probe17_div_right_requires_parens_for_complex() {
     // Per spec: `/` requires a single operand on the right,
     // so `a / (b * c)` should work
-    assert_output("24 / (2 * 3)", "4");
+    assert_val("24 / (2 * 3)", int(4));
 }
 
 #[test]
 fn probe17_div_in_block_sugar() {
     // `{ / 5 }` is sugar for `{ in / 5 }`
-    assert_output("100 >> { / 5 }", "20");
+    assert_val("100 >> { / 5 }", int(20));
 }
 
 // ── Probes: unary minus edge cases ──────────────────────────────
@@ -3645,19 +3956,19 @@ fn probe17_div_in_block_sugar() {
 fn probe17_double_negation() {
     // `- -5` — double negation: -((-5)) = 5
     // This depends on how the parser handles it
-    assert_output("- -5", "5");
+    assert_val("- -5", int(5));
 }
 
 #[test]
 fn probe17_negative_in_arithmetic() {
     // Negative values in arithmetic: `3 + -2` = 1
-    assert_output("3 + -2", "1");
+    assert_val("3 + -2", int(1));
 }
 
 #[test]
 fn probe17_unary_minus_in_block() {
     // Unary minus inside a block (explicit form): `{ (-in) }` or `{ in * -1 }`
-    assert_output("5 >> { in * -1 }", "-5");
+    assert_val("5 >> { in * -1 }", int(-5));
 }
 
 // ── Probes: string interpolation ────────────────────────────────
@@ -3668,7 +3979,7 @@ fn probe17_unary_minus_in_block() {
 #[test]
 fn probe17_string_interpolation_escaped_brace() {
     // Escaped brace: `\{` should produce literal `{`
-    assert_output(r#""\{hello\}""#, "{hello}");
+    assert_val(r#""\{hello\}""#, s("{hello}"));
 }
 
 // ── Probes: range interaction with other operators ──────────────
@@ -3692,16 +4003,13 @@ fn probe17_range_with_expressions() {
 #[test]
 fn probe17_in_accessible_after_nested_lets() {
     // `in` should still work deep inside nested let scopes
-    assert_output(
-        "100 >> { let a = 1; let b = 2; in + a + b }",
-        "103",
-    );
+    assert_val("100 >> { let a = 1; let b = 2; in + a + b }", int(103));
 }
 
 #[test]
 fn probe17_in_not_modified_by_let() {
     // `in` should not be shadowed by let bindings
-    assert_output("42 >> { let x = 99; in }", "42");
+    assert_val("42 >> { let x = 99; in }", int(42));
 }
 
 // ── Probes: pipe into call with args (f(x) prepending) ──────────
@@ -3709,13 +4017,13 @@ fn probe17_in_not_modified_by_let() {
 #[test]
 fn probe17_pipe_into_function_with_args() {
     // `value >> f(x)` is `f(value, x)` per spec
-    assert_output("fold([1, 2, 3], 0, { in.acc + in.elem })", "6");
+    assert_val("fold([1, 2, 3], 0, { in.acc + in.elem })", int(6));
 }
 
 #[test]
 fn probe17_pipe_into_fold_with_method_syntax() {
     // `[1, 2, 3].fold(0, { in.acc + in.elem })` should be 6
-    assert_output("[1, 2, 3].fold(0, { in.acc + in.elem })", "6");
+    assert_val("[1, 2, 3].fold(0, { in.acc + in.elem })", int(6));
 }
 
 // ── Probes: trailing semicolon behavior ─────────────────────────
@@ -3724,13 +4032,13 @@ fn probe17_pipe_into_fold_with_method_syntax() {
 fn probe17_trailing_semicolon_gives_unit() {
     // Per implementation: trailing semicolon means the expression
     // is followed by Unit
-    assert_output("42;", "()");
+    assert_val("42;", U);
 }
 
 #[test]
 fn probe17_trailing_semicolon_in_block() {
     // Trailing semicolon inside a block
-    assert_output("5 >> { 42; }", "()");
+    assert_val("5 >> { 42; }", U);
 }
 
 // ── Probes: complex pipe + let + block chains ───────────────────
@@ -3739,16 +4047,16 @@ fn probe17_trailing_semicolon_in_block() {
 fn probe17_pipe_let_pipe_block_pipe_let() {
     // Complex chain: 1 >> let(a) >> { in + 1 } >> let(b) >> { in + 1 } >> let(c); a + b + c
     // a=1, b=2, c=3; result=6
-    assert_output(
+    assert_val(
         "1 >> let(a) >> { in + 1 } >> let(b) >> { in + 1 } >> let(c); a + b + c",
-        "6",
+        int(6),
     );
 }
 
 #[test]
 fn probe17_let_sugar_multiple_with_complex_expr() {
     // `let x = 1 + 2; let y = x * 3; y + 1` = let x=3; let y=9; 9+1 = 10
-    assert_output("let x = 1 + 2; let y = x * 3; y + 1", "10");
+    assert_val("let x = 1 + 2; let y = x * 3; y + 1", int(10));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -3759,186 +4067,207 @@ fn probe17_let_sugar_multiple_with_complex_expr() {
 
 #[test]
 fn probe17b_branch_int_match_first() {
-    assert_output(r#"1 >> { 1 -> "one", 2 -> "two", _ -> "other" }"#, "one");
+    assert_val(r#"1 >> { 1 -> "one", 2 -> "two", _ -> "other" }"#, s("one"));
 }
 
 #[test]
 fn probe17b_branch_int_match_second() {
-    assert_output(r#"2 >> { 1 -> "one", 2 -> "two", _ -> "other" }"#, "two");
+    assert_val(r#"2 >> { 1 -> "one", 2 -> "two", _ -> "other" }"#, s("two"));
 }
 
 #[test]
 fn probe17b_branch_int_match_wildcard() {
-    assert_output(r#"3 >> { 1 -> "one", 2 -> "two", _ -> "other" }"#, "other");
+    assert_val(
+        r#"3 >> { 1 -> "one", 2 -> "two", _ -> "other" }"#,
+        s("other"),
+    );
 }
 
 #[test]
 fn probe17b_branch_int_zero() {
-    assert_output(r#"0 >> { 0 -> "zero", _ -> "nonzero" }"#, "zero");
+    assert_val(r#"0 >> { 0 -> "zero", _ -> "nonzero" }"#, s("zero"));
 }
 
 #[test]
 fn probe17b_branch_int_large() {
     // Test with large int values to ensure comparison works
-    assert_output("999999 >> { 999999 -> 1, _ -> 0 }", "1");
+    assert_val("999999 >> { 999999 -> 1, _ -> 0 }", int(1));
 }
 
 // ── 2. Branching on strings ─────────────────────────────────────────
 
 #[test]
 fn probe17b_branch_string_match() {
-    assert_output(r#""hello" >> { "hello" -> 1, "world" -> 2, _ -> 0 }"#, "1");
+    assert_val(
+        r#""hello" >> { "hello" -> 1, "world" -> 2, _ -> 0 }"#,
+        int(1),
+    );
 }
 
 #[test]
 fn probe17b_branch_string_match_second() {
-    assert_output(r#""world" >> { "hello" -> 1, "world" -> 2, _ -> 0 }"#, "2");
+    assert_val(
+        r#""world" >> { "hello" -> 1, "world" -> 2, _ -> 0 }"#,
+        int(2),
+    );
 }
 
 #[test]
 fn probe17b_branch_string_no_match() {
-    assert_output(r#""foo" >> { "hello" -> 1, "world" -> 2, _ -> 0 }"#, "0");
+    assert_val(r#""foo" >> { "hello" -> 1, "world" -> 2, _ -> 0 }"#, int(0));
 }
 
 #[test]
 fn probe17b_branch_string_empty() {
     // Empty string as pattern
-    assert_output(r#""" >> { "" -> "empty", _ -> "nonempty" }"#, "empty");
+    assert_val(r#""" >> { "" -> "empty", _ -> "nonempty" }"#, s("empty"));
 }
 
 // ── 3. Branching on chars ───────────────────────────────────────────
 
 #[test]
 fn probe17b_branch_char_match() {
-    assert_output("'a' >> { 'a' -> 1, 'b' -> 2, _ -> 0 }", "1");
+    assert_val("'a' >> { 'a' -> 1, 'b' -> 2, _ -> 0 }", int(1));
 }
 
 #[test]
 fn probe17b_branch_char_match_second() {
-    assert_output("'b' >> { 'a' -> 1, 'b' -> 2, _ -> 0 }", "2");
+    assert_val("'b' >> { 'a' -> 1, 'b' -> 2, _ -> 0 }", int(2));
 }
 
 #[test]
 fn probe17b_branch_char_no_match() {
-    assert_output("'z' >> { 'a' -> 1, 'b' -> 2, _ -> 0 }", "0");
+    assert_val("'z' >> { 'a' -> 1, 'b' -> 2, _ -> 0 }", int(0));
 }
 
 // ── 4. Branching on bytes ───────────────────────────────────────────
 
 #[test]
 fn probe17b_branch_byte_match() {
-    assert_output("b'x' >> { b'x' -> 1, b'y' -> 2, _ -> 0 }", "1");
+    assert_val("b'x' >> { b'x' -> 1, b'y' -> 2, _ -> 0 }", int(1));
 }
 
 #[test]
 fn probe17b_branch_byte_match_second() {
-    assert_output("b'y' >> { b'x' -> 1, b'y' -> 2, _ -> 0 }", "2");
+    assert_val("b'y' >> { b'x' -> 1, b'y' -> 2, _ -> 0 }", int(2));
 }
 
 #[test]
 fn probe17b_branch_byte_no_match() {
-    assert_output("b'z' >> { b'x' -> 1, b'y' -> 2, _ -> 0 }", "0");
+    assert_val("b'z' >> { b'x' -> 1, b'y' -> 2, _ -> 0 }", int(0));
 }
 
 // ── 5. Guard clauses ────────────────────────────────────────────────
 
 #[test]
 fn probe17b_guard_true_path() {
-    assert_output(r#"5 >> { x if x > 3 -> "big", x -> "small" }"#, "big");
+    assert_val(r#"5 >> { x if x > 3 -> "big", x -> "small" }"#, s("big"));
 }
 
 #[test]
 fn probe17b_guard_false_path() {
-    assert_output(r#"1 >> { x if x > 3 -> "big", x -> "small" }"#, "small");
+    assert_val(r#"1 >> { x if x > 3 -> "big", x -> "small" }"#, s("small"));
 }
 
 #[test]
 fn probe17b_guard_boundary_value() {
     // x == 3 is NOT > 3, so should fall through
-    assert_output(r#"3 >> { x if x > 3 -> "big", x -> "small" }"#, "small");
+    assert_val(r#"3 >> { x if x > 3 -> "big", x -> "small" }"#, s("small"));
 }
 
 #[test]
 fn probe17b_guard_with_equality() {
     // Guard using == instead of >
-    assert_output(r#"42 >> { x if x == 42 -> "found", _ -> "not found" }"#, "found");
+    assert_val(
+        r#"42 >> { x if x == 42 -> "found", _ -> "not found" }"#,
+        s("found"),
+    );
 }
 
 #[test]
 fn probe17b_guard_multiple_arms() {
     // Multiple guarded arms in sequence
-    assert_output(
+    assert_val(
         r#"5 >> { x if x > 10 -> "big", x if x > 3 -> "medium", x -> "small" }"#,
-        "medium",
+        s("medium"),
     );
 }
 
 #[test]
 fn probe17b_guard_non_boolean_error() {
     // Guard that returns non-boolean should error
-    assert_error(
-        "5 >> { x if x + 1 -> x }",
-        "guard must be boolean",
-    );
+    assert_error("5 >> { x if x + 1 -> x }", "guard must be boolean");
 }
 
 // ── 6. Branching on Unit ────────────────────────────────────────────
 
 #[test]
 fn probe17b_branch_unit_match() {
-    assert_output(r#"() >> { () -> "unit", _ -> "other" }"#, "unit");
+    assert_val(r#"() >> { () -> "unit", _ -> "other" }"#, s("unit"));
 }
 
 #[test]
 fn probe17b_branch_unit_no_match() {
-    assert_output(r#"42 >> { () -> "unit", _ -> "other" }"#, "other");
+    assert_val(r#"42 >> { () -> "unit", _ -> "other" }"#, s("other"));
 }
 
 // ── 7. Negative literal patterns ────────────────────────────────────
 
 #[test]
 fn probe17b_branch_neg_int_match() {
-    assert_output(r#"-1 >> { -1 -> "neg one", 0 -> "zero", _ -> "other" }"#, "neg one");
+    assert_val(
+        r#"-1 >> { -1 -> "neg one", 0 -> "zero", _ -> "other" }"#,
+        s("neg one"),
+    );
 }
 
 #[test]
 fn probe17b_branch_neg_int_zero() {
-    assert_output(r#"0 >> { -1 -> "neg one", 0 -> "zero", _ -> "other" }"#, "zero");
+    assert_val(
+        r#"0 >> { -1 -> "neg one", 0 -> "zero", _ -> "other" }"#,
+        s("zero"),
+    );
 }
 
 #[test]
 fn probe17b_branch_neg_int_positive() {
-    assert_output(r#"1 >> { -1 -> "neg one", 0 -> "zero", _ -> "other" }"#, "other");
+    assert_val(
+        r#"1 >> { -1 -> "neg one", 0 -> "zero", _ -> "other" }"#,
+        s("other"),
+    );
 }
 
 #[test]
 fn probe17b_branch_neg_float_match() {
-    assert_output(r#"-3.14 >> { -3.14 -> "neg pi", _ -> "other" }"#, "neg pi");
+    assert_val(
+        r#"-3.14 >> { -3.14 -> "neg pi", _ -> "other" }"#,
+        s("neg pi"),
+    );
 }
 
 // ── 8. Tag patterns with guards ─────────────────────────────────────
 
 #[test]
 fn probe17b_tag_guard_match() {
-    assert_output(
+    assert_val(
         r#"tag(Ok); tag(Err); Ok(5) >> { Ok(x) if x > 3 -> "big ok", Ok(x) -> "small ok", Err(_) -> "error" }"#,
-        "big ok",
+        s("big ok"),
     );
 }
 
 #[test]
 fn probe17b_tag_guard_fallthrough() {
-    assert_output(
+    assert_val(
         r#"tag(Ok); tag(Err); Ok(1) >> { Ok(x) if x > 3 -> "big ok", Ok(x) -> "small ok", Err(_) -> "error" }"#,
-        "small ok",
+        s("small ok"),
     );
 }
 
 #[test]
 fn probe17b_tag_guard_err_arm() {
-    assert_output(
+    assert_val(
         r#"tag(Ok); tag(Err); Err("fail") >> { Ok(x) if x > 3 -> "big ok", Ok(x) -> "small ok", Err(_) -> "error" }"#,
-        "error",
+        s("error"),
     );
 }
 
@@ -3967,26 +4296,26 @@ fn probe17b_nonexhaustive_bool() {
 #[test]
 fn probe17b_tag_no_payload_match() {
     // None(()) creates tagged unit; branch pattern `None` matches tagged unit
-    assert_output(
+    assert_val(
         r#"tag(None); tag(Some); None() >> { None -> "nothing", Some(x) -> "something" }"#,
-        "nothing",
+        s("nothing"),
     );
 }
 
 #[test]
 fn probe17b_tag_no_payload_some_arm() {
-    assert_output(
+    assert_val(
         r#"tag(None); tag(Some); Some(42) >> { None -> "nothing", Some(x) -> "something" }"#,
-        "something",
+        s("something"),
     );
 }
 
 #[test]
 fn probe17b_tag_no_payload_pipe_syntax() {
     // Using () >> None instead of None()
-    assert_output(
+    assert_val(
         r#"tag(None); tag(Some); () >> None >> { None -> "nothing", Some(x) -> "something" }"#,
-        "nothing",
+        s("nothing"),
     );
 }
 
@@ -3994,34 +4323,34 @@ fn probe17b_tag_no_payload_pipe_syntax() {
 
 #[test]
 fn probe17b_nested_branch_ok_big() {
-    assert_output(
+    assert_val(
         r#"tag(Ok); tag(Err); Ok(5) >> { Ok(x) -> (x > 3 >> { true -> "big", false -> "small" }), Err(_) -> "err" }"#,
-        "big",
+        s("big"),
     );
 }
 
 #[test]
 fn probe17b_nested_branch_ok_small() {
-    assert_output(
+    assert_val(
         r#"tag(Ok); tag(Err); Ok(1) >> { Ok(x) -> (x > 3 >> { true -> "big", false -> "small" }), Err(_) -> "err" }"#,
-        "small",
+        s("small"),
     );
 }
 
 #[test]
 fn probe17b_nested_branch_err() {
-    assert_output(
+    assert_val(
         r#"tag(Ok); tag(Err); Err("oops") >> { Ok(x) -> (x > 3 >> { true -> "big", false -> "small" }), Err(_) -> "err" }"#,
-        "err",
+        s("err"),
     );
 }
 
 #[test]
 fn probe17b_nested_branch_double() {
     // Double-nested: branch inside branch inside branch
-    assert_output(
+    assert_val(
         r#"true >> { true -> (1 >> { 1 -> "one", _ -> "other" }), false -> "no" }"#,
-        "one",
+        s("one"),
     );
 }
 
@@ -4029,43 +4358,43 @@ fn probe17b_nested_branch_double() {
 
 #[test]
 fn probe17b_branch_float_match() {
-    assert_output(r#"3.14 >> { 3.14 -> "pi", _ -> "other" }"#, "pi");
+    assert_val(r#"3.14 >> { 3.14 -> "pi", _ -> "other" }"#, s("pi"));
 }
 
 #[test]
 fn probe17b_branch_float_no_match() {
-    assert_output(r#"2.71 >> { 3.14 -> "pi", _ -> "other" }"#, "other");
+    assert_val(r#"2.71 >> { 3.14 -> "pi", _ -> "other" }"#, s("other"));
 }
 
 #[test]
 fn probe17b_branch_float_zero() {
-    assert_output(r#"0.0 >> { 0.0 -> "zero", _ -> "nonzero" }"#, "zero");
+    assert_val(r#"0.0 >> { 0.0 -> "zero", _ -> "nonzero" }"#, s("zero"));
 }
 
 // ── 13. Branching block as standalone lambda ────────────────────────
 
 #[test]
 fn probe17b_branch_as_lambda() {
-    assert_output(
+    assert_val(
         r#"let f = { 1 -> "one", 2 -> "two", _ -> "other" }; 2 >> f"#,
-        "two",
+        s("two"),
     );
 }
 
 #[test]
 fn probe17b_branch_as_lambda_wildcard() {
-    assert_output(
+    assert_val(
         r#"let f = { 1 -> "one", 2 -> "two", _ -> "other" }; 99 >> f"#,
-        "other",
+        s("other"),
     );
 }
 
 #[test]
 fn probe17b_branch_as_lambda_call_syntax() {
     // Use f(value) call syntax with a branching lambda
-    assert_output(
+    assert_val(
         r#"let f = { 1 -> "one", 2 -> "two", _ -> "other" }; f(1)"#,
-        "one",
+        s("one"),
     );
 }
 
@@ -4077,16 +4406,13 @@ fn probe17b_binding_vs_tag_resolution() {
     // it should match as a tag pattern (no-payload), not as a binding.
     // This test verifies that `Done` in the pattern matches the tag, not
     // as a catch-all binding — so 42 (untagged) won't match.
-    assert_error(
-        r#"tag(Done); 42 >> { Done -> "done" }"#,
-        "no arm matched",
-    );
+    assert_error(r#"tag(Done); 42 >> { Done -> "done" }"#, "no arm matched");
 }
 
 #[test]
 fn probe17b_binding_name_not_tag_is_catchall() {
     // An identifier that is NOT a tag in scope should be a catch-all binding
-    assert_output("42 >> { x -> x + 1 }", "43");
+    assert_val("42 >> { x -> x + 1 }", int(43));
 }
 
 // ── 15. Guard with tag pattern binding value usage ──────────────────
@@ -4094,17 +4420,17 @@ fn probe17b_binding_name_not_tag_is_catchall() {
 #[test]
 fn probe17b_tag_guard_uses_extracted_binding() {
     // Guard references the binding extracted from the tag
-    assert_output(
+    assert_val(
         "tag(N); 10 >> N >> { N(x) if x == 10 -> x * 2, N(x) -> x }",
-        "20",
+        int(20),
     );
 }
 
 #[test]
 fn probe17b_tag_guard_binding_falls_through() {
-    assert_output(
+    assert_val(
         "tag(N); 5 >> N >> { N(x) if x == 10 -> x * 2, N(x) -> x }",
-        "5",
+        int(5),
     );
 }
 
@@ -4113,13 +4439,13 @@ fn probe17b_tag_guard_binding_falls_through() {
 #[test]
 fn probe17b_branch_body_uses_in() {
     // `in` in a branch arm body refers to the branching block's input
-    assert_output("42 >> { _ -> in + 1 }", "43");
+    assert_val("42 >> { _ -> in + 1 }", int(43));
 }
 
 #[test]
 fn probe17b_branch_body_in_with_binding() {
     // Both the binding and `in` should be usable
-    assert_output("42 >> { x -> x + in }", "84");
+    assert_val("42 >> { x -> x + in }", int(84));
 }
 
 // ── 17. Multiple literal types in same branch block ─────────────────
@@ -4128,18 +4454,18 @@ fn probe17b_branch_body_in_with_binding() {
 fn probe17b_mixed_literal_types_in_branch() {
     // Integer and string patterns in the same branch block
     // The integer pattern should not match a string input; fall through to wildcard
-    assert_output(
+    assert_val(
         r#""hello" >> { 42 -> "int", "hello" -> "str", _ -> "other" }"#,
-        "str",
+        s("str"),
     );
 }
 
 #[test]
 fn probe17b_mixed_literal_bool_and_int() {
     // Bool and int patterns; a boolean should not match an int literal
-    assert_output(
+    assert_val(
         r#"true >> { 1 -> "one", true -> "yes", _ -> "other" }"#,
-        "yes",
+        s("yes"),
     );
 }
 
@@ -4147,10 +4473,7 @@ fn probe17b_mixed_literal_bool_and_int() {
 
 #[test]
 fn probe17b_tag_extract_and_compute() {
-    assert_output(
-        "tag(W); W(10) >> { W(x) -> x * x + 1 }",
-        "101",
-    );
+    assert_val("tag(W); W(10) >> { W(x) -> x * x + 1 }", int(101));
 }
 
 // ── 19. Wildcard-only branch ────────────────────────────────────────
@@ -4158,13 +4481,13 @@ fn probe17b_tag_extract_and_compute() {
 #[test]
 fn probe17b_wildcard_only_branch() {
     // A branch with only a wildcard pattern — always matches
-    assert_output(r#"42 >> { _ -> "always" }"#, "always");
+    assert_val(r#"42 >> { _ -> "always" }"#, s("always"));
 }
 
 #[test]
 fn probe17b_binding_only_branch() {
     // A branch with only a binding pattern — always matches and binds
-    assert_output("42 >> { x -> x + 1 }", "43");
+    assert_val("42 >> { x -> x + 1 }", int(43));
 }
 
 // ── 20. Chained pipe into branching ─────────────────────────────────
@@ -4172,18 +4495,18 @@ fn probe17b_binding_only_branch() {
 #[test]
 fn probe17b_chained_pipe_branch() {
     // Result of first branch piped into second branch
-    assert_output(
+    assert_val(
         "1 >> { 1 -> 10, _ -> 0 } >> { 10 -> 100, _ -> 0 }",
-        "100",
+        int(100),
     );
 }
 
 #[test]
 fn probe17b_three_chained_branches() {
     // Triple-chained branching
-    assert_output(
+    assert_val(
         r#"true >> { true -> 1, false -> 0 } >> { 1 -> "one", 0 -> "zero", _ -> "?" } >> { "one" -> 100, _ -> 0 }"#,
-        "100",
+        int(100),
     );
 }
 
@@ -4191,9 +4514,9 @@ fn probe17b_three_chained_branches() {
 
 #[test]
 fn probe17b_branch_result_in_let() {
-    assert_output(
+    assert_val(
         r#"let result = 1 >> { 1 -> "one", _ -> "other" }; result"#,
-        "one",
+        s("one"),
     );
 }
 
@@ -4202,9 +4525,9 @@ fn probe17b_branch_result_in_let() {
 #[test]
 fn probe17b_tag_pattern_discard_binding() {
     // Ok(_) discards the payload but still matches the tag
-    assert_output(
+    assert_val(
         r#"tag(Ok); tag(Err); Ok(42) >> { Ok(_) -> "ok", Err(_) -> "err" }"#,
-        "ok",
+        s("ok"),
     );
 }
 
@@ -4213,10 +4536,7 @@ fn probe17b_tag_pattern_discard_binding() {
 #[test]
 fn probe17b_tag_pattern_empty_parens() {
     // Tag() in branch pattern — parens with no binding
-    assert_output(
-        "tag(W); W(42) >> { W() -> 1, _ -> 0 }",
-        "1",
-    );
+    assert_val("tag(W); W(42) >> { W() -> 1, _ -> 0 }", int(1));
 }
 
 // ── 24. Int/float cross-matching in branch patterns ─────────────────
@@ -4225,13 +4545,19 @@ fn probe17b_tag_pattern_empty_parens() {
 fn probe17b_int_vs_float_pattern() {
     // An int value against a float pattern — does 1 match 1.0?
     // This probes whether the comparison logic handles int-float coercion
-    assert_output(r#"1 >> { 1.0 -> "float match", _ -> "no match" }"#, "float match");
+    assert_val(
+        r#"1 >> { 1.0 -> "float match", _ -> "no match" }"#,
+        s("float match"),
+    );
 }
 
 #[test]
 fn probe17b_float_vs_int_pattern() {
     // A float value against an int pattern — does 1.0 match 1?
-    assert_output(r#"1.0 >> { 1 -> "int match", _ -> "no match" }"#, "int match");
+    assert_val(
+        r#"1.0 >> { 1 -> "int match", _ -> "no match" }"#,
+        s("int match"),
+    );
 }
 
 // ── 25. Branch with expression in body requiring parens ─────────────
@@ -4239,10 +4565,7 @@ fn probe17b_float_vs_int_pattern() {
 #[test]
 fn probe17b_branch_body_pipe() {
     // Branch body that itself does a pipe
-    assert_output(
-        "5 >> { x -> x >> { in * 2 } }",
-        "10",
-    );
+    assert_val("5 >> { x -> x >> { in * 2 } }", int(10));
 }
 
 // ── 26. Guard that references outer scope ───────────────────────────
@@ -4250,17 +4573,17 @@ fn probe17b_branch_body_pipe() {
 #[test]
 fn probe17b_guard_references_outer_scope() {
     // Guard references a variable from outer scope
-    assert_output(
+    assert_val(
         r#"let threshold = 3; 5 >> { x if x > threshold -> "big", x -> "small" }"#,
-        "big",
+        s("big"),
     );
 }
 
 #[test]
 fn probe17b_guard_references_outer_scope_false() {
-    assert_output(
+    assert_val(
         r#"let threshold = 10; 5 >> { x if x > threshold -> "big", x -> "small" }"#,
-        "small",
+        s("small"),
     );
 }
 
@@ -4269,9 +4592,9 @@ fn probe17b_guard_references_outer_scope_false() {
 #[test]
 fn probe17b_bool_pattern_with_int_input() {
     // Piping an int into a branch with bool patterns — should fall through to wildcard
-    assert_output(
+    assert_val(
         r#"42 >> { true -> "yes", false -> "no", _ -> "neither" }"#,
-        "neither",
+        s("neither"),
     );
 }
 
@@ -4280,10 +4603,7 @@ fn probe17b_bool_pattern_with_int_input() {
 #[test]
 fn probe17b_first_match_wins() {
     // Two identical patterns: the first one should win
-    assert_output(
-        "1 >> { 1 -> 100, 1 -> 200, _ -> 0 }",
-        "100",
-    );
+    assert_val("1 >> { 1 -> 100, 1 -> 200, _ -> 0 }", int(100));
 }
 
 // ── 29. Branching block captures closure environment ────────────────
@@ -4291,9 +4611,9 @@ fn probe17b_first_match_wins() {
 #[test]
 fn probe17b_branch_closure_captures() {
     // A branching lambda defined inside a let-scope should capture the scope
-    assert_output(
+    assert_val(
         r#"let multiplier = 10; let f = { 1 -> multiplier, _ -> 0 }; 1 >> f"#,
-        "10",
+        int(10),
     );
 }
 
@@ -4302,9 +4622,9 @@ fn probe17b_branch_closure_captures() {
 #[test]
 fn probe17b_nested_tag_matching() {
     // Match on tag, extract value, then match on another tag
-    assert_output(
+    assert_val(
         "tag(Ok); tag(Err); tag(W); Ok(W(5)) >> { Ok(inner) -> (inner >> { W(x) -> x * 2 }), Err(_) -> 0 }",
-        "10",
+        int(10),
     );
 }
 
@@ -4313,8 +4633,8 @@ fn probe17b_nested_tag_matching() {
 #[test]
 fn probe17b_all_bool_arms_no_wildcard() {
     // All boolean arms covered — should work
-    assert_output("true >> { true -> 1, false -> 0 }", "1");
-    assert_output("false >> { true -> 1, false -> 0 }", "0");
+    assert_val("true >> { true -> 1, false -> 0 }", int(1));
+    assert_val("false >> { true -> 1, false -> 0 }", int(0));
 }
 
 // ── 32. Tag pattern where tag name is not in scope ──────────────────
@@ -4324,19 +4644,13 @@ fn probe17b_undefined_tag_in_pattern_is_binding() {
     // Using a tag name in a pattern that hasn't been defined
     // The parser stores it as a Binding, so `Foo` becomes a catch-all binding
     // when the name is not a tag in scope.
-    assert_output(
-        r#"42 >> { Foo -> "matched" }"#,
-        "matched",
-    );
+    assert_val(r#"42 >> { Foo -> "matched" }"#, s("matched"));
 }
 
 #[test]
 fn probe17b_undefined_tag_pattern_with_parens() {
     // Using Tag(x) pattern with undefined tag should error at eval time
-    assert_error(
-        "42 >> { Foo(x) -> x }",
-        "undefined tag",
-    );
+    assert_error("42 >> { Foo(x) -> x }", "undefined tag");
 }
 
 // ── 33. Trailing comma in branch arms ───────────────────────────────
@@ -4344,14 +4658,14 @@ fn probe17b_undefined_tag_pattern_with_parens() {
 #[test]
 fn probe17b_trailing_comma_in_branch() {
     // Trailing comma after last arm
-    assert_output(r#"1 >> { 1 -> "one", _ -> "other", }"#, "one");
+    assert_val(r#"1 >> { 1 -> "one", _ -> "other", }"#, s("one"));
 }
 
 // ── 34. Single-arm branch ───────────────────────────────────────────
 
 #[test]
 fn probe17b_single_arm_branch_match() {
-    assert_output("42 >> { 42 -> 1 }", "1");
+    assert_val("42 >> { 42 -> 1 }", int(1));
 }
 
 #[test]
@@ -4364,9 +4678,9 @@ fn probe17b_single_arm_branch_no_match() {
 #[test]
 fn probe17b_guard_with_complex_expr() {
     // Guard with `and` function for logical AND
-    assert_output(
+    assert_val(
         r#"10 >> { x if and(x > 5, x < 20) -> "in range", _ -> "out of range" }"#,
-        "in range",
+        s("in range"),
     );
 }
 
@@ -4377,9 +4691,9 @@ fn probe17b_same_name_tags_different_scopes() {
     // Two different `tag(A)` calls create distinct tag identities.
     // The second `tag(A)` shadows the first binding.
     // Matching should use the currently-in-scope tag identity.
-    assert_output(
+    assert_val(
         "tag(A); let a1 = A; tag(A); let a2 = A; 42 >> a2 >> { A(x) -> x }",
-        "42",
+        int(42),
     );
 }
 
@@ -4398,10 +4712,7 @@ fn probe17b_tag_identity_mismatch() {
 
 #[test]
 fn probe17b_branch_result_pipe_into_function() {
-    assert_output(
-        "tag(W); 1 >> { 1 -> 42, _ -> 0 } >> W",
-        "W(42)",
-    );
+    assert_output("tag(W); 1 >> { 1 -> 42, _ -> 0 } >> W", "W(42)");
 }
 
 // ── 38. Hex integer as branch pattern ───────────────────────────────
@@ -4409,16 +4720,16 @@ fn probe17b_branch_result_pipe_into_function() {
 #[test]
 fn probe17b_hex_int_branch_pattern() {
     // 0xFF == 255 in pattern position
-    assert_output("255 >> { 0xFF -> 1, _ -> 0 }", "1");
+    assert_val("255 >> { 0xFF -> 1, _ -> 0 }", int(1));
 }
 
 // ── 39. Deeply nested branching (stress test) ───────────────────────
 
 #[test]
 fn probe17b_deeply_nested_branch() {
-    assert_output(
+    assert_val(
         r#"1 >> { 1 -> (2 >> { 2 -> (3 >> { 3 -> "deep", _ -> "no" }), _ -> "no" }), _ -> "no" }"#,
-        "deep",
+        s("deep"),
     );
 }
 
@@ -4427,23 +4738,23 @@ fn probe17b_deeply_nested_branch() {
 #[test]
 fn probe17b_branch_char_escape() {
     // '\n' as a branch pattern
-    assert_output(r"'\n' >> { '\n' -> 1, _ -> 0 }", "1");
+    assert_val(r"'\n' >> { '\n' -> 1, _ -> 0 }", int(1));
 }
 
 // ── 41. Branch on byte zero ─────────────────────────────────────────
 
 #[test]
 fn probe17b_branch_byte_zero() {
-    assert_output(r"b'\0' >> { b'\0' -> 1, _ -> 0 }", "1");
+    assert_val(r"b'\0' >> { b'\0' -> 1, _ -> 0 }", int(1));
 }
 
 // ── 42. Guard with `not` function ───────────────────────────────────
 
 #[test]
 fn probe17b_guard_with_not() {
-    assert_output(
+    assert_val(
         r#"5 >> { x if not(x == 3) -> "not three", _ -> "three" }"#,
-        "not three",
+        s("not three"),
     );
 }
 
@@ -4452,9 +4763,9 @@ fn probe17b_guard_with_not() {
 #[test]
 fn probe17b_branch_via_let_and_pipe() {
     // Store branching block in a variable, use it in a pipe chain
-    assert_output(
+    assert_val(
         r#"let classify = { x if x > 0 -> "positive", x if x < 0 -> "negative", _ -> "zero" }; 0 - 5 >> classify"#,
-        "negative",
+        s("negative"),
     );
 }
 
@@ -4463,10 +4774,7 @@ fn probe17b_branch_via_let_and_pipe() {
 #[test]
 fn probe17b_tag_with_struct_payload() {
     // Branch on a tagged value; the tag has a struct payload
-    assert_output(
-        "tag(P); P((x=1, y=2)) >> { P(p) -> p.x + p.y }",
-        "3",
-    );
+    assert_val("tag(P); P((x=1, y=2)) >> { P(p) -> p.x + p.y }", int(3));
 }
 
 // ── 45. Guard that uses `in` ────────────────────────────────────────
@@ -4474,20 +4782,14 @@ fn probe17b_tag_with_struct_payload() {
 #[test]
 fn probe17b_guard_uses_in() {
     // The guard should also have access to `in` (the branching block's input)
-    assert_output(
-        r#"42 >> { x if in > 40 -> "big", _ -> "small" }"#,
-        "big",
-    );
+    assert_val(r#"42 >> { x if in > 40 -> "big", _ -> "small" }"#, s("big"));
 }
 
 // ── 46. Branch with array payload in tag ────────────────────────────
 
 #[test]
 fn probe17b_tag_with_array_payload() {
-    assert_output(
-        "tag(V); V([1, 2, 3]) >> { V(arr) -> arr >> len }",
-        "3",
-    );
+    assert_val("tag(V); V([1, 2, 3]) >> { V(arr) -> arr >> len }", int(3));
 }
 
 // ── 47. Multiple wildcard/binding arms — first matching wins ────────
@@ -4495,10 +4797,7 @@ fn probe17b_tag_with_array_payload() {
 #[test]
 fn probe17b_multiple_wildcards_first_wins() {
     // If there are multiple catch-all arms, the first one should win
-    assert_output(
-        "42 >> { _ -> 1, _ -> 2, _ -> 3 }",
-        "1",
-    );
+    assert_val("42 >> { _ -> 1, _ -> 2, _ -> 3 }", int(1));
 }
 
 // ── 48. Branch on negative zero float ───────────────────────────────
@@ -4506,7 +4805,10 @@ fn probe17b_multiple_wildcards_first_wins() {
 #[test]
 fn probe17b_branch_negative_zero_float() {
     // In IEEE 754, -0.0 == 0.0 — should match
-    assert_output(r#"0.0 >> { -0.0 -> "neg zero match", _ -> "no" }"#, "neg zero match");
+    assert_val(
+        r#"0.0 >> { -0.0 -> "neg zero match", _ -> "no" }"#,
+        s("neg zero match"),
+    );
 }
 
 // ── 49. Tag guard where guard references payload name from prior failed arm ──
@@ -4515,9 +4817,9 @@ fn probe17b_branch_negative_zero_float() {
 fn probe17b_guard_binding_not_leaking() {
     // When Ok(x) if x > 10 fails the guard, the binding x should NOT
     // leak into subsequent arms. The next arm re-binds x.
-    assert_output(
+    assert_val(
         "tag(Ok); Ok(5) >> { Ok(x) if x > 10 -> x * 100, Ok(x) -> x + 1 }",
-        "6",
+        int(6),
     );
 }
 
@@ -4526,9 +4828,9 @@ fn probe17b_guard_binding_not_leaking() {
 #[test]
 fn probe17b_branch_lambda_reuse() {
     // A branching block stored as a lambda should work correctly when called multiple times
-    assert_output(
+    assert_val(
         r#"let f = { 1 -> "one", 2 -> "two", _ -> "other" }; (1 >> f) + " " + (2 >> f) + " " + (3 >> f)"#,
-        "one two other",
+        s("one two other"),
     );
 }
 
@@ -4545,10 +4847,7 @@ fn probe17b_int_literal_with_guard() {
     // { 0 if cond -> body, ... } — is_branch_block_start sees Int, then
     // checks for Arrow, but here the next token after Int is If, not Arrow.
     // BUG: is_branch_block_start doesn't handle Int followed by If.
-    assert_output(
-        r#"0 >> { 0 if true -> "zero", _ -> "other" }"#,
-        "zero",
-    );
+    assert_val(r#"0 >> { 0 if true -> "zero", _ -> "other" }"#, s("zero"));
 }
 
 // ── 52. String literal pattern with guard ───────────────────────────
@@ -4557,9 +4856,9 @@ fn probe17b_int_literal_with_guard() {
 fn probe17b_string_literal_with_guard() {
     // { "hello" if cond -> body, ... }
     // BUG: is_branch_block_start doesn't handle Str followed by If.
-    assert_output(
+    assert_val(
         r#""hello" >> { "hello" if true -> "yes", _ -> "no" }"#,
-        "yes",
+        s("yes"),
     );
 }
 
@@ -4569,10 +4868,7 @@ fn probe17b_string_literal_with_guard() {
 fn probe17b_bool_literal_with_guard() {
     // { true if cond -> body, ... }
     // BUG: is_branch_block_start for True/False only checks Arrow, not If.
-    assert_output(
-        r#"true >> { true if true -> "yes", _ -> "no" }"#,
-        "yes",
-    );
+    assert_val(r#"true >> { true if true -> "yes", _ -> "no" }"#, s("yes"));
 }
 
 // ── 54. Char literal pattern with guard ─────────────────────────────
@@ -4581,10 +4877,7 @@ fn probe17b_bool_literal_with_guard() {
 fn probe17b_char_literal_with_guard() {
     // { 'a' if cond -> body, ... }
     // BUG: is_branch_block_start doesn't handle Char followed by If.
-    assert_output(
-        r#"'a' >> { 'a' if true -> "yes", _ -> "no" }"#,
-        "yes",
-    );
+    assert_val(r#"'a' >> { 'a' if true -> "yes", _ -> "no" }"#, s("yes"));
 }
 
 // ── 55. Byte literal pattern with guard ─────────────────────────────
@@ -4593,10 +4886,7 @@ fn probe17b_char_literal_with_guard() {
 fn probe17b_byte_literal_with_guard() {
     // { b'x' if cond -> body, ... }
     // BUG: is_branch_block_start doesn't handle Byte followed by If.
-    assert_output(
-        r#"b'x' >> { b'x' if true -> "yes", _ -> "no" }"#,
-        "yes",
-    );
+    assert_val(r#"b'x' >> { b'x' if true -> "yes", _ -> "no" }"#, s("yes"));
 }
 
 // ── 56. Negative literal pattern with guard ─────────────────────────
@@ -4609,10 +4899,7 @@ fn probe17b_neg_literal_with_guard() {
     // hits the ambiguity error before even reaching the guard detection issue.
     // Two bugs combine: (1) `-` at start triggers ambiguity, (2) even if it
     // didn't, the `if` after `-N` wouldn't be recognized.
-    assert_output(
-        r#"-1 >> { -1 if true -> "neg", _ -> "no" }"#,
-        "neg",
-    );
+    assert_val(r#"-1 >> { -1 if true -> "neg", _ -> "no" }"#, s("neg"));
 }
 
 // ── 57. Unit literal pattern with guard ─────────────────────────────
@@ -4621,10 +4908,7 @@ fn probe17b_neg_literal_with_guard() {
 fn probe17b_unit_literal_with_guard() {
     // { () if cond -> body, ... }
     // BUG: is_branch_block_start for LParen only checks Arrow after (), not If.
-    assert_output(
-        r#"() >> { () if true -> "unit", _ -> "no" }"#,
-        "unit",
-    );
+    assert_val(r#"() >> { () if true -> "unit", _ -> "no" }"#, s("unit"));
 }
 
 // ── 58. Underscore pattern with guard ───────────────────────────────
@@ -4633,18 +4917,18 @@ fn probe17b_unit_literal_with_guard() {
 fn probe17b_underscore_with_guard() {
     // { _ if cond -> body, ... }
     // BUG: is_branch_block_start for Underscore only checks Arrow, not If.
-    assert_output(
+    assert_val(
         r#"42 >> { _ if true -> "matched", _ -> "fallback" }"#,
-        "matched",
+        s("matched"),
     );
 }
 
 #[test]
 fn probe17b_underscore_with_guard_false() {
     // Wildcard with guard that evaluates to false — should fall through
-    assert_output(
+    assert_val(
         r#"42 >> { _ if false -> "no", _ -> "fallback" }"#,
-        "fallback",
+        s("fallback"),
     );
 }
 
@@ -4654,10 +4938,7 @@ fn probe17b_underscore_with_guard_false() {
 fn probe17b_float_literal_with_guard() {
     // { 3.14 if cond -> body, ... }
     // BUG: is_branch_block_start doesn't handle Float followed by If.
-    assert_output(
-        r#"3.14 >> { 3.14 if true -> "pi", _ -> "no" }"#,
-        "pi",
-    );
+    assert_val(r#"3.14 >> { 3.14 if true -> "pi", _ -> "no" }"#, s("pi"));
 }
 
 // ── 60. Neg float literal with guard ────────────────────────────────
@@ -4665,9 +4946,9 @@ fn probe17b_float_literal_with_guard() {
 #[test]
 fn probe17b_neg_float_literal_with_guard() {
     // { -3.14 if cond -> body, ... }
-    assert_output(
+    assert_val(
         r#"-3.14 >> { -3.14 if true -> "neg pi", _ -> "no" }"#,
-        "neg pi",
+        s("neg pi"),
     );
 }
 
@@ -4678,9 +4959,9 @@ fn probe17b_int_guard_meaningful_condition() {
     // The guard uses the `in` keyword to make the match conditional
     // This is different from just `x if x > 3` — here the pattern is a literal
     // and the guard provides extra check on `in`
-    assert_output(
+    assert_val(
         r#"5 >> { 5 if in > 3 -> "big five", 5 -> "small five", _ -> "other" }"#,
-        "big five",
+        s("big five"),
     );
 }
 
@@ -4690,9 +4971,9 @@ fn probe17b_int_guard_meaningful_condition() {
 fn probe17b_tag_pattern_guard_detailed() {
     // Make sure is_branch_block_start correctly identifies Tag(x) if guard -> ...
     // The code skips parens then checks for If — this should work.
-    assert_output(
+    assert_val(
         "tag(R); R(42) >> { R(x) if x > 10 -> x, R(x) -> 0 }",
-        "42",
+        int(42),
     );
 }
 
@@ -4701,10 +4982,7 @@ fn probe17b_tag_pattern_guard_detailed() {
 #[test]
 fn probe17b_struct_as_scrutinee_binding() {
     // Branch on a struct — the binding gets the whole struct
-    assert_output(
-        "(1, 2) >> { s -> s.0 + s.1 }",
-        "3",
-    );
+    assert_val("(1, 2) >> { s -> s.0 + s.1 }", int(3));
 }
 
 // ── 64. Array as branch scrutinee with binding ──────────────────────
@@ -4712,10 +4990,7 @@ fn probe17b_struct_as_scrutinee_binding() {
 #[test]
 fn probe17b_array_as_scrutinee_binding() {
     // Branch on an array — the binding gets the whole array
-    assert_output(
-        "[1, 2, 3] >> { arr -> arr >> len }",
-        "3",
-    );
+    assert_val("[1, 2, 3] >> { arr -> arr >> len }", int(3));
 }
 
 // ── 65. Branching where first arm is a guard-only binding ───────────
@@ -4724,9 +4999,9 @@ fn probe17b_array_as_scrutinee_binding() {
 fn probe17b_guard_only_no_literal_first_arm() {
     // First arm is `x if cond -> body`, which is a binding with guard
     // The `Ident` followed by `if` path in is_branch_block_start should detect this
-    assert_output(
+    assert_val(
         r#"5 >> { x if x == 5 -> "five", x -> "not five" }"#,
-        "five",
+        s("five"),
     );
 }
 
@@ -4736,9 +5011,9 @@ fn probe17b_guard_only_no_literal_first_arm() {
 fn probe17b_function_as_scrutinee() {
     // Piping a function into a branch — literal patterns won't match,
     // but a catch-all binding should
-    assert_output(
+    assert_val(
         r#"{ in + 1 } >> { _ -> "got a function" }"#,
-        "got a function",
+        s("got a function"),
     );
 }
 
@@ -4748,7 +5023,7 @@ fn probe17b_function_as_scrutinee() {
 fn probe17b_empty_branch_block_is_expression_block() {
     // {} is an empty expression block, not a branch block.
     // It should return () when applied.
-    assert_output("42 >> {}", "()");
+    assert_val("42 >> {}", U);
 }
 
 // ── 68. Branch with piped tag constructor as scrutinee ───────────────
@@ -4756,9 +5031,9 @@ fn probe17b_empty_branch_block_is_expression_block() {
 #[test]
 fn probe17b_piped_tag_constructor_branch() {
     // 42 >> Ok produces Ok(42), then match on it
-    assert_output(
+    assert_val(
         "tag(Ok); tag(Err); 42 >> Ok >> { Ok(x) -> x + 1, Err(_) -> 0 }",
-        "43",
+        int(43),
     );
 }
 
@@ -4767,9 +5042,9 @@ fn probe17b_piped_tag_constructor_branch() {
 #[test]
 fn probe17b_guard_evaluates_expression() {
     // Guard evaluates `in > 10`; _ always matches but guard controls flow
-    assert_output(
+    assert_val(
         r#"5 >> { _ if in > 10 -> "big", _ -> "small" }"#,
-        "small",
+        s("small"),
     );
 }
 
@@ -4777,9 +5052,9 @@ fn probe17b_guard_evaluates_expression() {
 
 #[test]
 fn probe17b_let_sugar_branch_result() {
-    assert_output(
+    assert_val(
         r#"let x = "hello" >> { "hello" -> 1, _ -> 0 }; x + 10"#,
-        "11",
+        int(11),
     );
 }
 
@@ -4788,19 +5063,16 @@ fn probe17b_let_sugar_branch_result() {
 #[test]
 fn probe17b_neg_pattern_pos_scrutinee() {
     // -1 pattern should NOT match positive 1
-    assert_output(
-        r#"1 >> { -1 -> "neg", _ -> "other" }"#,
-        "other",
-    );
+    assert_val(r#"1 >> { -1 -> "neg", _ -> "other" }"#, s("other"));
 }
 
 // ── 72. Multiple tag constructors, complex matching ─────────────────
 
 #[test]
 fn probe17b_three_tag_matching() {
-    assert_output(
+    assert_val(
         r#"tag(A); tag(B); tag(C); B(42) >> { A(x) -> "a", B(x) -> "b", C(x) -> "c", _ -> "?" }"#,
-        "b",
+        s("b"),
     );
 }
 
@@ -4832,14 +5104,8 @@ fn probe17b_branch_inside_filter() {
 fn probe17b_guarded_wildcard_then_unguarded() {
     // Pattern: _ if cond -> body1, _ -> body2
     // When guard is true, first arm wins; when false, second arm wins
-    assert_output(
-        r#"5 >> { _ if in > 3 -> "big", _ -> "small" }"#,
-        "big",
-    );
-    assert_output(
-        r#"1 >> { _ if in > 3 -> "big", _ -> "small" }"#,
-        "small",
-    );
+    assert_val(r#"5 >> { _ if in > 3 -> "big", _ -> "small" }"#, s("big"));
+    assert_val(r#"1 >> { _ if in > 3 -> "big", _ -> "small" }"#, s("small"));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -4880,7 +5146,7 @@ fn probe18b_array_slice_out_of_bounds() {
 
 #[test]
 fn probe18b_array_len_empty() {
-    assert_output("[].len()", "0");
+    assert_val("[].len()", int(0));
 }
 
 #[test]
@@ -4895,7 +5161,7 @@ fn probe18b_array_filter_empty() {
 
 #[test]
 fn probe18b_array_fold_empty() {
-    assert_output("[].fold(0, { in.acc + in.elem })", "0");
+    assert_val("[].fold(0, { in.acc + in.elem })", int(0));
 }
 
 #[test]
@@ -4912,27 +5178,27 @@ fn probe18b_array_chained_methods() {
 
 #[test]
 fn probe18b_pipe_len_array() {
-    assert_output("[1, 2, 3] >> len", "3");
+    assert_val("[1, 2, 3] >> len", int(3));
 }
 
 #[test]
 fn probe18b_pipe_len_string() {
-    assert_output(r#""hello" >> len"#, "5");
+    assert_val(r#""hello" >> len"#, int(5));
 }
 
 #[test]
 fn probe18b_pipe_not_true() {
-    assert_output("true >> not", "false");
+    assert_val("true >> not", F);
 }
 
 #[test]
 fn probe18b_pipe_and() {
-    assert_output("(true, false) >> and", "false");
+    assert_val("(true, false) >> and", F);
 }
 
 #[test]
 fn probe18b_pipe_or() {
-    assert_output("(false, true) >> or", "true");
+    assert_val("(false, true) >> or", T);
 }
 
 // ── 3. Builtin functions with wrong arg types ────────────────────
@@ -4975,26 +5241,26 @@ fn probe18b_struct_field_shadows_method_not_callable() {
 #[test]
 fn probe18b_struct_field_function_takes_priority() {
     // (len={ in + 1 }).len(5) should call the field function, returning 6
-    assert_output("(len={ in + 1 }).len(5)", "6");
+    assert_val("(len={ in + 1 }).len(5)", int(6));
 }
 
 // ── 6. fold correctness ──────────────────────────────────────────
 
 #[test]
 fn probe18b_fold_sum() {
-    assert_output("[1, 2, 3].fold(0, { in.acc + in.elem })", "6");
+    assert_val("[1, 2, 3].fold(0, { in.acc + in.elem })", int(6));
 }
 
 #[test]
 fn probe18b_fold_with_init() {
-    assert_output("[1, 2, 3].fold(10, { in.acc + in.elem })", "16");
+    assert_val("[1, 2, 3].fold(10, { in.acc + in.elem })", int(16));
 }
 
 #[test]
 fn probe18b_fold_string_concat() {
-    assert_output(
+    assert_val(
         r#"["a", "b", "c"].fold("", { in.acc + in.elem })"#,
-        "abc",
+        s("abc"),
     );
 }
 
@@ -5029,7 +5295,7 @@ fn probe18b_pipe_into_filter() {
 
 #[test]
 fn probe18b_pipe_into_fold() {
-    assert_output("[1, 2, 3] >> fold(0, { in.acc + in.elem })", "6");
+    assert_val("[1, 2, 3] >> fold(0, { in.acc + in.elem })", int(6));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -5116,18 +5382,18 @@ fn probe18c_spread_two_spreads_duplicate_named() {
 
 #[test]
 fn probe18c_empty_struct_display() {
-    assert_output("()", "()");
+    assert_val("()", U);
 }
 
 #[test]
 fn probe18c_spread_empty_struct() {
-    // BUG-64 fix: () is Value::Unit, treated as empty struct for spread
+    // BUG-64 fix: () is U, treated as empty struct for spread
     assert_output("let s = (); (...s)", "()");
 }
 
 #[test]
 fn probe18c_empty_struct_equality() {
-    assert_output("() == ()", "true");
+    assert_val("() == ()", T);
 }
 
 // ── 5. Single-element considerations ───────────────────────────────
@@ -5135,7 +5401,7 @@ fn probe18c_empty_struct_equality() {
 #[test]
 fn probe18c_single_element_grouping() {
     // (1) is just grouping, evaluates to 1 (not a struct)
-    assert_output("(1)", "1");
+    assert_val("(1)", int(1));
 }
 
 #[test]
@@ -5148,22 +5414,22 @@ fn probe18c_single_labeled_is_struct() {
 
 #[test]
 fn probe18c_field_access_named() {
-    assert_output("(a=1, b=2).a", "1");
+    assert_val("(a=1, b=2).a", int(1));
 }
 
 #[test]
 fn probe18c_field_access_named_second() {
-    assert_output("(a=1, b=2).b", "2");
+    assert_val("(a=1, b=2).b", int(2));
 }
 
 #[test]
 fn probe18c_field_access_positional_first() {
-    assert_output("(1, 2, 3).0", "1");
+    assert_val("(1, 2, 3).0", int(1));
 }
 
 #[test]
 fn probe18c_field_access_positional_last() {
-    assert_output("(1, 2, 3).2", "3");
+    assert_val("(1, 2, 3).2", int(3));
 }
 
 #[test]
@@ -5181,29 +5447,29 @@ fn probe18c_field_access_named_not_found() {
 #[test]
 fn probe18c_named_struct_eq_order_insensitive() {
     // Named structs compared by name, not order
-    assert_output("(a=1, b=2) == (b=2, a=1)", "true");
+    assert_val("(a=1, b=2) == (b=2, a=1)", T);
 }
 
 #[test]
 fn probe18c_positional_struct_eq() {
-    assert_output("(1, 2) == (1, 2)", "true");
+    assert_val("(1, 2) == (1, 2)", T);
 }
 
 #[test]
 fn probe18c_positional_struct_neq() {
-    assert_output("(1, 2) != (2, 1)", "true");
+    assert_val("(1, 2) != (2, 1)", T);
 }
 
 // ── 8. Struct destructuring edge cases ─────────────────────────────
 
 #[test]
 fn probe18c_destructure_named() {
-    assert_output("(a=1, b=2) >> let(a, b); a + b", "3");
+    assert_val("(a=1, b=2) >> let(a, b); a + b", int(3));
 }
 
 #[test]
 fn probe18c_destructure_positional() {
-    assert_output("(1, 2) >> let(a, b); a + b", "3");
+    assert_val("(1, 2) >> let(a, b); a + b", int(3));
 }
 
 #[test]
@@ -5229,12 +5495,12 @@ fn probe18c_destructure_too_few_patterns_no_rest() {
 
 #[test]
 fn probe18c_nested_struct_field_access() {
-    assert_output("(a=(x=1, y=2), b=3).a.x", "1");
+    assert_val("(a=(x=1, y=2), b=3).a.x", int(1));
 }
 
 #[test]
 fn probe18c_nested_struct_field_access_deep() {
-    assert_output("(a=(x=1, y=2), b=3).a.y", "2");
+    assert_val("(a=(x=1, y=2), b=3).a.y", int(2));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -5255,7 +5521,7 @@ fn probe18a_multiple_tags_then_use() {
 #[test]
 fn probe18a_multiple_tags_then_branch() {
     // tag(A); tag(B); A(()) >> { A -> "a", B -> "b" } — should be "a"
-    assert_output(r#"tag(A); tag(B); A(()) >> { A -> "a", B -> "b" }"#, "a");
+    assert_val(r#"tag(A); tag(B); A(()) >> { A -> "a", B -> "b" }"#, s("a"));
 }
 
 // ── 2. Let sugar with tag sugar in same expression ────────────────
@@ -5277,13 +5543,13 @@ fn probe18a_let_fn_then_tag_then_apply() {
 #[test]
 fn probe18a_triple_let_sum() {
     // let a = 1; let b = 2; let c = 3; a + b + c — should be 6
-    assert_output("let a = 1; let b = 2; let c = 3; a + b + c", "6");
+    assert_val("let a = 1; let b = 2; let c = 3; a + b + c", int(6));
 }
 
 #[test]
 fn probe18a_triple_let_dependent() {
     // let a = 1; let b = a + 1; let c = b + 1; c — should be 3
-    assert_output("let a = 1; let b = a + 1; let c = b + 1; c", "3");
+    assert_val("let a = 1; let b = a + 1; let c = b + 1; c", int(3));
 }
 
 // ── 4. Let with complex RHS ─────────────────────────────────────
@@ -5291,7 +5557,7 @@ fn probe18a_triple_let_dependent() {
 #[test]
 fn probe18a_let_arithmetic_rhs() {
     // let x = 1 + 2 * 3; x — should be 7
-    assert_output("let x = 1 + 2 * 3; x", "7");
+    assert_val("let x = 1 + 2 * 3; x", int(7));
 }
 
 #[test]
@@ -5305,7 +5571,7 @@ fn probe18a_let_method_chain_rhs() {
 #[test]
 fn probe18a_array_destructure_sum() {
     // [1, 2, 3] >> let[a, b, c]; a + b + c — should be 6
-    assert_output("[1, 2, 3] >> let[a, b, c]; a + b + c", "6");
+    assert_val("[1, 2, 3] >> let[a, b, c]; a + b + c", int(6));
 }
 
 #[test]
@@ -5334,7 +5600,7 @@ fn probe18a_struct_spread_extend() {
 fn probe18a_pipe_let_pipe_let() {
     // 1 >> let(x) >> { in + 1 } >> let(y); x + y — should be 3
     // x = 1, passthrough = 1, 1 >> { in + 1 } = 2, y = 2, x + y = 3
-    assert_output("1 >> let(x) >> { in + 1 } >> let(y); x + y", "3");
+    assert_val("1 >> let(x) >> { in + 1 } >> let(y); x + y", int(3));
 }
 
 // ── 8. Pipe into branching after let ─────────────────────────────
@@ -5343,7 +5609,10 @@ fn probe18a_pipe_let_pipe_let() {
 fn probe18a_tag_let_branch() {
     // tag(Ok); tag(Err); let v = Ok(42); v >> { Ok(x) -> x, Err(_) -> 0 }
     // should be 42
-    assert_output("tag(Ok); tag(Err); let v = Ok(42); v >> { Ok(x) -> x, Err(_) -> 0 }", "42");
+    assert_val(
+        "tag(Ok); tag(Err); let v = Ok(42); v >> { Ok(x) -> x, Err(_) -> 0 }",
+        int(42),
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -5354,56 +5623,56 @@ fn probe18a_tag_let_branch() {
 
 #[test]
 fn probe19a_underscore_int_1_000() {
-    assert_output("1_000", "1000");
+    assert_val("1_000", int(1000));
 }
 
 #[test]
 fn probe19a_underscore_int_1_000_000() {
-    assert_output("1_000_000", "1000000");
+    assert_val("1_000_000", int(1000000));
 }
 
 #[test]
 fn probe19a_underscore_hex_0xff_ff() {
-    assert_output("0xFF_FF", "65535");
+    assert_val("0xFF_FF", int(65535));
 }
 
 #[test]
 fn probe19a_underscore_float_integer_part() {
     // 1_000.5 — underscores in integer part of a float
-    assert_output("1_000.5", "1000.5");
+    assert_val("1_000.5", float(1000.5));
 }
 
 #[test]
 fn probe19a_underscore_float_fractional_part() {
     // 1.000_5 — underscores in fractional part of a float
-    assert_output("1.000_5", "1.0005");
+    assert_val("1.000_5", float(1.0005));
 }
 
 // ── 2. Hex literals ─────────────────────────────────────────────
 
 #[test]
 fn probe19a_hex_zero() {
-    assert_output("0x0", "0");
+    assert_val("0x0", int(0));
 }
 
 #[test]
 fn probe19a_hex_ff() {
-    assert_output("0xFF", "255");
+    assert_val("0xFF", int(255));
 }
 
 #[test]
 fn probe19a_hex_dead() {
-    assert_output("0xDEAD", "57005");
+    assert_val("0xDEAD", int(57005));
 }
 
 #[test]
 fn probe19a_hex_double_zero() {
-    assert_output("0x00", "0");
+    assert_val("0x00", int(0));
 }
 
 #[test]
 fn probe19a_hex_lowercase_ff() {
-    assert_output("0xff", "255");
+    assert_val("0xff", int(255));
 }
 
 // ── 3. Hex edge cases ───────────────────────────────────────────
@@ -5424,70 +5693,70 @@ fn probe19a_hex_invalid_digit_g() {
 
 #[test]
 fn probe19a_float_zero() {
-    assert_output("0.0", "0.0");
+    assert_val("0.0", float(0.0));
 }
 
 #[test]
 fn probe19a_float_one() {
-    assert_output("1.0", "1.0");
+    assert_val("1.0", float(1.0));
 }
 
 #[test]
 fn probe19a_float_999_999() {
-    assert_output("999.999", "999.999");
+    assert_val("999.999", float(999.999));
 }
 
 #[test]
 fn probe19a_float_0_1() {
-    assert_output("0.1", "0.1");
+    assert_val("0.1", float(0.1));
 }
 
 // ── 5. Integer edge cases ───────────────────────────────────────
 
 #[test]
 fn probe19a_int_zero() {
-    assert_output("0", "0");
+    assert_val("0", int(0));
 }
 
 #[test]
 fn probe19a_int_i64_max() {
-    assert_output("9223372036854775807", "9223372036854775807");
+    assert_val("9223372036854775807", int(9223372036854775807));
 }
 
 // ── 6. Comments ─────────────────────────────────────────────────
 
 #[test]
 fn probe19a_comment_line_before_expr() {
-    assert_output("# this is a comment\n1", "1");
+    assert_val("# this is a comment\n1", int(1));
 }
 
 #[test]
 fn probe19a_comment_trailing() {
-    assert_output("1 # trailing comment", "1");
+    assert_val("1 # trailing comment", int(1));
 }
 
 // ── 7. Multiple comments ────────────────────────────────────────
 
 #[test]
 fn probe19a_multiple_comment_lines() {
-    assert_output("# first\n# second\n42", "42");
+    assert_val("# first\n# second\n42", int(42));
 }
 
 // ── 8. Whitespace handling ──────────────────────────────────────
 
 #[test]
 fn probe19a_tab_whitespace() {
-    assert_output("\t1\t+\t2", "3");
+    assert_val("\t1\t+\t2", int(3));
 }
 
 #[test]
 fn probe19a_multiple_newlines() {
-    assert_output("\n\n\n42\n\n", "42");
+    assert_val("\n\n\n42\n\n", int(42));
 }
 
 #[test]
 fn probe19a_mixed_whitespace() {
-    assert_output("  \t\n  1  \t +  \n  2  ", "3");
+    assert_val("  \t\n  1  \t +  \n  2  ", int(3));
 }
 
 // ── 9. Unknown character errors ─────────────────────────────────
@@ -5526,7 +5795,7 @@ fn probe19a_byte_xff() {
 
 #[test]
 fn probe19a_byte_ascii_a() {
-    assert_output("b'A'", "b'A'");
+    assert_val("b'A'", byte(b'A'));
 }
 
 // ── 11. Char edge cases ─────────────────────────────────────────
@@ -5534,7 +5803,7 @@ fn probe19a_byte_ascii_a() {
 #[test]
 fn probe19a_char_hex_escape_41() {
     // '\x41' is 'A'
-    assert_output("'\\x41'", "'A'");
+    assert_val("'\\x41'", ch('A'));
 }
 
 #[test]
@@ -5550,33 +5819,33 @@ fn probe19a_string_newline_escape() {
     // A string with \n should produce a string containing an actual newline
     // When displayed, the nana Display for Str just prints the raw string
     // so the output should contain a literal newline character
-    assert_output(r#""\n""#, "\n");
+    assert_val(r#""\n""#, s("\n"));
 }
 
 #[test]
 fn probe19a_string_tab_escape() {
-    assert_output(r#""\t""#, "\t");
+    assert_val(r#""\t""#, s("\t"));
 }
 
 #[test]
 fn probe19a_string_null_escape() {
-    assert_output(r#""\0""#, "\0");
+    assert_val(r#""\0""#, s("\0"));
 }
 
 #[test]
 fn probe19a_string_hex_escape() {
     // "\x41" should be "A"
-    assert_output(r#""\x41""#, "A");
+    assert_val(r#""\x41""#, s("A"));
 }
 
 #[test]
 fn probe19a_string_backslash_escape() {
-    assert_output(r#""\\""#, "\\");
+    assert_val(r#""\\""#, s("\\"));
 }
 
 #[test]
 fn probe19a_string_quote_escape() {
-    assert_output(r#""\"""#, "\"");
+    assert_val(r#""\"""#, s("\""));
 }
 
 // ── 13. `!` alone (not `!=`) ────────────────────────────────────
@@ -5591,13 +5860,13 @@ fn probe19a_bang_alone_error() {
 #[test]
 fn probe19a_op_pipe() {
     // >> is the pipe operator; 1 >> { in + 1 } = 2
-    assert_output("1 >> { in + 1 }", "2");
+    assert_val("1 >> { in + 1 }", int(2));
 }
 
 #[test]
 fn probe19a_op_arrow() {
     // -> is used in branches: true >> { true -> 99, false -> 0 }
-    assert_output("true >> { true -> 99, false -> 0 }", "99");
+    assert_val("true >> { true -> 99, false -> 0 }", int(99));
 }
 
 #[test]
@@ -5614,22 +5883,22 @@ fn probe19a_op_spread() {
 
 #[test]
 fn probe19a_op_lteq() {
-    assert_output("1 <= 2", "true");
+    assert_val("1 <= 2", T);
 }
 
 #[test]
 fn probe19a_op_gteq() {
-    assert_output("2 >= 1", "true");
+    assert_val("2 >= 1", T);
 }
 
 #[test]
 fn probe19a_op_eqeq() {
-    assert_output("1 == 1", "true");
+    assert_val("1 == 1", T);
 }
 
 #[test]
 fn probe19a_op_noteq() {
-    assert_output("1 != 2", "true");
+    assert_val("1 != 2", T);
 }
 
 // ── 15. Identifiers starting with underscore ────────────────────
@@ -5637,19 +5906,19 @@ fn probe19a_op_noteq() {
 #[test]
 fn probe19a_ident_underscore_name() {
     // _foo should be a valid identifier
-    assert_output("1 >> let(_foo); _foo", "1");
+    assert_val("1 >> let(_foo); _foo", int(1));
 }
 
 #[test]
 fn probe19a_ident_bare_underscore() {
     // _ alone is the discard/wildcard — test in a branch pattern
-    assert_output("42 >> { _ -> 99 }", "99");
+    assert_val("42 >> { _ -> 99 }", int(99));
 }
 
 #[test]
 fn probe19a_ident_underscore_digits() {
     // _123 should be a valid identifier
-    assert_output("1 >> let(_123); _123", "1");
+    assert_val("1 >> let(_123); _123", int(1));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -5690,13 +5959,13 @@ fn probe19c_char_display_single_quote() {
 
 #[test]
 fn probe19c_char_display_plain() {
-    assert_output("'a'", "'a'");
+    assert_val("'a'", ch('a'));
 }
 
 #[test]
 fn probe19c_char_display_hex_41() {
     // '\x41' is hex for 'A', should display as 'A'
-    assert_output(r"'\x41'", "'A'");
+    assert_val(r"'\x41'", ch('A'));
 }
 
 // ── 2. Byte display round-trip ──────────────────────────────────
@@ -5729,41 +5998,41 @@ fn probe19c_byte_display_hex_ff() {
 
 #[test]
 fn probe19c_byte_display_plain_a() {
-    assert_output("b'A'", "b'A'");
+    assert_val("b'A'", byte(b'A'));
 }
 
 #[test]
 fn probe19c_byte_display_hex_41() {
     // b'\x41' = 0x41 = 65 = 'A', printable, should display as b'A'
-    assert_output(r"b'\x41'", "b'A'");
+    assert_val(r"b'\x41'", byte(b'A'));
 }
 
 // ── 3. Float display ────────────────────────────────────────────
 
 #[test]
 fn probe19c_float_display_one() {
-    assert_output("1.0", "1.0");
+    assert_val("1.0", float(1.0));
 }
 
 #[test]
 fn probe19c_float_display_half() {
-    assert_output("0.5", "0.5");
+    assert_val("0.5", float(0.5));
 }
 
 #[test]
 fn probe19c_float_display_hundred() {
-    assert_output("100.0", "100.0");
+    assert_val("100.0", float(100.0));
 }
 
 #[test]
 fn probe19c_float_display_negative() {
-    assert_output("-1.5", "-1.5");
+    assert_val("-1.5", float(-1.5));
 }
 
 #[test]
 fn probe19c_float_display_addition_result() {
     // 1.0 + 2.0 = 3.0, should display as "3.0" not "3"
-    assert_output("1.0 + 2.0", "3.0");
+    assert_val("1.0 + 2.0", float(3.0));
 }
 
 // ── 4. Nested values in display ─────────────────────────────────
@@ -5889,7 +6158,7 @@ fn probe19b_tag_semicolon_two_tags_use_second() {
 #[test]
 fn probe19b_paren_let_contained() {
     // Parens contain the let; result of (let x = 1; x + 1) is 2, then + 3 = 5.
-    assert_output("(let x = 1; x + 1) + 3", "5");
+    assert_val("(let x = 1; x + 1) + 3", int(5));
 }
 
 #[test]
@@ -5903,14 +6172,14 @@ fn probe19b_paren_let_no_leak() {
 #[test]
 fn probe19b_let_discard_basic() {
     // let _ = 42; 1 should evaluate 42, discard it, return 1.
-    assert_output("let _ = 42; 1", "1");
+    assert_val("let _ = 42; 1", int(1));
 }
 
 #[test]
 fn probe19b_let_discard_side_effect() {
     // let _ = print("side effect"); 5 should be 5.
     // (print returns (), which is discarded)
-    assert_output("let _ = print(\"side effect\"); 5", "5");
+    assert_val("let _ = print(\"side effect\"); 5", int(5));
 }
 
 // ── 4. Multiple let sugar on one line ────────────────────────────
@@ -5918,7 +6187,7 @@ fn probe19b_let_discard_side_effect() {
 #[test]
 fn probe19b_multi_let_sugar() {
     // Chain of let x = ...; should all be in scope at the end.
-    assert_output("let a = 1; let b = 2; let c = 3; a + b + c", "6");
+    assert_val("let a = 1; let b = 2; let c = 3; a + b + c", int(6));
 }
 
 #[test]
@@ -5932,7 +6201,7 @@ fn probe19b_multi_let_sugar_with_tags() {
 #[test]
 fn probe19b_let_rhs_pipe() {
     // let x = 1 >> { in + 1 }; x — RHS is a pipe expression, should be 2.
-    assert_output("let x = 1 >> { in + 1 }; x", "2");
+    assert_val("let x = 1 >> { in + 1 }; x", int(2));
 }
 
 #[test]
@@ -5946,13 +6215,16 @@ fn probe19b_let_rhs_pipe_map() {
 #[test]
 fn probe19b_let_rhs_block_closure() {
     // let f = { in + 1 }; 3 >> f — f should be a closure, piping 3 gives 4.
-    assert_output("let f = { in + 1 }; 3 >> f", "4");
+    assert_val("let f = { in + 1 }; 3 >> f", int(4));
 }
 
 #[test]
 fn probe19b_let_rhs_branch_block() {
     // let g = { true -> "yes", false -> "no" }; true >> g — branching block.
-    assert_output(r#"let g = { true -> "yes", false -> "no" }; true >> g"#, "yes");
+    assert_val(
+        r#"let g = { true -> "yes", false -> "no" }; true >> g"#,
+        s("yes"),
+    );
 }
 
 // ── 7. Nested let sugars with tags ───────────────────────────────
@@ -5976,19 +6248,19 @@ fn probe19b_nested_let_tag_combo_call() {
 fn probe19b_let_inside_block_body() {
     // { let x = 1; x + 2 } — the block captures a closure.
     // When called with any input, x=1 and returns 3.
-    assert_output("99 >> { let x = 1; x + 2 }", "3");
+    assert_val("99 >> { let x = 1; x + 2 }", int(3));
 }
 
 #[test]
 fn probe19b_pipe_into_block_with_let() {
     // 3 >> { let x = in; x + 1 } — bind `in` to x, then x + 1 = 4.
-    assert_output("3 >> { let x = in; x + 1 }", "4");
+    assert_val("3 >> { let x = in; x + 1 }", int(4));
 }
 
 #[test]
 fn probe19b_block_semicolon_sequence() {
     // { 1; 2 } — block with semicolon. Evaluates 1, discards, returns 2.
-    assert_output("0 >> { 1; 2 }", "2");
+    assert_val("0 >> { 1; 2 }", int(2));
 }
 
 // ── 9. Trailing semicolons ───────────────────────────────────────
@@ -5996,19 +6268,19 @@ fn probe19b_block_semicolon_sequence() {
 #[test]
 fn probe19b_trailing_semi_literal() {
     // 1; — trailing semicolon turns it into () (unit).
-    assert_output("1;", "()");
+    assert_val("1;", U);
 }
 
 #[test]
 fn probe19b_trailing_semi_let() {
     // let x = 5; — trailing semicolon after let, result is ().
-    assert_output("let x = 5;", "()");
+    assert_val("let x = 5;", U);
 }
 
 #[test]
 fn probe19b_trailing_semi_tag() {
     // tag(Ok); — trailing semicolon after tag, result is ().
-    assert_output("tag(Ok);", "()");
+    assert_val("tag(Ok);", U);
 }
 
 // ── 10. let sugar where RHS contains tag sugar ───────────────────
@@ -6036,7 +6308,7 @@ fn probe19b_let_rhs_tag_and_original_name() {
 #[test]
 fn probe19b_let_rhs_tag_both_names_same_tag() {
     // ok and Ok should refer to the same tag — tagged values should be equal.
-    assert_output("let ok = tag(Ok); ok(1) == Ok(1)", "true");
+    assert_val("let ok = tag(Ok); ok(1) == Ok(1)", T);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -6160,12 +6432,12 @@ fn probe20b_type_error_string_lt_int() {
 #[test]
 fn probe20b_bool_comparison_works() {
     // Bool has Ord in Rust — false < true should work.
-    assert_output("true < false", "false");
+    assert_val("true < false", F);
 }
 
 #[test]
 fn probe20b_bool_comparison_true_gt_false() {
-    assert_output("false < true", "true");
+    assert_val("false < true", T);
 }
 
 #[test]
@@ -6356,43 +6628,43 @@ fn probe21_block_sugar_range() {
 #[test]
 fn probe21_block_sugar_eq() {
     // `{ == 5 }` is sugar for `{ in == 5 }`.
-    assert_output("5 >> { == 5 }", "true");
+    assert_val("5 >> { == 5 }", T);
 }
 
 #[test]
 fn probe21_block_sugar_eq_false() {
-    assert_output("4 >> { == 5 }", "false");
+    assert_val("4 >> { == 5 }", F);
 }
 
 #[test]
 fn probe21_block_sugar_gt() {
     // `{ > 3 }` is sugar for `{ in > 3 }`.
-    assert_output("5 >> { > 3 }", "true");
+    assert_val("5 >> { > 3 }", T);
 }
 
 #[test]
 fn probe21_block_sugar_gt_false() {
-    assert_output("2 >> { > 3 }", "false");
+    assert_val("2 >> { > 3 }", F);
 }
 
 #[test]
 fn probe21_block_sugar_lt() {
-    assert_output("2 >> { < 3 }", "true");
+    assert_val("2 >> { < 3 }", T);
 }
 
 #[test]
 fn probe21_block_sugar_lteq() {
-    assert_output("3 >> { <= 3 }", "true");
+    assert_val("3 >> { <= 3 }", T);
 }
 
 #[test]
 fn probe21_block_sugar_gteq() {
-    assert_output("3 >> { >= 3 }", "true");
+    assert_val("3 >> { >= 3 }", T);
 }
 
 #[test]
 fn probe21_block_sugar_neq() {
-    assert_output("3 >> { != 4 }", "true");
+    assert_val("3 >> { != 4 }", T);
 }
 
 // ── 3. Expression blocks that could look like branches ──
@@ -6400,7 +6672,7 @@ fn probe21_block_sugar_neq() {
 #[test]
 fn probe21_expr_block_not_branch() {
     // `{ x + 1 }` where `x` is not followed by `->` — should be an expression block.
-    assert_output("let x = 5; x >> { x + 1 }", "6");
+    assert_val("let x = 5; x >> { x + 1 }", int(6));
 }
 
 #[test]
@@ -6408,7 +6680,7 @@ fn probe21_branch_binding_captures_anything() {
     // `x -> "matched"` where `x` is a binding in the pattern (not a lookup).
     // In a branch block, an identifier pattern without a tag constructor in scope
     // is a catch-all binding. It matches anything.
-    assert_output(r#"let x = 5; x >> { x -> "matched" }"#, "matched");
+    assert_val(r#"let x = 5; x >> { x -> "matched" }"#, s("matched"));
 }
 
 // ── 4. `{ in }` as expression block returning its input ──
@@ -6416,12 +6688,12 @@ fn probe21_branch_binding_captures_anything() {
 #[test]
 fn probe21_block_in_returns_input() {
     // `{ in }` is an expression block that returns the block's input.
-    assert_output("1 >> { in }", "1");
+    assert_val("1 >> { in }", int(1));
 }
 
 #[test]
 fn probe21_block_in_string_passthrough() {
-    assert_output(r#""hello" >> { in }"#, "hello");
+    assert_val(r#""hello" >> { in }"#, s("hello"));
 }
 
 // ── 5. `{ true }` — expression block, not branch ──
@@ -6432,19 +6704,19 @@ fn probe21_block_true_is_expr_block() {
     // So `{ true }` is an expression block that evaluates to `true`.
     // When piped `false >> { true }`, the input is `false`, but the body
     // just evaluates the literal `true`.
-    assert_output("false >> { true }", "true");
+    assert_val("false >> { true }", T);
 }
 
 #[test]
 fn probe21_block_false_is_expr_block() {
     // Similarly, `{ false }` is an expression block evaluating to `false`.
-    assert_output("true >> { false }", "false");
+    assert_val("true >> { false }", F);
 }
 
 #[test]
 fn probe21_block_int_literal_is_expr_block() {
     // `{ 42 }` is an expression block (42 not followed by ->).
-    assert_output("0 >> { 42 }", "42");
+    assert_val("0 >> { 42 }", int(42));
 }
 
 // ── 6. `{ _ -> ... }` as a branch block ──
@@ -6452,13 +6724,13 @@ fn probe21_block_int_literal_is_expr_block() {
 #[test]
 fn probe21_wildcard_branch() {
     // `{ _ -> "matched" }` is a branching block — `_` followed by `->`.
-    assert_output(r#"42 >> { _ -> "matched" }"#, "matched");
+    assert_val(r#"42 >> { _ -> "matched" }"#, s("matched"));
 }
 
 #[test]
 fn probe21_wildcard_branch_preserves_in() {
     // `in` in the arm body refers to the block input (the scrutinee).
-    assert_output("42 >> { _ -> in }", "42");
+    assert_val("42 >> { _ -> in }", int(42));
 }
 
 // ── 7. Identifier that's also a tag in branch patterns ──
@@ -6468,28 +6740,25 @@ fn probe21_tag_pattern_vs_binding() {
     // When `Ok` is a tag constructor in scope, `Ok` in a branch pattern
     // matches the tag with unit payload. `42` is not tagged, so `Ok` should NOT match.
     // `x` is a catch-all binding, so it should match.
-    assert_output(
+    assert_val(
         r#"tag(Ok); 42 >> { Ok -> "tag", x -> "binding" }"#,
-        "binding",
+        s("binding"),
     );
 }
 
 #[test]
 fn probe21_tag_pattern_matches_tag() {
     // When the scrutinee IS a tagged value, the tag pattern should match.
-    assert_output(
+    assert_val(
         r#"tag(Ok); Ok(()) >> { Ok -> "tag", x -> "binding" }"#,
-        "tag",
+        s("tag"),
     );
 }
 
 #[test]
 fn probe21_tag_with_payload_pattern() {
     // Tag with payload pattern: Ok(x) matches Ok(5) and binds x=5.
-    assert_output(
-        r#"tag(Ok); Ok(5) >> { Ok(x) -> x, _ -> 0 }"#,
-        "5",
-    );
+    assert_val(r#"tag(Ok); Ok(5) >> { Ok(x) -> x, _ -> 0 }"#, int(5));
 }
 
 // ── 8. Piped block sugar with chained pipe ──
@@ -6498,13 +6767,13 @@ fn probe21_tag_with_payload_pattern() {
 fn probe21_nested_pipe_sugar() {
     // `{ >> { in * 2 } }` is sugar for `{ in >> { in * 2 } }`.
     // 5 >> { in >> { in * 2 } } → inner block receives 5, returns 10.
-    assert_output("5 >> { >> { in * 2 } }", "10");
+    assert_val("5 >> { >> { in * 2 } }", int(10));
 }
 
 #[test]
 fn probe21_nested_pipe_sugar_with_addition() {
     // `{ >> { + 1 } }` is sugar for `{ in >> { in + 1 } }`.
-    assert_output("5 >> { >> { + 1 } }", "6");
+    assert_val("5 >> { >> { + 1 } }", int(6));
 }
 
 // ── 9. Complex branch with nested blocks ──
@@ -6512,18 +6781,18 @@ fn probe21_nested_pipe_sugar_with_addition() {
 #[test]
 fn probe21_branch_with_nested_block_in_arm() {
     // Ok(5) >> { Ok(x) -> x >> { in * 2 }, _ -> 0 } should be 10.
-    assert_output(
+    assert_val(
         "tag(Ok); Ok(5) >> { Ok(x) -> x >> { in * 2 }, _ -> 0 }",
-        "10",
+        int(10),
     );
 }
 
 #[test]
 fn probe21_branch_fallback_arm() {
     // Test the fallback arm when no tag matches.
-    assert_output(
+    assert_val(
         "tag(Ok); tag(Err); Err(99) >> { Ok(x) -> x * 2, _ -> 0 }",
-        "0",
+        int(0),
     );
 }
 
@@ -6532,7 +6801,7 @@ fn probe21_branch_fallback_arm() {
 #[test]
 fn probe21_block_sugar_div() {
     // `{ / 2 }` is sugar for `{ in / 2 }`.
-    assert_output("10 >> { / 2 }", "5");
+    assert_val("10 >> { / 2 }", int(5));
 }
 
 #[test]
@@ -6545,12 +6814,12 @@ fn probe21_block_sugar_div_by_zero() {
 #[test]
 fn probe21_method_call_in_block() {
     // `[1,2,3] >> { in.len() }` — method call on the block input.
-    assert_output("[1, 2, 3] >> { in.len() }", "3");
+    assert_val("[1, 2, 3] >> { in.len() }", int(3));
 }
 
 #[test]
 fn probe21_method_call_string_len() {
-    assert_output(r#""hello" >> { in.len() }"#, "5");
+    assert_val(r#""hello" >> { in.len() }"#, int(5));
 }
 
 // ── 12. Block with trailing semicolon ──
@@ -6558,13 +6827,13 @@ fn probe21_method_call_string_len() {
 #[test]
 fn probe21_trailing_semicolon_returns_unit() {
     // A trailing semicolon makes the block return `()`.
-    assert_output("1 >> { in + 1; }", "()");
+    assert_val("1 >> { in + 1; }", U);
 }
 
 #[test]
 fn probe21_trailing_semicolon_bare_block() {
     // Even a simple literal with trailing semicolon returns unit.
-    assert_output("1 >> { 42; }", "()");
+    assert_val("1 >> { 42; }", U);
 }
 
 // ── 13. Additional tricky interactions ──
@@ -6572,13 +6841,13 @@ fn probe21_trailing_semicolon_bare_block() {
 #[test]
 fn probe21_block_sugar_mul() {
     // `{ * 2 }` is sugar for `{ in * 2 }`.
-    assert_output("3 >> { * 2 }", "6");
+    assert_val("3 >> { * 2 }", int(6));
 }
 
 #[test]
 fn probe21_block_sugar_plus() {
     // `{ + 10 }` is sugar for `{ in + 10 }`.
-    assert_output("5 >> { + 10 }", "15");
+    assert_val("5 >> { + 10 }", int(15));
 }
 
 #[test]
@@ -6590,64 +6859,55 @@ fn probe21_minus_block_is_ambiguous() {
 #[test]
 fn probe21_explicit_in_minus() {
     // `{ in - 1 }` is unambiguous subtraction.
-    assert_output("5 >> { in - 1 }", "4");
+    assert_val("5 >> { in - 1 }", int(4));
 }
 
 #[test]
 fn probe21_block_sugar_chained() {
     // Chaining block sugar: 5 >> { + 1 } >> { * 2 } → 12.
-    assert_output("5 >> { + 1 } >> { * 2 }", "12");
+    assert_val("5 >> { + 1 } >> { * 2 }", int(12));
 }
 
 #[test]
 fn probe21_block_sugar_comparison_in_branch() {
     // Using comparison sugar inside a pipe, then branching on the result.
-    assert_output(
+    assert_val(
         r#"5 >> { > 3 } >> { true -> "big", false -> "small" }"#,
-        "big",
+        s("big"),
     );
 }
 
 #[test]
 fn probe21_empty_block_returns_unit() {
     // `{}` is a block that returns `()`.
-    assert_output("42 >> {}", "()");
+    assert_val("42 >> {}", U);
 }
 
 #[test]
 fn probe21_branch_with_literal_int_pattern() {
     // Integer literal as branch pattern.
-    assert_output(
-        r#"42 >> { 42 -> "match", _ -> "no match" }"#,
-        "match",
-    );
+    assert_val(r#"42 >> { 42 -> "match", _ -> "no match" }"#, s("match"));
 }
 
 #[test]
 fn probe21_branch_with_literal_string_pattern() {
     // String literal as branch pattern.
-    assert_output(
+    assert_val(
         r#""hello" >> { "hello" -> "match", _ -> "no match" }"#,
-        "match",
+        s("match"),
     );
 }
 
 #[test]
 fn probe21_branch_with_negative_literal() {
     // Negative integer literal as branch pattern.
-    assert_output(
-        r#"-1 >> { -1 -> "neg one", _ -> "other" }"#,
-        "neg one",
-    );
+    assert_val(r#"-1 >> { -1 -> "neg one", _ -> "other" }"#, s("neg one"));
 }
 
 #[test]
 fn probe21_branch_with_unit_pattern() {
     // `() -> ...` as a branch pattern.
-    assert_output(
-        r#"() >> { () -> "unit" }"#,
-        "unit",
-    );
+    assert_val(r#"() >> { () -> "unit" }"#, s("unit"));
 }
 
 #[test]
@@ -6655,12 +6915,12 @@ fn probe21_block_sugar_range_chain() {
     // Chaining range: create a range and then use it.
     // `5 >> { ..10 }` gives (start=5, end=10)
     // Then we can access the struct fields.
-    assert_output("5 >> { ..10 } >> { in.start }", "5");
+    assert_val("5 >> { ..10 } >> { in.start }", int(5));
 }
 
 #[test]
 fn probe21_block_sugar_range_end_field() {
-    assert_output("5 >> { ..10 } >> { in.end }", "10");
+    assert_val("5 >> { ..10 } >> { in.end }", int(10));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -6672,14 +6932,14 @@ fn probe21_block_sugar_range_end_field() {
 #[test]
 fn probe21b_neg_zero_int() {
     // -0 is UnaryMinus(Int(0)) → Int(0). Display: "0".
-    assert_output("-0", "0");
+    assert_val("-0", int(0));
 }
 
 #[test]
 fn probe21b_neg_zero_float() {
     // -0.0 is UnaryMinus(Float(0.0)) → Float(-0.0).
     // Display uses "{}.0" for whole floats; -0.0 should display as "-0.0".
-    assert_output("-0.0", "-0.0");
+    assert_val("-0.0", float(-0.0));
 }
 
 #[test]
@@ -6687,7 +6947,7 @@ fn probe21b_double_negation() {
     // --1 : parser sees Minus, then inside operand parsing sees another Minus.
     // This produces UnaryMinus(UnaryMinus(Int(1))) = 1.
     // DESIGN.md doesn't explicitly ban double negation, so this should work.
-    assert_output("--1", "1");
+    assert_val("--1", int(1));
 }
 
 // ── 2. Number followed by dots ──
@@ -6717,13 +6977,13 @@ fn probe21b_int_spread_error() {
 #[test]
 fn probe21b_neg_hex() {
     // -0xFF → UnaryMinus(Int(255)) → Int(-255)
-    assert_output("-0xFF", "-255");
+    assert_val("-0xFF", int(-255));
 }
 
 #[test]
 fn probe21b_hex_add() {
     // 0xFF + 1 = 255 + 1 = 256
-    assert_output("0xFF + 1", "256");
+    assert_val("0xFF + 1", int(256));
 }
 
 // ── 4. Large numbers ──
@@ -6738,7 +6998,49 @@ fn probe21b_hex_overflow_u64_max() {
 #[test]
 fn probe21b_hex_i64_max() {
     // 0x7FFFFFFFFFFFFFFF = i64::MAX = 9223372036854775807
-    assert_output("0x7FFFFFFFFFFFFFFF", "9223372036854775807");
+    assert_val("0x7FFFFFFFFFFFFFFF", int(9223372036854775807));
+}
+
+// ── 4b. Binary literals ──
+
+#[test]
+fn binary_literal_basic() {
+    assert_val("0b1010", int(10));
+}
+
+#[test]
+fn binary_literal_zero() {
+    assert_val("0b0", int(0));
+}
+
+#[test]
+fn binary_literal_one() {
+    assert_val("0b1", int(1));
+}
+
+#[test]
+fn binary_literal_byte_size() {
+    assert_val("0b11111111", int(255));
+}
+
+#[test]
+fn binary_literal_with_underscores() {
+    assert_val("0b1111_0000", int(240));
+}
+
+#[test]
+fn binary_literal_neg() {
+    assert_val("-0b1010", int(-10));
+}
+
+#[test]
+fn binary_literal_add() {
+    assert_val("0b1010 + 0b0101", int(15));
+}
+
+#[test]
+fn binary_literal_no_digits_error() {
+    assert_error("0b", "expected binary digits");
 }
 
 // ── 5. Underscore in number edge cases ──
@@ -6754,7 +7056,7 @@ fn probe21b_bare_underscore() {
 fn probe21b_trailing_underscore_number() {
     // `1_` — the lexer's lex_number consumes the trailing underscore
     // (the digit loop accepts '_'). So it becomes Int(1), then Eof.
-    assert_output("1_", "1");
+    assert_val("1_", int(1));
 }
 
 #[test]
@@ -6770,13 +7072,13 @@ fn probe21b_underscore_prefix_ident() {
 fn probe21b_float_point_one_plus_point_two() {
     // 0.1 + 0.2 in IEEE 754 is 0.30000000000000004, not 0.3.
     // Display for non-whole floats uses "{}".
-    assert_output("0.1 + 0.2", "0.30000000000000004");
+    assert_val("0.1 + 0.2", float(0.30000000000000004));
 }
 
 #[test]
 fn probe21b_float_equality_classic() {
     // 0.1 + 0.2 == 0.3 should be false (floating point imprecision).
-    assert_output("0.1 + 0.2 == 0.3", "false");
+    assert_val("0.1 + 0.2 == 0.3", F);
 }
 
 // ── 7. Negative float operations ──
@@ -6784,7 +7086,7 @@ fn probe21b_float_equality_classic() {
 #[test]
 fn probe21b_neg_float_add() {
     // -1.5 + 2.5 = 1.0
-    assert_output("-1.5 + 2.5", "1.0");
+    assert_val("-1.5 + 2.5", float(1.0));
 }
 
 #[test]
@@ -6792,7 +7094,7 @@ fn probe21b_neg_float_mul() {
     // -1.5 * -2.0 = 3.0
     // Parser: UnaryMinus is prefix, * is infix.
     // So: BinOp(Mul, UnaryMinus(Float(1.5)), UnaryMinus(Float(2.0))) = 3.0
-    assert_output("-1.5 * -2.0", "3.0");
+    assert_val("-1.5 * -2.0", float(3.0));
 }
 
 // ── 8. Mixed int/float arithmetic ──
@@ -6800,25 +7102,25 @@ fn probe21b_neg_float_mul() {
 #[test]
 fn probe21b_int_plus_float() {
     // 1 + 2.0 → mixed → promotes to float: 3.0
-    assert_output("1 + 2.0", "3.0");
+    assert_val("1 + 2.0", float(3.0));
 }
 
 #[test]
 fn probe21b_float_times_int() {
     // 2.0 * 3 → mixed → promotes to float: 6.0
-    assert_output("2.0 * 3", "6.0");
+    assert_val("2.0 * 3", float(6.0));
 }
 
 #[test]
 fn probe21b_int_div_int() {
     // 7 / 2 → integer division → 3 (truncation via checked_div)
-    assert_output("7 / 2", "3");
+    assert_val("7 / 2", int(3));
 }
 
 #[test]
 fn probe21b_float_div_int() {
     // 7.0 / 2 → mixed → float division: 3.5
-    assert_output("7.0 / 2", "3.5");
+    assert_val("7.0 / 2", float(3.5));
 }
 
 // ── 9. Byte arithmetic ──
@@ -6826,7 +7128,7 @@ fn probe21b_float_div_int() {
 #[test]
 fn probe21b_byte_eq_hex_escape() {
     // b'A' is Byte(65), b'\x41' is Byte(0x41 = 65). They should be equal.
-    assert_output("b'A' == b'\\x41'", "true");
+    assert_val("b'A' == b'\\x41'", T);
 }
 
 // ── 10. Char comparison ──
@@ -6834,13 +7136,13 @@ fn probe21b_byte_eq_hex_escape() {
 #[test]
 fn probe21b_char_lt() {
     // 'a' < 'b' — ASCII 97 < 98 → true
-    assert_output("'a' < 'b'", "true");
+    assert_val("'a' < 'b'", T);
 }
 
 #[test]
 fn probe21b_char_upper_lt_lower() {
     // 'A' < 'a' — ASCII 65 < 97 → true
-    assert_output("'A' < 'a'", "true");
+    assert_val("'A' < 'a'", T);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -6887,7 +7189,7 @@ fn probe22a_get_no_arg_error() {
 #[test]
 fn probe22a_pipe_let_then_get() {
     // [1, 2, 3] >> let(arr); arr.get(0) — should work, returns 1
-    assert_output("[1, 2, 3] >> let(arr); arr.get(0)", "1");
+    assert_val("[1, 2, 3] >> let(arr); arr.get(0)", int(1));
 }
 
 // ── Area 3: Pipe into method call ──
@@ -6897,7 +7199,7 @@ fn probe22a_pipe_into_get_method() {
     // 0 >> [1, 2, 3].get() — pipe 0 into get with no args.
     // Per eval_pipe MethodCall branch: extra_arg is Unit, so combined = lhs_val = 0.
     // Then eval_method(&[1,2,3], "get", 0) → get(0) → 1
-    assert_output("0 >> [1, 2, 3].get()", "1");
+    assert_val("0 >> [1, 2, 3].get()", int(1));
 }
 
 // ── Area 4: Edge cases with struct field functions ──
@@ -6905,7 +7207,7 @@ fn probe22a_pipe_into_get_method() {
 #[test]
 fn probe22a_struct_field_function_call() {
     // let s = (f = { in + 1 }); s.f(5) — should be 6
-    assert_output("let s = (f = { in + 1 }); s.f(5)", "6");
+    assert_val("let s = (f = { in + 1 }); s.f(5)", int(6));
 }
 
 #[test]
@@ -6914,7 +7216,7 @@ fn probe22a_pipe_into_struct_field_function() {
     // In eval_pipe MethodCall branch: recv = struct s, method = "f", extra_arg = Unit.
     // combined = lhs_val (since extra_arg is Unit) = 10.
     // Struct field "f" found → apply(closure, 10) → 10 + 1 = 11.
-    assert_output("let s = (f = { in + 1 }); 10 >> s.f()", "11");
+    assert_val("let s = (f = { in + 1 }); 10 >> s.f()", int(11));
 }
 
 // ── Area 5: Multiple method chaining ──
@@ -6928,7 +7230,7 @@ fn probe22a_filter_then_map() {
 #[test]
 fn probe22a_map_filter_len() {
     // [3, 1, 2].map{ * 2 }.filter{ > 3 }.len() should be 2
-    assert_output("[3, 1, 2].map{ * 2 }.filter{ > 3 }.len()", "2");
+    assert_val("[3, 1, 2].map{ * 2 }.filter{ > 3 }.len()", int(2));
 }
 
 // ── Area 6: Pipe precedence with methods ──
@@ -6956,7 +7258,7 @@ fn probe22a_pipe_into_block_filter_map() {
 fn probe22b_design_example_safe_div_ok() {
     // The canonical example from DESIGN.md: safe_div with (10, 3).
     // 10 * 100 / 3 = 333 (integer division), wrapped in Ok, then unwrapped.
-    assert_output(
+    assert_val(
         r#"tag(Ok);
 tag(Err);
 let safe_div = { in >> let(a, b);
@@ -6969,7 +7271,7 @@ let safe_div = { in >> let(a, b);
   Ok(result) -> result,
   Err(_) -> 0
 }"#,
-        "333",
+        int(333),
     );
 }
 
@@ -6979,7 +7281,7 @@ let safe_div = { in >> let(a, b);
 fn probe22b_design_example_safe_div_zero() {
     // Same safe_div but (10, 0) triggers the Err branch.
     // The final match on Err(_) returns -1.
-    assert_output(
+    assert_val(
         r#"tag(Ok);
 tag(Err);
 let safe_div = { in >> let(a, b);
@@ -6992,7 +7294,7 @@ let safe_div = { in >> let(a, b);
   Ok(result) -> result,
   Err(_) -> -1
 }"#,
-        "-1",
+        int(-1),
     );
 }
 
@@ -7002,13 +7304,13 @@ let safe_div = { in >> let(a, b);
 fn probe22b_higher_order_compose() {
     // compose takes (f, g) and returns a function that applies f then g.
     // double_then_add1: 5 -> 10 -> 11
-    assert_output(
+    assert_val(
         r#"let compose = { in >> let(f, g); { in >> f >> g } };
 let double = { in * 2 };
 let add1 = { in + 1 };
 (double, add1) >> compose >> let(double_then_add1);
 5 >> double_then_add1"#,
-        "11",
+        int(11),
     );
 }
 
@@ -7039,12 +7341,12 @@ fn probe22b_array_filter_map_fold() {
     // [1,2,3,4,5].filter{ > 2 } => [3,4,5]
     // .map{ * 10 } => [30,40,50]
     // .fold(0, { in.acc + in.elem }) => 120
-    assert_output(
+    assert_val(
         r#"[1, 2, 3, 4, 5]
   .filter{ > 2 }
   .map{ * 10 }
   .fold(0, { in.acc + in.elem })"#,
-        "120",
+        int(120),
     );
 }
 
@@ -7055,14 +7357,14 @@ fn probe22b_struct_as_module() {
     // A struct with function fields used as a module.
     // math.square(5) = 25, math.cube(2) = 8, math.abs(-3) = 3.
     // 25 + 8 + 3 = 36.
-    assert_output(
+    assert_val(
         r#"let math = (
   square = { in * in },
   cube = { in * in * in },
   abs = { in >> { x if x >= 0 -> x, x -> 0 - x } }
 );
 math.square(5) + math.cube(2) + math.abs(-3)"#,
-        "36",
+        int(36),
     );
 }
 
@@ -7150,14 +7452,14 @@ let color_value = {
 fn probe23_block_sugar_add_chain() {
     // { + 1 + 2 } desugars to { in + 1 + 2 }
     // in + 1 + 2 with left-assoc addition = (5 + 1) + 2 = 8
-    assert_output("5 >> { + 1 + 2 }", "8");
+    assert_val("5 >> { + 1 + 2 }", int(8));
 }
 
 #[test]
 fn probe23_block_sugar_mul_add_precedence() {
     // { * 2 + 1 } desugars to { in * 2 + 1 }
     // Precedence: (in * 2) + 1 = (5 * 2) + 1 = 11
-    assert_output("5 >> { * 2 + 1 }", "11");
+    assert_val("5 >> { * 2 + 1 }", int(11));
 }
 
 #[test]
@@ -7171,7 +7473,7 @@ fn probe23_block_sugar_eq_chained_error() {
 #[test]
 fn probe23_block_sugar_comparison() {
     // { > 3 } desugars to { in > 3 }
-    assert_output("5 >> { > 3 }", "true");
+    assert_val("5 >> { > 3 }", T);
 }
 
 #[test]
@@ -7184,7 +7486,7 @@ fn probe23_block_sugar_range() {
 #[test]
 fn probe23_block_sugar_pipe_chain() {
     // { >> { + 1 } } desugars to { in >> { + 1 } }
-    assert_output("5 >> { >> { + 1 } }", "6");
+    assert_val("5 >> { >> { + 1 } }", int(6));
 }
 
 // ── 2. Trailing comma in struct fields within call args ──
@@ -7206,7 +7508,7 @@ fn probe23_trailing_comma_positional_call_args() {
 #[test]
 fn probe23_trailing_comma_single_arg() {
     // f(42,) — trailing comma with single arg; should pass 42 not a struct
-    assert_output("let f = { in }; f(42,)", "42");
+    assert_val("let f = { in }; f(42,)", int(42));
 }
 
 // ── 3. Spread in call args ──
@@ -7255,24 +7557,24 @@ fn probe23_empty_array_concat_both() {
 
 #[test]
 fn probe23_empty_array_eq() {
-    assert_output("[] == []", "true");
+    assert_val("[] == []", T);
 }
 
 #[test]
 fn probe23_array_neq_empty() {
-    assert_output("[1] != []", "true");
+    assert_val("[1] != []", T);
 }
 
 // ── 5. Deeply nested parentheses ──
 
 #[test]
 fn probe23_deeply_nested_parens() {
-    assert_output("(((((1)))))", "1");
+    assert_val("(((((1)))))", int(1));
 }
 
 #[test]
 fn probe23_nested_parens_arithmetic() {
-    assert_output("((1 + 2)) * ((3))", "9");
+    assert_val("((1 + 2)) * ((3))", int(9));
 }
 
 // ── 6. Spread in array context ──
@@ -7353,13 +7655,13 @@ fn probe23_triple_semicolon() {
 #[test]
 fn probe23_let_destructure_labeled_pipe() {
     // (x=1, y=2) >> let(x=a, y=b); a + b should be 3
-    assert_output("(x=1, y=2) >> let(x=a, y=b); a + b", "3");
+    assert_val("(x=1, y=2) >> let(x=a, y=b); a + b", int(3));
 }
 
 #[test]
 fn probe23_let_destructure_labeled_pipe_more() {
     // Destructure and use in further computation
-    assert_output("(x=10, y=3) >> let(x=a, y=b); a * b", "30");
+    assert_val("(x=10, y=3) >> let(x=a, y=b); a * b", int(30));
 }
 
 // ── Additional edge cases discovered during analysis ──
@@ -7367,25 +7669,25 @@ fn probe23_let_destructure_labeled_pipe_more() {
 #[test]
 fn probe23_block_sugar_div() {
     // { / 2 } desugars to { in / 2 }
-    assert_output("10 >> { / 2 }", "5");
+    assert_val("10 >> { / 2 }", int(5));
 }
 
 #[test]
 fn probe23_block_sugar_noteq() {
     // { != 5 } desugars to { in != 5 }
-    assert_output("3 >> { != 5 }", "true");
+    assert_val("3 >> { != 5 }", T);
 }
 
 #[test]
 fn probe23_block_sugar_lteq() {
     // { <= 5 } desugars to { in <= 5 }
-    assert_output("5 >> { <= 5 }", "true");
+    assert_val("5 >> { <= 5 }", T);
 }
 
 #[test]
 fn probe23_block_sugar_gteq() {
     // { >= 5 } desugars to { in >= 5 }
-    assert_output("5 >> { >= 5 }", "true");
+    assert_val("5 >> { >= 5 }", T);
 }
 
 #[test]
@@ -7407,25 +7709,25 @@ fn probe23_trailing_semicolon_in_block_is_closure() {
     // { 42; } is a Block (closure). `{...}` always creates a closure.
     // The trailing semicolon inside the block body produces `42; ()` => Unit.
     // But the Block itself is a function value. You have to call it to get the result.
-    assert_output("{ 42; }(())", "()");
+    assert_val("{ 42; }(())", U);
 }
 
 #[test]
 fn probe23_block_is_always_closure() {
     // { expr } is a closure that must be called. It's not auto-evaluated.
-    assert_output("{ 42 }(())", "42");
+    assert_val("{ 42 }(())", int(42));
 }
 
 #[test]
 fn probe23_empty_parens_unit() {
     // () is unit
-    assert_output("()", "()");
+    assert_val("()", U);
 }
 
 #[test]
 fn probe23_nested_unit() {
     // (()) is grouping around unit
-    assert_output("(())", "()");
+    assert_val("(())", U);
 }
 
 #[test]
@@ -7460,7 +7762,7 @@ fn probe23_parse_expr_with_lhs_dotdot_range() {
 #[test]
 fn probe23_parse_expr_with_lhs_dotdot_range_access() {
     // Access .start and .end fields of range produced by sugar
-    assert_output("1 >> { .. 5 } >> { in.start }", "1");
+    assert_val("1 >> { .. 5 } >> { in.start }", int(1));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -7520,32 +7822,32 @@ fn probe24_empty_struct_let_destructure_rest() {
 fn probe24_positional_struct_field_access() {
     // `(10, 20, 30).1` should be 20.
     // Positional fields are stored as "0", "1", "2". Field access with .1 should match.
-    assert_output("(10, 20, 30).1", "20");
+    assert_val("(10, 20, 30).1", int(20));
 }
 
 #[test]
 fn probe24_tag_equality_same() {
     // `tag(Ok); Ok(1) == Ok(1)` should be true.
-    assert_output("tag(Ok); Ok(1) == Ok(1)", "true");
+    assert_val("tag(Ok); Ok(1) == Ok(1)", T);
 }
 
 #[test]
 fn probe24_tag_equality_different_payload() {
     // `tag(Ok); Ok(1) == Ok(2)` should be false.
-    assert_output("tag(Ok); Ok(1) == Ok(2)", "false");
+    assert_val("tag(Ok); Ok(1) == Ok(2)", F);
 }
 
 #[test]
 fn probe24_tag_equality_different_tags() {
     // `tag(Ok); tag(Err); Ok(1) == Err(1)` should be false (different tag IDs).
-    assert_output("tag(Ok); tag(Err); Ok(1) == Err(1)", "false");
+    assert_val("tag(Ok); tag(Err); Ok(1) == Err(1)", F);
 }
 
 #[test]
 fn probe24_deeply_nested_pipe_chains() {
     // `1 >> { + 1 } >> { * 2 } >> { + 3 } >> { * 4 }`
     // = (((1+1)*2)+3)*4 = ((2*2)+3)*4 = (4+3)*4 = 7*4 = 28
-    assert_output("1 >> { + 1 } >> { * 2 } >> { + 3 } >> { * 4 }", "28");
+    assert_val("1 >> { + 1 } >> { * 2 } >> { + 3 } >> { * 4 }", int(28));
 }
 
 #[test]
@@ -7555,18 +7857,18 @@ fn probe24_let_inside_guard() {
     // Actually PIPE_R = 7, and SEMI_L = 4, so semicolons are allowed in guards.
     // `(let y = x; y > 3)` — this is a grouped expression containing let and semicolon.
     // Let's see if it works.
-    assert_output(
+    assert_val(
         r#"tag(Ok); Ok(5) >> { Ok(x) if (let y = x; y > 3) -> "big", _ -> "small" }"#,
-        "big",
+        s("big"),
     );
 }
 
 #[test]
 fn probe24_let_inside_guard_false() {
     // Same as above but the guard evaluates to false.
-    assert_output(
+    assert_val(
         r#"tag(Ok); Ok(1) >> { Ok(x) if (let y = x; y > 3) -> "big", _ -> "small" }"#,
-        "small",
+        s("small"),
     );
 }
 
@@ -7584,7 +7886,10 @@ fn probe24_spread_with_computed_fields() {
 fn probe24_chained_tag_constructors() {
     // `tag(Outer); tag(Inner); Outer(Inner(42))` — nested tags.
     // Inner(42) creates Tagged{Inner, 42}. Outer(Tagged{Inner, 42}) creates Tagged{Outer, Tagged{Inner, 42}}.
-    assert_output("tag(Outer); tag(Inner); Outer(Inner(42))", "Outer(Inner(42))");
+    assert_output(
+        "tag(Outer); tag(Inner); Outer(Inner(42))",
+        "Outer(Inner(42))",
+    );
 }
 
 #[test]
@@ -7603,16 +7908,19 @@ fn probe24_branching_nested_tags() {
 #[test]
 fn probe24_array_of_functions_get() {
     // `let fns = [{ + 1 }, { * 2 }, { + 3 }]; fns.get(0)` — should return `<function>`.
-    assert_output("let fns = [{ + 1 }, { * 2 }, { + 3 }]; fns.get(0)", "<function>");
+    assert_output(
+        "let fns = [{ + 1 }, { * 2 }, { + 3 }]; fns.get(0)",
+        "<function>",
+    );
 }
 
 #[test]
 fn probe24_array_of_functions_apply_via_let() {
     // Retrieve the function from the array, then pipe into it.
     // Direct `5 >> fns.get(1)` fails because pipe prepends 5 to get's args.
-    assert_output(
+    assert_val(
         "let fns = [{ + 1 }, { * 2 }, { + 3 }]; let f = fns.get(1); 5 >> f",
-        "10",
+        int(10),
     );
 }
 
@@ -7631,66 +7939,69 @@ fn probe24_array_of_functions_pipe_bug() {
 #[test]
 fn probe24_array_len_zero_arg() {
     // `[1, 2, 3].len()` — .len() passes Unit. eval_array_method("len", _) ignores arg.
-    assert_output("[1, 2, 3].len()", "3");
+    assert_val("[1, 2, 3].len()", int(3));
 }
 
 #[test]
 fn probe24_pipe_into_tag_then_use() {
     // More complete test: tag(Ok) as statement, then use Ok as constructor.
     // Ensure the binding from tag() persists through semicolons.
-    assert_output("tag(Ok); tag(Err); Ok(42) >> { Ok(x) -> x + 1, Err(_) -> 0 }", "43");
+    assert_val(
+        "tag(Ok); tag(Err); Ok(42) >> { Ok(x) -> x + 1, Err(_) -> 0 }",
+        int(43),
+    );
 }
 
 #[test]
 fn probe24_fold_proper_syntax() {
     // Proper fold: [1,2,3].fold(0, { in.acc + in.elem })
     // fold expects (init, function) as a 2-element struct.
-    assert_output("[1, 2, 3].fold(0, { in.acc + in.elem })", "6");
+    assert_val("[1, 2, 3].fold(0, { in.acc + in.elem })", int(6));
 }
 
 // ── Ternary sugar: { a | b } ─────────────────────────────────────
 
 #[test]
 fn ternary_true_branch() {
-    assert_output(r#"true >> { "yes" | "no" }"#, "yes");
+    assert_val(r#"true >> { "yes" | "no" }"#, s("yes"));
 }
 
 #[test]
 fn ternary_false_branch() {
-    assert_output(r#"false >> { "yes" | "no" }"#, "no");
+    assert_val(r#"false >> { "yes" | "no" }"#, s("no"));
 }
 
 #[test]
 fn ternary_with_arithmetic() {
-    assert_output("true >> { 1 + 2 | 3 * 4 }", "3");
-    assert_output("false >> { 1 + 2 | 3 * 4 }", "12");
+    assert_val("true >> { 1 + 2 | 3 * 4 }", int(3));
+    assert_val("false >> { 1 + 2 | 3 * 4 }", int(12));
 }
 
 #[test]
 fn ternary_with_pipes() {
-    assert_output("true >> { 1 >> { + 1 } | 0 }", "2");
-    assert_output("false >> { 1 >> { + 1 } | 0 }", "0");
+    assert_val("true >> { 1 >> { + 1 } | 0 }", int(2));
+    assert_val("false >> { 1 >> { + 1 } | 0 }", int(0));
 }
 
 #[test]
 fn ternary_nested() {
     // true branch evaluates the inner ternary
-    assert_output(r#"true >> { false >> { "a" | "b" } | "c" }"#, "b");
-    assert_output(r#"false >> { "a" | true >> { "b" | "c" } }"#, "b");
+    assert_val(r#"true >> { false >> { "a" | "b" } | "c" }"#, s("b"));
+    assert_val(r#"false >> { "a" | true >> { "b" | "c" } }"#, s("b"));
 }
 
 #[test]
 fn ternary_in_available() {
     // `in` is the bool input — true in true branch, false in false branch
-    assert_output("true >> { in | false }", "true");
-    assert_output("false >> { true | in }", "false");
+    assert_val("true >> { in | false }", T);
+    assert_val("false >> { true | in }", F);
 }
 
 #[test]
 fn ternary_short_circuits() {
     // Only the taken branch is evaluated; the other should NOT cause an error
-    assert_output(r#"true >> { "ok" | 1 / 0 }"#, "ok");
-    assert_output(r#"false >> { 1 / 0 | "ok" }"#, "ok");
+    assert_val(r#"true >> { "ok" | 1 / 0 }"#, s("ok"));
+    assert_val(r#"false >> { 1 / 0 | "ok" }"#, s("ok"));
 }
 
 #[test]
@@ -7700,22 +8011,25 @@ fn ternary_non_bool_error() {
 
 #[test]
 fn ternary_with_comparison() {
-    assert_output(r#"3 > 0 >> { "positive" | "non-positive" }"#, "positive");
-    assert_output(r#"0 > 0 >> { "positive" | "non-positive" }"#, "non-positive");
+    assert_val(r#"3 > 0 >> { "positive" | "non-positive" }"#, s("positive"));
+    assert_val(
+        r#"0 > 0 >> { "positive" | "non-positive" }"#,
+        s("non-positive"),
+    );
 }
 
 #[test]
 fn ternary_returns_value() {
     // Ternary result can be used in further computation
-    assert_output("1 + (true >> { 10 | 20 })", "11");
-    assert_output("1 + (false >> { 10 | 20 })", "21");
+    assert_val("1 + (true >> { 10 | 20 })", int(11));
+    assert_val("1 + (false >> { 10 | 20 })", int(21));
 }
 
 #[test]
 fn ternary_with_let_in_branch() {
     // Semicolons work inside branches
-    assert_output("true >> { let x = 10; x + 1 | 0 }", "11");
-    assert_output("false >> { 0 | let y = 20; y + 1 }", "21");
+    assert_val("true >> { let x = 10; x + 1 | 0 }", int(11));
+    assert_val("false >> { 0 | let y = 20; y + 1 }", int(21));
 }
 
 #[test]
@@ -7726,7 +8040,7 @@ fn ternary_with_tags() {
 
 #[test]
 fn ternary_unit_branches() {
-    assert_output("true >> { () | () }", "()");
+    assert_val("true >> { () | () }", U);
 }
 
 #[test]
@@ -7743,5 +8057,53 @@ fn ternary_struct_branches() {
 #[test]
 fn ternary_in_pipeline() {
     // Ternary block used in a pipeline
-    assert_output(r#"1 > 0 >> { "pos" | "neg" } >> len"#, "3");
+    assert_val(r#"1 > 0 >> { "pos" | "neg" } >> len"#, int(3));
+}
+
+// ── Unused Binding Warnings ─────────────────────────────────────
+
+#[test]
+fn warning_unused_binding() {
+    assert_warnings("let x = 1; 2", &["unused binding 'x'"]);
+}
+
+#[test]
+fn warning_no_warning_when_used() {
+    assert_no_warnings("let x = 1; x");
+}
+
+#[test]
+fn warning_underscore_prefix_suppresses() {
+    // _x suppresses the unused warning
+    assert_no_warnings("let _x = 1; 2");
+}
+
+#[test]
+fn warning_bare_discard_no_warning() {
+    // _ discard never warns
+    assert_no_warnings("let _ = 1; 2");
+}
+
+#[test]
+fn warning_multiple_unused() {
+    // Warnings are emitted in reverse binding order (most recent first)
+    assert_warnings("let x = 1; let y = 2; 3", &["y", "x"]);
+}
+
+#[test]
+fn warning_shadowed_used() {
+    // x is shadowed; the second x is used, so no warning for it.
+    // The first x is shadowed — we don't warn for shadowed bindings.
+    assert_no_warnings("let x = 1; let x = 2; x");
+}
+
+#[test]
+fn warning_tag_binding_used() {
+    // tag(Ok) binds Ok — used in the branch
+    assert_no_warnings("tag(Ok); 1 >> Ok >> { Ok(x) -> x }");
+}
+
+#[test]
+fn warning_used_in_interpolation() {
+    assert_no_warnings(r#"let name = "world"; "{name}""#);
 }

@@ -1,6 +1,12 @@
 pub type Expr = Box<ExprKind>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum StringInterpPart {
+    Literal(String),
+    Expr(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
     // Literals
     Int(i64),
@@ -10,6 +16,9 @@ pub enum ExprKind {
     Char(char),
     Byte(u8),
     Unit,
+
+    // String interpolation: "hello, {name}!"
+    StringInterp(Vec<StringInterpPart>),
 
     // References
     Ident(String),
@@ -75,14 +84,14 @@ pub enum ExprKind {
     Group(Expr),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub label: Option<String>,
     pub value: Expr,
     pub is_spread: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BinOp {
     Add,
     Sub,
@@ -90,7 +99,7 @@ pub enum BinOp {
     Div,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CmpOp {
     Eq,
     NotEq,
@@ -100,21 +109,21 @@ pub enum CmpOp {
     GtEq,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     Name(String),
     Discard,
     Fields(Vec<PatField>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PatField {
     pub label: Option<String>,
     pub binding: String,
     pub is_rest: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ArrayPat {
     Name(String),
     Discard,
@@ -122,7 +131,7 @@ pub enum ArrayPat {
 }
 
 /// An arm in a branching block: { pattern -> expr, ... }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BranchArm {
     pub pattern: BranchPattern,
     pub guard: Option<Expr>,
@@ -130,7 +139,7 @@ pub struct BranchArm {
 }
 
 /// Pattern in a branching arm.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BranchPattern {
     /// Match a literal value: true, false, 0, "hello", etc.
     Literal(Expr),
@@ -142,7 +151,7 @@ pub enum BranchPattern {
     Discard,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BranchBinding {
     Name(String),
     Discard,

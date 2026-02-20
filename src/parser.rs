@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::lexer::Token;
+use crate::lexer::{StringPart, Token};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TAG_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -574,6 +574,11 @@ impl Parser {
                 self.advance();
                 Ok(Box::new(ExprKind::Str(s)))
             }
+            Token::InterpStr(ref parts) => {
+                let parts = parts.clone();
+                self.advance();
+                self.parse_interp_string(parts)
+            }
             Token::Char(c) => {
                 self.advance();
                 Ok(Box::new(ExprKind::Char(c)))
@@ -639,6 +644,30 @@ impl Parser {
     }
 
     // ── Individual prefix parsers ────────────────────────────────────
+
+    fn parse_interp_string(&mut self, parts: Vec<StringPart>) -> Result<Expr, String> {
+        let mut ast_parts = Vec::new();
+        for part in parts {
+            match part {
+                StringPart::Literal(s) => {
+                    ast_parts.push(StringInterpPart::Literal(s));
+                }
+                StringPart::Expr(src) => {
+                    // Parse the expression source as a sub-program
+                    let mut lexer = crate::lexer::Lexer::new(&src);
+                    let tokens = lexer.tokenize().map_err(|e| {
+                        format!("error in string interpolation: {}", e)
+                    })?;
+                    let mut parser = Parser::new(tokens);
+                    let expr = parser.parse_program().map_err(|e| {
+                        format!("error in string interpolation: {}", e)
+                    })?;
+                    ast_parts.push(StringInterpPart::Expr(expr));
+                }
+            }
+        }
+        Ok(Box::new(ExprKind::StringInterp(ast_parts)))
+    }
 
     fn parse_block(&mut self) -> Result<Expr, String> {
         self.advance(); // consume {
@@ -1267,6 +1296,26 @@ impl Parser {
         }
 
         let (pattern, is_array) = self.parse_let_pattern()?;
+
+        // Check for `let [...] = expr;` or `let (...) = expr;` sugar
+        if matches!(self.peek(), Token::Assign) {
+            self.advance(); // consume '='
+            let value_expr = self.parse_expr(bp::SEMI_L + 1)?;
+            let new_let = if is_array {
+                let array_pats = self.pattern_to_array_pats(pattern)?;
+                Box::new(ExprKind::LetArray {
+                    patterns: array_pats,
+                    body: Box::new(ExprKind::Unit),
+                })
+            } else {
+                Box::new(ExprKind::Let {
+                    pattern,
+                    body: Box::new(ExprKind::Unit),
+                })
+            };
+            let result = Self::nest_let_in_expr(value_expr, new_let);
+            return Ok(result);
+        }
 
         if is_array {
             let array_pats = self.pattern_to_array_pats(pattern)?;

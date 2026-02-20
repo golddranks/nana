@@ -18,10 +18,18 @@ pub fn parse(source: &str) -> Result<Expr, String> {
 
 /// Run source code and return the resulting value.
 pub fn run(source: &str) -> Result<Value, String> {
+    let (val, _warnings) = run_with_warnings(source)?;
+    Ok(val)
+}
+
+/// Run source code and return the value plus any warnings.
+pub fn run_with_warnings(source: &str) -> Result<(Value, Vec<String>), String> {
     let ast = parse(source)?;
     let env = eval::default_env();
-    eval::eval(&ast, &env, &Value::Unit)
-        .map_err(|e| format!("runtime error: {}", e))
+    let (val, final_env) = eval::eval_toplevel(&ast, &env, &Value::Unit)
+        .map_err(|e| format!("runtime error: {}", e))?;
+    let warnings = final_env.unused_warnings();
+    Ok((val, warnings))
 }
 
 /// Run source code with a given environment, returning both the value

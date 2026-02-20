@@ -13,12 +13,14 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | `bool` (`true`/`false`) | Implemented | |
 | `byte` (literal `b'a'`, `0xF4`) | Partial | `b'a'` works; hex `0xF4` lexes as `int`, not `byte` |
 | `byte` (plain `4` auto-converts) | Not implemented | No automatic numeric literal coercion to byte |
+| Hex integer literals (`0xFF`) | Implemented | Parsed by lexer; underscore separators supported |
+| Binary integer literals (`0b1010`) | Implemented | Parsed by lexer; underscore separators supported |
 | `char` (Unicode scalar) | Implemented | |
 | `string` (UTF-8) | Implemented | Literals, concatenation, escape sequences |
-| String interpolation `"Hello, {name}!"` | Not implemented | Lexer does not parse `{expr}` in strings |
-| Multi-line strings (`\\` prefix, Zig-style) | Not implemented | Lexer has no support |
-| `as_bytes` (string to byte array) | Not implemented | No stdlib method |
-| `chars()` (string to codepoints) | Not implemented | No stdlib method |
+| String interpolation `"Hello, {name}!"` | Implemented | Lexer produces `InterpStr` tokens; parser/eval handle nested expressions |
+| Multi-line strings (`\\` prefix, Zig-style) | Implemented | Lexer joins `\\`-prefixed lines, strips leading whitespace |
+| `as_bytes` (string to byte array) | Implemented | String method |
+| `chars()` (string to codepoints) | Implemented | String method |
 | Other bit-size constructors | Not implemented | Spec mentions "other bit sizes via constructors" |
 | Literal-typed numerics / auto-coercion | Not implemented | int/float are fixed; no automatic widening to required type |
 | Unit `()` | Implemented | |
@@ -46,7 +48,7 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | `;` sequences let-scopes | Implemented | |
 | Shadowing | Implemented | |
 | `_` discards | Implemented | |
-| `_name` binds, suppresses warnings | Partial | Binds fine; no unused-binding warnings exist yet |
+| `_name` binds, suppresses warnings | Implemented | `Env::unused_warnings()` checks for unused bindings; `_` prefix suppresses |
 
 ---
 
@@ -146,12 +148,12 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | `let[...]` array destructuring | Implemented | Positional, `...rest`, `_` |
 | `let(...)` struct destructuring | Implemented | Named labels, `...rest`, `_` |
 | `let(a=x)` named field binding | Implemented | Binds field `a` to variable `x` |
-| String destructuring via `let[...]` | Not implemented | Explicit error: "string destructuring not yet implemented" |
+| String destructuring via `let[...]` | Implemented | Strings treated as arrays of single-char strings; supports `...rest` |
 | Pattern failure halts evaluation | Implemented | |
 | `...name` rest capture (arrays) | Implemented | |
 | `...name` rest capture (structs) | Implemented | Re-indexes positional fields |
 | `_` discard | Implemented | |
-| `_name` suppresses warnings | Partial | Binds, but no warning system exists |
+| `_name` suppresses warnings | Implemented | `_` prefix suppresses unused-binding warnings |
 | Branching block pattern matching on tags | Implemented | `value >> { Tag(x) -> expr, ... }` |
 | `if` guards in branch arms | Implemented | `Ok(x) if x > 0 -> expr` |
 | All arms must return same type | Not enforced | No type system |
@@ -175,8 +177,16 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | `print` | Implemented | Side-effecting, returns `()` |
 | `get` | Implemented | Array method only (not a builtin function) |
 | `slice` | Implemented | Array method only (not a builtin function) |
-| `as_bytes` | Not implemented | |
-| `chars` | Not implemented | |
+| `as_bytes` | Implemented | String method; returns byte array |
+| `chars` | Implemented | String method; returns array of chars |
+| `split` | Implemented | String method; splits by delimiter |
+| `trim` | Implemented | String method; strips leading/trailing whitespace |
+| `contains` | Implemented | String method; checks for substring or char |
+| `starts_with` | Implemented | String method; checks prefix |
+| `ends_with` | Implemented | String method; checks suffix |
+| `replace` | Implemented | String method; takes `(pattern, replacement)` struct |
+| `str.slice(range)` | Implemented | String method; byte-based slicing |
+| `str.get(idx)` | Implemented | String method; returns single-char string |
 | Struct/tuple helpers (access, merge) | Not implemented | Only field access via `.` syntax |
 | Sum/tag combinators (`map_tag`, `bind_tag`) | Not implemented | |
 
@@ -243,15 +253,9 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 4. WebAssembly compilation backend
 
 **Medium:**
-5. String interpolation (`"Hello, {name}!"`)
-6. String destructuring (`let[...]` on strings)
-7. Multi-line strings (Zig-style `\\` prefix)
-8. Numeric literal coercion (byte from plain `4`, auto-widening)
+5. Numeric literal coercion (byte from plain `4`, auto-widening)
 
 **Small / Stdlib:**
-9. `as_bytes` (string to byte array)
-10. `chars` (string to codepoint iterator)
-11. Struct/tuple helpers (`map_tag`, `bind_tag`, merge, etc.)
-12. `_name` unused-binding warnings
-13. Other bit-size numeric constructors
-14. Function comparison specific error message
+6. Struct/tuple helpers (`map_tag`, `bind_tag`, merge, etc.)
+7. Other bit-size numeric constructors
+8. Function comparison specific error message

@@ -1,12 +1,21 @@
+use std::cell::Cell;
 use std::fmt;
+use std::rc::Rc;
 
 use crate::ast::{BranchArm, Expr};
 
 pub type TagId = u64;
 
 #[derive(Clone)]
+struct Binding {
+    name: String,
+    value: Value,
+    used: Rc<Cell<bool>>,
+}
+
+#[derive(Clone)]
 pub struct Env {
-    bindings: Vec<(String, Value)>,
+    bindings: Vec<Binding>,
 }
 
 impl Env {
@@ -17,9 +26,10 @@ impl Env {
     }
 
     pub fn get(&self, name: &str) -> Option<&Value> {
-        self.bindings.iter().rev().find_map(|(k, v)| {
-            if k == name {
-                Some(v)
+        self.bindings.iter().rev().find_map(|b| {
+            if b.name == name {
+                b.used.set(true);
+                Some(&b.value)
             } else {
                 None
             }
@@ -28,10 +38,39 @@ impl Env {
 
     pub fn bind(&self, name: String, value: Value) -> Env {
         let mut new_env = self.clone();
-        new_env.bindings.push((name, value));
+        new_env.bindings.push(Binding {
+            name,
+            value,
+            used: Rc::new(Cell::new(false)),
+        });
         new_env
     }
 
+    /// Return warnings for unused bindings that don't start with `_`.
+    /// Skips builtins and internal names (like `\0`).
+    pub fn unused_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        // Walk in reverse so we only warn about the most recent binding for each name.
+        // (Shadowed bindings that are unused are expected.)
+        for b in self.bindings.iter().rev() {
+            if seen.contains(&b.name) {
+                continue;
+            }
+            seen.insert(b.name.clone());
+            if b.name.starts_with('\0') || b.name == "_" {
+                continue;
+            }
+            // Builtins are pre-bound and always "used" implicitly
+            if matches!(b.value, Value::BuiltinFn(_)) {
+                continue;
+            }
+            if !b.used.get() && !b.name.starts_with('_') {
+                warnings.push(format!("warning: unused binding '{}'", b.name));
+            }
+        }
+        warnings
+    }
 }
 
 #[derive(Clone)]
@@ -66,27 +105,29 @@ pub enum Value {
 }
 
 impl Value {
-    /// Write the value in "nested" form, where strings are quoted.
-    /// Used when displaying values inside composite types (arrays, structs, tagged).
-    fn write_nested(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    /// For `print`: format the value for human consumption (strings without quotes).
+    pub fn print_string(&self) -> String {
         match self {
-            Value::Str(s) => {
-                write!(f, "\"")?;
-                for c in s.chars() {
-                    match c {
-                        '\0' => write!(f, "\\0")?,
-                        '\n' => write!(f, "\\n")?,
-                        '\r' => write!(f, "\\r")?,
-                        '\t' => write!(f, "\\t")?,
-                        '\\' => write!(f, "\\\\")?,
-                        '"' => write!(f, "\\\"")?,
-                        c => write!(f, "{}", c)?,
-                    }
-                }
-                write!(f, "\"")
-            }
-            other => write!(f, "{}", other),
+            Value::Str(s) => s.clone(),
+            other => other.to_string(),
         }
+    }
+
+    /// Write a string value with quotes and escape sequences.
+    fn write_quoted_str(s: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "\"")?;
+        for c in s.chars() {
+            match c {
+                '\0' => write!(f, "\\0")?,
+                '\n' => write!(f, "\\n")?,
+                '\r' => write!(f, "\\r")?,
+                '\t' => write!(f, "\\t")?,
+                '\\' => write!(f, "\\\\")?,
+                '"' => write!(f, "\\\"")?,
+                c => write!(f, "{}", c)?,
+            }
+        }
+        write!(f, "\"")
     }
 }
 
@@ -102,7 +143,7 @@ impl fmt::Display for Value {
                 }
             }
             Value::Bool(b) => write!(f, "{}", b),
-            Value::Str(s) => write!(f, "{}", s),
+            Value::Str(s) => Self::write_quoted_str(s, f),
             Value::Char(c) => match c {
                 '\0' => write!(f, "'\\0'"),
                 '\n' => write!(f, "'\\n'"),
@@ -129,7 +170,7 @@ impl fmt::Display for Value {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    elem.write_nested(f)?;
+                    write!(f, "{}", elem)?;
                 }
                 write!(f, "]")
             }
@@ -141,10 +182,10 @@ impl fmt::Display for Value {
                     }
                     // Check if label is numeric (positional)
                     if label.parse::<usize>().is_ok() {
-                        val.write_nested(f)?;
+                        write!(f, "{}", val)?;
                     } else {
                         write!(f, "{}=", label)?;
-                        val.write_nested(f)?;
+                        write!(f, "{}", val)?;
                     }
                 }
                 write!(f, ")")
@@ -159,11 +200,63 @@ impl fmt::Display for Value {
                     write!(f, "{}", name)
                 } else {
                     write!(f, "{}(", name)?;
-                    payload.write_nested(f)?;
+                    write!(f, "{}", payload)?;
                     write!(f, ")")
                 }
             }
             Value::BuiltinFn(name) => write!(f, "<builtin {}>", name),
+        }
+    }
+}
+
+impl PartialEq for Env {
+    fn eq(&self, other: &Self) -> bool {
+        if self.bindings.len() != other.bindings.len() {
+            return false;
+        }
+        self.bindings
+            .iter()
+            .zip(other.bindings.iter())
+            .all(|(a, b)| a.name == b.name && a.value == b.value)
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::Char(a), Value::Char(b)) => a == b,
+            (Value::Byte(a), Value::Byte(b)) => a == b,
+            (Value::Unit, Value::Unit) => true,
+            (Value::Array(a), Value::Array(b)) => a == b,
+            (Value::Struct(a), Value::Struct(b)) => a == b,
+            (Value::Closure { body: b1, env: e1 }, Value::Closure { body: b2, env: e2 }) => {
+                b1 == b2 && e1 == e2
+            }
+            (
+                Value::BranchClosure { arms: a1, env: e1 },
+                Value::BranchClosure { arms: a2, env: e2 },
+            ) => a1 == a2 && e1 == e2,
+            (
+                Value::Tagged {
+                    id: id1,
+                    payload: p1,
+                    ..
+                },
+                Value::Tagged {
+                    id: id2,
+                    payload: p2,
+                    ..
+                },
+            ) => id1 == id2 && p1 == p2,
+            (Value::TagConstructor { id: id1, .. }, Value::TagConstructor { id: id2, .. }) => {
+                id1 == id2
+            }
+            (Value::BuiltinFn(a), Value::BuiltinFn(b)) => a == b,
+            _ => false,
         }
     }
 }

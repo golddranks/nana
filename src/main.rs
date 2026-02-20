@@ -18,8 +18,13 @@ fn run_file(path: &str) {
         eprintln!("error reading {}: {}", path, e);
         std::process::exit(1);
     });
-    match nana::run(&source) {
-        Ok(val) => println!("{}", val),
+    match nana::run_with_warnings(&source) {
+        Ok((val, warnings)) => {
+            for w in &warnings {
+                eprintln!("{}", w);
+            }
+            println!("{}", val);
+        }
         Err(e) => {
             eprintln!("{}", e);
             std::process::exit(1);
@@ -33,8 +38,13 @@ fn run_stdin() {
         eprintln!("error reading stdin: {}", e);
         std::process::exit(1);
     });
-    match nana::run(&buf) {
-        Ok(val) => println!("{}", val),
+    match nana::run_with_warnings(&buf) {
+        Ok((val, warnings)) => {
+            for w in &warnings {
+                eprintln!("{}", w);
+            }
+            println!("{}", val);
+        }
         Err(e) => {
             eprintln!("{}", e);
             std::process::exit(1);

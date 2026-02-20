@@ -1,0 +1,149 @@
+pub type Expr = Box<ExprKind>;
+
+#[derive(Debug, Clone)]
+pub enum ExprKind {
+    // Literals
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+    Char(char),
+    Byte(u8),
+    Unit,
+
+    // References
+    Ident(String),
+
+    // Block / lambda: { body } — `in` refers to the block's input
+    Block(Expr),
+
+    // Branching block: { pattern -> expr, ... } — matches `in` against arms
+    BranchBlock(Vec<BranchArm>),
+
+    // Collections
+    Array(Vec<Expr>),
+    Struct(Vec<Field>),
+
+    // Access
+    FieldAccess(Expr, String),
+
+    // Function call: f(arg), f{block}, f[array]
+    Call(Expr, Expr),
+
+    // Method call: value.method(arg) — type-based dispatch
+    MethodCall {
+        receiver: Expr,
+        method: String,
+        arg: Expr,
+    },
+
+    // Operators
+    UnaryMinus(Expr),
+    BinOp(BinOp, Expr, Expr),
+    Compare(CmpOp, Expr, Expr),
+
+    // Pipe: lhs >> rhs
+    Pipe(Expr, Expr),
+
+    // Let binding: bind input to pattern, then evaluate body.
+    // In `value >> let(x); body`, this becomes Pipe(value, Let(Name("x"), body)).
+    // The "input" to Let is the value from the pipe. body can reference the bound name.
+    // `let(x)` returns x — if body is None, the let returns the bound value.
+    Let {
+        pattern: Pattern,
+        body: Expr,
+    },
+
+    // Array destructuring: value >> let[a, b, ...rest]; body
+    LetArray {
+        patterns: Vec<ArrayPat>,
+        body: Expr,
+    },
+
+    // Tag constructor (generative, each lexical occurrence gets unique id)
+    // (tag_id, optional display name from tag(Name) sugar)
+    NewTag(u64, Option<String>),
+
+    // Range sugar: a..b → (start=a, end=b)
+    Range(Expr, Expr),
+
+    // Import
+    Import(String),
+
+    // Grouping: `(expr)` — semantically transparent, but prevents `let x = (expr)`
+    // desugaring from nesting into the inner expression's let chain.
+    Group(Expr),
+}
+
+#[derive(Debug, Clone)]
+pub struct Field {
+    pub label: Option<String>,
+    pub value: Expr,
+    pub is_spread: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum CmpOp {
+    Eq,
+    NotEq,
+    Lt,
+    Gt,
+    LtEq,
+    GtEq,
+}
+
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    Name(String),
+    Discard,
+    Fields(Vec<PatField>),
+}
+
+#[derive(Debug, Clone)]
+pub struct PatField {
+    pub label: Option<String>,
+    pub binding: String,
+    pub is_rest: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum ArrayPat {
+    Name(String),
+    Discard,
+    Rest(Option<String>),
+}
+
+/// An arm in a branching block: { pattern -> expr, ... }
+#[derive(Debug, Clone)]
+pub struct BranchArm {
+    pub pattern: BranchPattern,
+    pub guard: Option<Expr>,
+    pub body: Expr,
+}
+
+/// Pattern in a branching arm.
+#[derive(Debug, Clone)]
+pub enum BranchPattern {
+    /// Match a literal value: true, false, 0, "hello", etc.
+    Literal(Expr),
+    /// Match a tag constructor: Ok(x), Err(msg)
+    Tag(String, Option<BranchBinding>),
+    /// Catch-all binding: x (binds the whole value)
+    Binding(String),
+    /// Discard: _
+    Discard,
+}
+
+#[derive(Debug, Clone)]
+pub enum BranchBinding {
+    Name(String),
+    Discard,
+}

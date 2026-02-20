@@ -608,6 +608,18 @@ impl Parser {
             // Unary minus
             Token::Minus => {
                 self.advance();
+                // Special case: -BigInt(n) where n overflows i64 but fits as negative i64
+                if let Token::BigInt(n) = self.peek().clone() {
+                    self.advance();
+                    let neg = (n as i128).checked_neg()
+                        .and_then(|v| i64::try_from(v).ok())
+                        .ok_or_else(|| format!("integer literal too large: {}", n))?;
+                    // Check: -expr followed by postfix is ambiguous
+                    if matches!(self.peek(), Token::Dot | Token::LParen | Token::LBrace | Token::LBracket) {
+                        return Err("ambiguous: `-x.f()` is a syntax error; write `(-x).f()` or `-(x.f())`".to_string());
+                    }
+                    return Ok(Box::new(ExprKind::Int(neg)));
+                }
                 // Parse operand WITHOUT postfix (call/field-access) to detect ambiguity.
                 // Use POSTFIX + 1 so postfix operators are not consumed.
                 let operand = self.parse_expr(bp::POSTFIX + 1)?;
@@ -616,6 +628,11 @@ impl Parser {
                     return Err("ambiguous: `-x.f()` is a syntax error; write `(-x).f()` or `-(x.f())`".to_string());
                 }
                 Ok(Box::new(ExprKind::UnaryMinus(operand)))
+            }
+
+            // BigInt without negation is an error
+            Token::BigInt(n) => {
+                Err(format!("integer literal too large: {}", n))
             }
 
             // Block { ... } or branching block { pattern -> expr, ... }
@@ -734,6 +751,8 @@ impl Parser {
         let mut offset = 0;
         // Skip past the first "pattern" to see if we find ->
         match self.peek_at(offset) {
+            // `if` guard-only sugar: { if expr -> body, ... }
+            Token::If => return true,
             // Ident could be: tag pattern `Tag(x)`, or binding `x`
             Token::Ident(_) => {
                 offset += 1;
@@ -775,7 +794,7 @@ impl Parser {
             Token::Minus => {
                 // Negative literal pattern: -1 -> ...
                 offset += 1;
-                if matches!(self.peek_at(offset), Token::Int(_) | Token::Float(_)) {
+                if matches!(self.peek_at(offset), Token::Int(_) | Token::Float(_) | Token::BigInt(_)) {
                     offset += 1;
                     if matches!(self.peek_at(offset), Token::Arrow | Token::If) {
                         return true;
@@ -808,13 +827,89 @@ impl Parser {
         false
     }
 
+    /// Check if the current arm is a default arm (expression without `->`) in a branch block.
+    /// Scans ahead to see if there's an Arrow at depth 0 before the next Comma or RBrace.
+    fn is_default_arm(&self) -> bool {
+        let mut offset = 0;
+        let mut depth = 0usize;
+        loop {
+            match self.peek_at(offset) {
+                Token::Eof => return true,
+                Token::LParen | Token::LBracket | Token::LBrace => {
+                    depth += 1;
+                    offset += 1;
+                }
+                Token::RParen | Token::RBracket => {
+                    if depth == 0 {
+                        return true;
+                    }
+                    depth -= 1;
+                    offset += 1;
+                }
+                Token::RBrace => {
+                    if depth == 0 {
+                        return true;
+                    }
+                    depth -= 1;
+                    offset += 1;
+                }
+                Token::Arrow if depth == 0 => return false,
+                Token::Comma if depth == 0 => return true,
+                _ => {
+                    offset += 1;
+                }
+            }
+        }
+    }
+
     /// Parse a branching block: { pattern -> expr, ... }
+    /// Supports sugar:
+    ///   - `if expr -> body` — guard-only arm (no pattern)
+    ///   - trailing `expr` (no `->`) — default/else arm (must be last)
     fn parse_branch_block(&mut self) -> Result<Expr, String> {
         let mut arms = Vec::new();
         loop {
             if matches!(self.peek(), Token::RBrace) {
                 break;
             }
+
+            // Guard-only arm: `if guard_expr -> body`
+            if matches!(self.peek(), Token::If) {
+                self.advance(); // consume `if`
+                let guard = self.parse_expr(bp::PIPE_R)?;
+                self.expect(&Token::Arrow)?;
+                let body = self.parse_expr(bp::SEMI_R)?;
+                arms.push(BranchArm {
+                    pattern: BranchPattern::Discard,
+                    guard: Some(guard),
+                    body,
+                });
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+                continue;
+            }
+
+            // Default arm: trailing expression without `->`
+            if self.is_default_arm() {
+                let body = self.parse_expr(bp::SEMI_R)?;
+                arms.push(BranchArm {
+                    pattern: BranchPattern::Discard,
+                    guard: None,
+                    body,
+                });
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                }
+                if !matches!(self.peek(), Token::RBrace) {
+                    return Err("default arm must be the last arm in a branching block".to_string());
+                }
+                break;
+            }
+
+            // Normal arm: pattern [if guard] -> body
             let pattern = self.parse_branch_pattern()?;
             let guard = if matches!(self.peek(), Token::If) {
                 self.advance();
@@ -874,6 +969,13 @@ impl Parser {
                         Ok(BranchPattern::Literal(Box::new(ExprKind::UnaryMinus(
                             Box::new(ExprKind::Float(f)),
                         ))))
+                    }
+                    Token::BigInt(n) => {
+                        self.advance();
+                        let neg = (n as i128).checked_neg()
+                            .and_then(|v| i64::try_from(v).ok())
+                            .ok_or_else(|| format!("integer literal too large: {}", n))?;
+                        Ok(BranchPattern::Literal(Box::new(ExprKind::Int(neg))))
                     }
                     tok => Err(format!("expected number after '-' in pattern, got {:?}", tok)),
                 }

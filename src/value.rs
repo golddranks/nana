@@ -49,15 +49,14 @@ impl Env {
     /// Return warnings for unused bindings that don't start with `_`.
     /// Skips builtins and internal names (like `\0`).
     pub fn unused_warnings(&self) -> Vec<String> {
+        self.unused_warnings_from(0)
+    }
+
+    /// Return warnings for unused bindings starting from the given index.
+    /// Used by the REPL to only warn about newly introduced bindings.
+    pub fn unused_warnings_from(&self, from: usize) -> Vec<String> {
         let mut warnings = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        // Walk in reverse so we only warn about the most recent binding for each name.
-        // (Shadowed bindings that are unused are expected.)
-        for b in self.bindings.iter().rev() {
-            if seen.contains(&b.name) {
-                continue;
-            }
-            seen.insert(b.name.clone());
+        for b in self.bindings.iter().skip(from) {
             if b.name.starts_with('\0') || b.name == "_" {
                 continue;
             }
@@ -70,6 +69,11 @@ impl Env {
             }
         }
         warnings
+    }
+
+    /// Return the number of bindings in the environment.
+    pub fn len(&self) -> usize {
+        self.bindings.len()
     }
 }
 
@@ -264,7 +268,21 @@ impl PartialEq for Value {
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Str(s) => write!(f, "\"{}\"", s),
+            Value::Str(s) => {
+                write!(f, "\"")?;
+                for c in s.chars() {
+                    match c {
+                        '\\' => write!(f, "\\\\")?,
+                        '"' => write!(f, "\\\"")?,
+                        '\n' => write!(f, "\\n")?,
+                        '\t' => write!(f, "\\t")?,
+                        '\r' => write!(f, "\\r")?,
+                        '\0' => write!(f, "\\0")?,
+                        c => write!(f, "{}", c)?,
+                    }
+                }
+                write!(f, "\"")
+            }
             other => write!(f, "{}", other),
         }
     }

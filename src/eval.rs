@@ -353,8 +353,14 @@ fn match_branch_pattern(pattern: &BranchPattern, value: &Value, env: &Env) -> Re
             if let Some(tag_ctor) = env.get(name) {
                 if let Value::TagConstructor { id: ctor_id, .. } = tag_ctor {
                     // It's a tag — match against tagged values with unit payload
+                    // or against the tag constructor itself
                     if let Value::Tagged { id, payload, .. } = value {
                         if id == ctor_id && matches!(**payload, Value::Unit) {
+                            return Ok(Some(env.clone()));
+                        }
+                    }
+                    if let Value::TagConstructor { id, .. } = value {
+                        if id == ctor_id {
                             return Ok(Some(env.clone()));
                         }
                     }
@@ -744,7 +750,8 @@ fn eval_array_method(elems: &[Value], method: &str, arg: Value) -> Result<Value,
 
 fn eval_string_method(s: &str, method: &str, arg: Value) -> Result<Value, String> {
     match method {
-        "len" => Ok(Value::Int(s.len() as i64)),
+        "byte_len" => Ok(Value::Int(s.len() as i64)),
+        "char_len" => Ok(Value::Int(s.chars().count() as i64)),
         "as_bytes" => {
             let bytes = s.bytes().map(Value::Byte).collect();
             Ok(Value::Array(bytes))
@@ -902,12 +909,6 @@ fn eval_compare(op: CmpOp, lhs: &Value, rhs: &Value) -> Result<Value, String> {
     match (lhs, rhs) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(compare_partial(op, a, b)?)),
-        (Value::Int(a), Value::Float(b)) => {
-            Ok(Value::Bool(compare_partial(op, &(*a as f64), b)?))
-        }
-        (Value::Float(a), Value::Int(b)) => {
-            Ok(Value::Bool(compare_partial(op, a, &(*b as f64))?))
-        }
         (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
         (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
         (Value::Char(a), Value::Char(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
@@ -945,6 +946,15 @@ fn eval_compare(op: CmpOp, lhs: &Value, rhs: &Value) -> Result<Value, String> {
                 }
             }
             _ => Err("cannot order tagged values".to_string()),
+        },
+        // Tag constructor comparison (by identity)
+        (
+            Value::TagConstructor { id: id1, .. },
+            Value::TagConstructor { id: id2, .. },
+        ) => match op {
+            CmpOp::Eq => Ok(Value::Bool(id1 == id2)),
+            CmpOp::NotEq => Ok(Value::Bool(id1 != id2)),
+            _ => Err("cannot order tag constructors".to_string()),
         },
         // Array comparison
         (Value::Array(a), Value::Array(b)) => match op {
@@ -1086,8 +1096,7 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
         },
         "len" => match arg {
             Value::Array(a) => Ok(Value::Int(a.len() as i64)),
-            Value::Str(s) => Ok(Value::Int(s.len() as i64)),
-            _ => Err("len: expected array or string".to_string()),
+            _ => Err("len: expected array".to_string()),
         },
         "print" => {
             println!("{}", arg.print_string());

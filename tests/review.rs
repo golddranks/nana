@@ -289,10 +289,10 @@ fn baseline_char_and_byte_literals() {
 
 #[test]
 fn baseline_string_escape_sequences() {
-    assert_val(r#""\n" >> len"#, int(1));
-    assert_val(r#""\t" >> len"#, int(1));
-    assert_val(r#""\\" >> len"#, int(1));
-    assert_val(r#""hello\nworld" >> len"#, int(11));
+    assert_val(r#""\n".char_len()"#, int(1));
+    assert_val(r#""\t".char_len()"#, int(1));
+    assert_val(r#""\\".char_len()"#, int(1));
+    assert_val(r#""hello\nworld".char_len()"#, int(11));
 }
 
 #[test]
@@ -1259,7 +1259,7 @@ fn method_zip() {
 
 #[test]
 fn method_string_len() {
-    assert_val(r#""hello".len()"#, int(5));
+    assert_val(r#""hello".char_len()"#, int(5));
 }
 
 #[test]
@@ -1834,7 +1834,7 @@ fn bug45_method_still_works_on_array() {
 
 #[test]
 fn bug45_method_still_works_on_string() {
-    assert_val(r#""hello".len()"#, int(5));
+    assert_val(r#""hello".char_len()"#, int(5));
 }
 
 #[test]
@@ -2187,7 +2187,7 @@ fn bug65_nonparen_tag_still_works() {
 
 #[test]
 fn edge1_empty_string_length() {
-    assert_val(r#""" >> len"#, int(0));
+    assert_val(r#""".char_len()"#, int(0));
 }
 
 // ── Edge case 2: string + non-string should error ───────────────────────────
@@ -2228,9 +2228,9 @@ fn edge6_missing_named_field() {
 // ── Edge case 7: comparing tag constructors should error ────────────────────
 
 #[test]
-fn edge7_comparing_tag_constructors_errors() {
-    // Tag constructors are functions; functions cannot be compared.
-    assert_error("tag(A); tag(B); A == B", "cannot compare");
+fn edge7_comparing_tag_constructors_equal() {
+    // Tag constructors can be compared by identity (BUG-69 fix).
+    assert_val("tag(A); tag(B); A == B", F);
 }
 
 // ── Edge case 8: matching non-tagged value with tag pattern ─────────────────
@@ -2326,12 +2326,11 @@ fn edge17_chained_methods_explicit_in() {
 // be the tagged value, not the constructor function.
 
 #[test]
-fn edge18_bare_tag_constructor_not_matched() {
-    // BUG / design issue: bare constructor `None` is not a tagged value.
-    // This fails with non-exhaustive match, but many users would expect it to work.
-    assert_error(
+fn edge18_bare_tag_constructor_matched() {
+    // Tag constructors can be matched in branch patterns (BUG-70 fix).
+    assert_val(
         r#"tag(None); tag(Some); None >> { None -> "empty", Some(x) -> x }"#,
-        "no arm matched",
+        s("empty"),
     );
 }
 
@@ -2524,7 +2523,7 @@ fn bug60_string_hex_escape_basic() {
 
 #[test]
 fn bug60_string_hex_escape_null() {
-    assert_val(r#""\x00" >> len"#, int(1));
+    assert_val(r#""\x00".char_len()"#, int(1));
 }
 
 #[test]
@@ -2686,36 +2685,35 @@ fn string_concat_chained() {
 
 #[test]
 fn string_len_method() {
-    // .len() method on string
-    assert_val(r#""hello".len()"#, int(5));
+    assert_val(r#""hello".char_len()"#, int(5));
 }
 
 #[test]
 fn string_len_piped() {
-    // len as a piped builtin function
-    assert_val(r#""hello" >> len"#, int(5));
+    // char_len as a method call (no builtin for strings)
+    assert_val(r#""hello".char_len()"#, int(5));
 }
 
 #[test]
 fn string_len_empty() {
-    assert_val(r#""".len()"#, int(0));
+    assert_val(r#""".char_len()"#, int(0));
 }
 
 #[test]
 fn string_len_empty_piped() {
-    assert_val(r#""" >> len"#, int(0));
+    assert_val(r#""".char_len()"#, int(0));
 }
 
 #[test]
 fn string_len_with_escapes() {
-    // "\n" is one byte, so "ab\ncd" has length 5
-    assert_val(r#""ab\ncd".len()"#, int(5));
+    // "\n" is one character, so "ab\ncd" has 5 characters
+    assert_val(r#""ab\ncd".char_len()"#, int(5));
 }
 
 #[test]
 fn string_len_null_byte() {
-    // "\0" is one byte
-    assert_val(r#""\0".len()"#, int(1));
+    // "\0" is one character
+    assert_val(r#""\0".char_len()"#, int(1));
 }
 
 // ── String Comparison: Equality ─────────────────────────────────
@@ -2815,7 +2813,7 @@ fn empty_string_standalone() {
 
 #[test]
 fn empty_string_len() {
-    assert_val(r#""" >> len"#, int(0));
+    assert_val(r#""".char_len()"#, int(0));
 }
 
 #[test]
@@ -2849,8 +2847,8 @@ fn multiline_string_with_indentation() {
 
 #[test]
 fn multiline_string_len() {
-    // "ab\ncd" has length 5 (2 + newline + 2)
-    assert_val("\\\\ab\n\\\\cd\n>> len", int(5));
+    // "ab\ncd" has 5 characters (2 + newline + 2)
+    assert_val("\\\\ab\n\\\\cd\n>> { in.char_len() }", int(5));
 }
 
 #[test]
@@ -2861,7 +2859,7 @@ fn multiline_string_in_let() {
 
 #[test]
 fn multiline_string_as_argument() {
-    assert_val("len(\n\\\\abc\n)", int(3));
+    assert_val("(\n\\\\abc\n).char_len()", int(3));
 }
 
 // ── String Escape Sequences ─────────────────────────────────────
@@ -2869,38 +2867,38 @@ fn multiline_string_as_argument() {
 #[test]
 fn string_escape_newline() {
     // "\n" is a single newline character
-    assert_val(r#""\n" >> len"#, int(1));
+    assert_val(r#""\n".char_len()"#, int(1));
 }
 
 #[test]
 fn string_escape_tab() {
-    assert_val(r#""\t" >> len"#, int(1));
+    assert_val(r#""\t".char_len()"#, int(1));
 }
 
 #[test]
 fn string_escape_carriage_return() {
-    assert_val(r#""\r" >> len"#, int(1));
+    assert_val(r#""\r".char_len()"#, int(1));
 }
 
 #[test]
 fn string_escape_backslash() {
-    assert_val(r#""\\" >> len"#, int(1));
+    assert_val(r#""\\".char_len()"#, int(1));
 }
 
 #[test]
 fn string_escape_quote() {
-    assert_val(r#""\"" >> len"#, int(1));
+    assert_val(r#""\"".char_len()"#, int(1));
 }
 
 #[test]
 fn string_escape_null() {
-    assert_val(r#""\0" >> len"#, int(1));
+    assert_val(r#""\0".char_len()"#, int(1));
 }
 
 #[test]
 fn string_escape_all_combined() {
-    // "\n\t\r\\\"\0" should be 6 bytes
-    assert_val(r#""\n\t\r\\\"\0" >> len"#, int(6));
+    // "\n\t\r\\\"\0" should be 6 characters
+    assert_val(r#""\n\t\r\\\"\0".char_len()"#, int(6));
 }
 
 // ── String Brace Escapes ────────────────────────────────────────
@@ -3297,7 +3295,7 @@ fn probe20a_block_captures_outer_binding() {
 
 #[test]
 fn string_in_struct_len_via_field() {
-    assert_val(r#"(a="hello", b="world").a >> len"#, int(5));
+    assert_val(r#"(a="hello", b="world").a.char_len()"#, int(5));
 }
 
 // ── Strings in Arrays ───────────────────────────────────────────
@@ -3324,27 +3322,25 @@ fn string_array_len() {
 
 #[test]
 fn string_array_map_len() {
-    // Map over string array getting length of each element
-    assert_output(r#"["hello", "hi", "hey"].map{ >> len }"#, "[5, 2, 3]");
+    // Map over string array getting char_len of each element
+    assert_output(r#"["hello", "hi", "hey"].map{ in.char_len() }"#, "[5, 2, 3]");
 }
 
-// ── String Method: .len() ───────────────────────────────────────
+// ── String Method: .char_len() / .byte_len() ────────────────────
 
 #[test]
-fn string_method_len_returns_byte_count() {
-    // .len() returns byte count, not character count
-    // ASCII strings: byte count == character count
-    assert_val(r#""hello".len()"#, int(5));
-}
-
-#[test]
-fn string_method_len_single_char() {
-    assert_val(r#""x".len()"#, int(1));
+fn string_method_char_len() {
+    assert_val(r#""hello".char_len()"#, int(5));
 }
 
 #[test]
-fn string_method_len_after_concat() {
-    assert_val(r#"("abc" + "def").len()"#, int(6));
+fn string_method_char_len_single_char() {
+    assert_val(r#""x".char_len()"#, int(1));
+}
+
+#[test]
+fn string_method_char_len_after_concat() {
+    assert_val(r#"("abc" + "def").char_len()"#, int(6));
 }
 
 // ── String Comparison Ordering ──────────────────────────────────
@@ -3596,8 +3592,8 @@ fn probe17_div_with_parens_ok() {
 #[test]
 fn probe17_unary_minus_dot_syntax_error() {
     // Per spec: `-a.f()` is a syntax error
-    // Using a string variable's .len() method
-    assert_parse_error(r#"let x = "hello"; -x.len()"#, "ambiguous");
+    // Using a string variable's .char_len() method
+    assert_parse_error(r#"let x = "hello"; -x.char_len()"#, "ambiguous");
 }
 
 #[test]
@@ -4543,20 +4539,19 @@ fn probe17b_tag_pattern_empty_parens() {
 
 #[test]
 fn probe17b_int_vs_float_pattern() {
-    // An int value against a float pattern — does 1 match 1.0?
-    // This probes whether the comparison logic handles int-float coercion
+    // An int value against a float pattern — types don't match, falls through to _
     assert_val(
         r#"1 >> { 1.0 -> "float match", _ -> "no match" }"#,
-        s("float match"),
+        s("no match"),
     );
 }
 
 #[test]
 fn probe17b_float_vs_int_pattern() {
-    // A float value against an int pattern — does 1.0 match 1?
+    // A float value against an int pattern — types don't match, falls through to _
     assert_val(
         r#"1.0 >> { 1 -> "int match", _ -> "no match" }"#,
-        s("int match"),
+        s("no match"),
     );
 }
 
@@ -5183,7 +5178,7 @@ fn probe18b_pipe_len_array() {
 
 #[test]
 fn probe18b_pipe_len_string() {
-    assert_val(r#""hello" >> len"#, int(5));
+    assert_val(r#""hello".char_len()"#, int(5));
 }
 
 #[test]
@@ -5210,7 +5205,7 @@ fn probe18b_not_wrong_type() {
 
 #[test]
 fn probe18b_len_wrong_type() {
-    assert_error("42 >> len", "expected array or string");
+    assert_error("42 >> len", "expected array");
 }
 
 #[test]
@@ -6819,7 +6814,7 @@ fn probe21_method_call_in_block() {
 
 #[test]
 fn probe21_method_call_string_len() {
-    assert_val(r#""hello" >> { in.len() }"#, int(5));
+    assert_val(r#""hello" >> { in.char_len() }"#, int(5));
 }
 
 // ── 12. Block with trailing semicolon ──
@@ -8057,7 +8052,7 @@ fn ternary_struct_branches() {
 #[test]
 fn ternary_in_pipeline() {
     // Ternary block used in a pipeline
-    assert_val(r#"1 > 0 >> { "pos" | "neg" } >> len"#, int(3));
+    assert_val(r#"1 > 0 >> { "pos" | "neg" } >> { in.char_len() }"#, int(3));
 }
 
 // ── Unused Binding Warnings ─────────────────────────────────────
@@ -8086,15 +8081,15 @@ fn warning_bare_discard_no_warning() {
 
 #[test]
 fn warning_multiple_unused() {
-    // Warnings are emitted in reverse binding order (most recent first)
-    assert_warnings("let x = 1; let y = 2; 3", &["y", "x"]);
+    // Warnings are emitted in binding order (earliest first)
+    assert_warnings("let x = 1; let y = 2; 3", &["x", "y"]);
 }
 
 #[test]
 fn warning_shadowed_used() {
     // x is shadowed; the second x is used, so no warning for it.
-    // The first x is shadowed — we don't warn for shadowed bindings.
-    assert_no_warnings("let x = 1; let x = 2; x");
+    // But the first x IS unused and should produce a warning.
+    assert_warnings("let x = 1; let x = 2; x", &["x"]);
 }
 
 #[test]
@@ -8106,4 +8101,252 @@ fn warning_tag_binding_used() {
 #[test]
 fn warning_used_in_interpolation() {
     assert_no_warnings(r#"let name = "world"; "{name}""#);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Bug-finding round 2 — new bugs found
+// ═══════════════════════════════════════════════════════════════════
+
+// ── BUG-67: Shadowed unused binding should warn ─────────────────────
+
+#[test]
+fn bug67_shadowed_both_unused() {
+    // Both x bindings are unused (y is the result).
+    // Should warn about both.
+    assert_warnings("let x = 1; let x = 2; 3", &["x", "x"]);
+}
+
+// ── BUG-68: Int-to-float comparison should be an error ──────────────
+
+#[test]
+fn bug68_int_float_comparison_error() {
+    // Comparing int to float should be a type error, not silently coerce.
+    assert_error("1 == 1.0", "cannot compare");
+}
+
+#[test]
+fn bug68_float_int_comparison_error() {
+    assert_error("1.0 == 1", "cannot compare");
+}
+
+#[test]
+fn bug68_int_float_lt_error() {
+    assert_error("1 < 2.0", "cannot compare");
+}
+
+// ── BUG-69: TagConstructor equality comparison missing ───────────────
+
+#[test]
+fn bug69_tag_constructor_eq() {
+    // Two references to the same tag constructor should be equal.
+    assert_val("tag(A); A == A", T);
+}
+
+#[test]
+fn bug69_tag_constructor_neq_different() {
+    // Different tag constructors should not be equal.
+    assert_val("tag(A); tag(B); A == B", F);
+}
+
+#[test]
+fn bug69_tag_constructor_neq() {
+    assert_val("tag(A); tag(B); A != B", T);
+}
+
+// ── BUG-70: TagConstructor not matchable in branch patterns ─────────
+
+#[test]
+fn bug70_tag_constructor_branch_match() {
+    // A tag constructor (not a tagged value) should be matchable.
+    // `None` is a TagConstructor. Pattern `None ->` should match it.
+    assert_val(
+        r#"tag(None); tag(Some); None >> { None -> "none", Some -> "some", _ -> "other" }"#,
+        s("none"),
+    );
+}
+
+#[test]
+fn bug70_tag_constructor_branch_no_match() {
+    // Some (a different constructor) should not match None.
+    assert_val(
+        r#"tag(None); tag(Some); Some >> { None -> "none", _ -> "other" }"#,
+        s("other"),
+    );
+}
+
+// ── BUG-71: i64::MIN literal rejected ───────────────────────────────
+
+#[test]
+fn bug71_i64_min_literal() {
+    // -9223372036854775808 is i64::MIN, a valid value.
+    // The lexer parses 9223372036854775808 as positive first (overflow),
+    // then UnaryMinus is applied. Should handle this edge case.
+    assert_val("-9223372036854775808", int(i64::MIN));
+}
+
+#[test]
+fn bug71_i64_min_in_expression() {
+    // Should also work in expressions.
+    assert_val("-9223372036854775808 + 1", int(i64::MIN + 1));
+}
+
+// ── BUG-72: string.len() should be byte_len()/char_len() ───────────
+
+#[test]
+fn bug72_string_byte_len() {
+    // "héllo" is 6 bytes in UTF-8 (é is 2 bytes)
+    assert_val(r#""héllo".byte_len()"#, int(6));
+}
+
+#[test]
+fn bug72_string_char_len() {
+    // "héllo" has 5 characters
+    assert_val(r#""héllo".char_len()"#, int(5));
+}
+
+#[test]
+fn bug72_string_len_removed() {
+    // .len() should no longer exist on strings
+    assert_error(r#""hello".len()"#, "no method");
+}
+
+#[test]
+fn bug72_builtin_len_string_removed() {
+    // builtin len() should no longer accept strings
+    assert_error(r#"len("hello")"#, "expected array");
+}
+
+// ── Value::Debug string escaping ──────────────────────────────────
+
+#[test]
+fn debug_string_escaping() {
+    // Verify that Value::Debug escapes special characters
+    let result = nana::run(r#""hello\nworld""#).unwrap();
+    let debug_str = format!("{:?}", result);
+    assert_eq!(debug_str, r#""hello\nworld""#);
+}
+
+#[test]
+fn debug_string_escaping_backslash() {
+    let result = nana::run(r#""a\\b""#).unwrap();
+    let debug_str = format!("{:?}", result);
+    assert_eq!(debug_str, r#""a\\b""#);
+}
+
+#[test]
+fn debug_string_escaping_quote() {
+    let result = nana::run(r#""a\"b""#).unwrap();
+    let debug_str = format!("{:?}", result);
+    assert_eq!(debug_str, r#""a\"b""#);
+}
+
+#[test]
+fn debug_string_escaping_tab() {
+    let result = nana::run(r#""a\tb""#).unwrap();
+    let debug_str = format!("{:?}", result);
+    assert_eq!(debug_str, r#""a\tb""#);
+}
+
+// ── Guard-only `if` sugar ─────────────────────────────────────────
+
+#[test]
+fn if_sugar_basic() {
+    assert_val(r#"3 >> { if in < 4 -> "small", if in >= 4 -> "big" }"#, s("small"));
+    assert_val(r#"5 >> { if in < 4 -> "small", if in >= 4 -> "big" }"#, s("big"));
+}
+
+#[test]
+fn if_sugar_with_wildcard() {
+    assert_val(r#"5 >> { if in == 5 -> "five", _ -> "other" }"#, s("five"));
+    assert_val(r#"3 >> { if in == 5 -> "five", _ -> "other" }"#, s("other"));
+}
+
+#[test]
+fn if_sugar_multiple_guards() {
+    assert_val(
+        r#"7 >> { if in < 0 -> "neg", if in < 5 -> "small", if in < 10 -> "med", _ -> "big" }"#,
+        s("med"),
+    );
+}
+
+#[test]
+fn if_sugar_as_lambda() {
+    assert_val(
+        r#"let classify = { if in > 0 -> "pos", if in < 0 -> "neg", _ -> "zero" }; -3 >> classify"#,
+        s("neg"),
+    );
+}
+
+#[test]
+fn if_sugar_non_exhaustive() {
+    assert_error(r#"5 >> { if in == 3 -> "three" }"#, "no arm matched");
+}
+
+#[test]
+fn if_sugar_guard_not_bool() {
+    assert_error(r#"5 >> { if in + 1 -> "bad" }"#, "guard must be boolean");
+}
+
+#[test]
+fn if_sugar_mixed_with_normal_arms() {
+    assert_val(r#"5 >> { 1 -> "one", if in > 3 -> "big", _ -> "other" }"#, s("big"));
+    assert_val(r#"1 >> { 1 -> "one", if in > 3 -> "big", _ -> "other" }"#, s("one"));
+    assert_val(r#"2 >> { 1 -> "one", if in > 3 -> "big", _ -> "other" }"#, s("other"));
+}
+
+// ── Default arm sugar ─────────────────────────────────────────────
+
+#[test]
+fn default_arm_basic() {
+    assert_val(r#"5 >> { 1 -> "one", 2 -> "two", "other" }"#, s("other"));
+    assert_val(r#"1 >> { 1 -> "one", 2 -> "two", "other" }"#, s("one"));
+}
+
+#[test]
+fn default_arm_with_expression() {
+    assert_val(r#"5 >> { 1 -> "one", in * 2 }"#, int(10));
+}
+
+#[test]
+fn default_arm_with_if_sugar() {
+    assert_val(r#"3 >> { if in < 0 -> "neg", if in == 0 -> "zero", "pos" }"#, s("pos"));
+    assert_val(r#"-1 >> { if in < 0 -> "neg", if in == 0 -> "zero", "pos" }"#, s("neg"));
+    assert_val(r#"0 >> { if in < 0 -> "neg", if in == 0 -> "zero", "pos" }"#, s("zero"));
+}
+
+#[test]
+fn default_arm_trailing_comma() {
+    assert_val(r#"5 >> { 1 -> "one", "default", }"#, s("default"));
+}
+
+#[test]
+fn default_arm_as_lambda() {
+    assert_val(
+        r#"let f = { if in > 0 -> "pos", "non-pos" }; -3 >> f"#,
+        s("non-pos"),
+    );
+}
+
+#[test]
+fn default_arm_with_nested_block() {
+    // Default expression contains a nested branching block
+    assert_val(
+        r#"5 >> { 1 -> "one", in > 0 >> { "pos" | "neg" } }"#,
+        s("pos"),
+    );
+}
+
+#[test]
+fn default_arm_with_function_call() {
+    // Default expression has commas inside function args
+    assert_val(r#"5 >> { 1 -> "one", and(true, true) }"#, T);
+}
+
+#[test]
+fn default_arm_not_last_error() {
+    // Default arm followed by more arms is an error
+    assert_parse_error(
+        r#"{ 1 -> "one", "default", 2 -> "two" }"#,
+        "default arm must be the last arm",
+    );
 }

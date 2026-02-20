@@ -8,6 +8,9 @@ pub enum StringPart {
 pub enum Token {
     // Literals
     Int(i64),
+    /// Integer literal that overflowed i64 but fits in u64.
+    /// Only valid when preceded by unary minus (e.g., -9223372036854775808).
+    BigInt(u64),
     Float(f64),
     Str(String),
     Char(char),
@@ -551,10 +554,16 @@ impl Lexer {
             return Ok(Token::Float(val));
         }
 
-        let val: i64 = num_str
-            .parse()
-            .map_err(|e| format!("invalid integer literal: {}", e))?;
-        Ok(Token::Int(val))
+        match num_str.parse::<i64>() {
+            Ok(val) => Ok(Token::Int(val)),
+            Err(_) => {
+                // Overflows i64 — try u64 so the parser can handle -BigInt
+                match num_str.parse::<u64>() {
+                    Ok(val) => Ok(Token::BigInt(val)),
+                    Err(_) => Err(format!("integer literal too large: {}", num_str)),
+                }
+            }
+        }
     }
 
     fn lex_ident_or_keyword(&mut self) -> Result<Token, String> {

@@ -20,7 +20,7 @@
 - **Ranges:** `1..3` is sugar for `(start=1, end=3)`.
 - **Strings:** UTF-8 byte sequences. Not directly indexable; use `as_bytes` to convert to a byte array, then index. Standard library provides `chars()` to iterate Unicode codepoints. Char literals `'a'` denote a single Unicode codepoint. Concatenation via `+`. Literals use `"…"` with escape sequences. String interpolation via `{expr}` inside string literals: `"Hello, {name}!"` evaluates the expression and converts the result to a string. Use `\{` to escape a literal brace. Multi-line strings use `\\` prefix per line (Zig-style). No single-quoted strings.
 - **Structs/Tuples/Records:** unified as structs with optional labels (default numeric 0,1,…). Created with `(a=1, b=2)` for labeled fields or `(1, 2)` for positional. Spread via `...`: `(a=99, ...rest)` creates a new struct with `a` replaced. Positional fields from a spread are re-indexed after any preceding explicit fields: `(99, ...s)` where `s = (10, 20)` produces `(99, 10, 20)`. Trailing commas are allowed. `(1)` is just the parenthesized expression `1`. There is no distinct single-element tuple type.
-- **Tags / Sum Types:** generated via `tag(hoge)` (sugar for `new_tag >> let(hoge)`). Tags have type `T -> tag[T]`; a no-payload tag wraps `()`. Tags are nominal, generative, and lexical.
+- **Tags / Sum Types:** generated via `tag(hoge)` (sugar for `new_tag >> let(hoge)`). A tag constructor has type `T -> tag[T]`. There is no automatic wrapping — to create a unit-payload tag, explicitly apply the constructor: `() >> None`. Tags are nominal, generative, and lexical. Tag constructors are first-class values that can be compared for equality and matched in branching blocks.
 
 ### Name binding
 
@@ -31,7 +31,7 @@
 - `let(a, b)` destructures a struct: if the struct has fields named `a` and `b`, it binds by name; otherwise, if the struct has positional fields, it binds positionally. If neither matches, it is an error. This is all-or-nothing: partial name matches are errors.
 - `;` sequences expressions. It has the lowest precedence (lower than `>>`). Let-scopes extend to the end of the enclosing block, not to the next `;`.
 - Shadowing is allowed; each `let` creates a fresh scope.
-- `_name` binds but suppresses unused-binding warnings. `_` discards the value entirely.
+- `_name` binds but suppresses unused-binding warnings. `_` discards the value entirely. Shadowed bindings that are unused still produce warnings.
 
 ```
 1 >> let(x); x + 2                              # basic binding; evaluates to 3
@@ -55,9 +55,11 @@ value >> let(x) >> log                            # let returns its value; pipes
 ## Expressions
 
 - Comments: `#` to end of line.
-- Operators: `+ - * /` (ints, floats), `+` for array and string concatenation, unary `-` for negation, comparison operators (`==`, `!=`, `<`, `>`, `<=`, `>=`). Comparisons work on primitives, arrays, structs, and tags. Functions cannot be compared with operators — use a stdlib function instead (function equality is non-trivial). Unary `-` combined with postfix calls is ambiguous: `-a.f()` is a syntax error; write `(-a).f()` or `-(a.f())`.
+- Operators: `+ - * /` (ints, floats), `+` for array and string concatenation, unary `-` for negation, comparison operators (`==`, `!=`, `<`, `>`, `<=`, `>=`). Comparisons require matching types — there is no implicit coercion between `int` and `float`. Comparisons work on primitives (same type), arrays, structs, tags, and tag constructors. Functions cannot be compared with operators — use a stdlib function instead (function equality is non-trivial). Unary `-` combined with postfix calls is ambiguous: `-a.f()` is a syntax error; write `(-a).f()` or `-(a.f())`.
 - `and`, `or`, `not` are functions, not operators (e.g., `and(true, false)`). Evaluation order is unspecified. For conditional short-circuiting, use branching.
 - Branching: `{ pattern -> expr, pattern -> expr, ... }` is the unified conditional and pattern matching form. A branching block is a function: it receives input via `in` (like any block) and matches it against the arms. Each arm is `pattern -> expr`. Patterns can be literal values (`true`, `false`, `0`), tag constructors (`Ok(x)`, `Err(msg)`), or bindings. Arms support `if` guards: `Ok(x) if x > 0 -> expr`. All arms must return the same type. Non-exhaustive matches are errors. `in` is available in arm bodies.
+- Guard-only sugar: `{ if expr -> body, if expr2 -> body2, ... }` is sugar for `{ _ if expr -> body, _ if expr2 -> body2, ... }`. When an arm starts with `if`, only the guard expression is evaluated (no pattern matching). This enables if/else-if/else chains: `{ if in < 0 -> "negative", if in == 0 -> "zero", _ -> "positive" }`.
+- Default arm sugar: the last arm in a branching block can be a bare expression without `->`, acting as a catch-all: `{ if in < 0 -> "neg", "non-neg" }` is sugar for `{ if in < 0 -> "neg", _ -> "non-neg" }`. The default arm must be the last arm.
 - Ternary sugar: `{ a | b }` is sugar for `{ true -> a, false -> b }`. It is a shorthand for boolean branching that short-circuits — only the taken branch is evaluated. `in` is available in both branches. `|` has very low precedence inside the block (just above `;`), so `{ x + 1 | y * 2 }` parses as `{ (x + 1) | (y * 2) }`.
 - Parentheses for grouping and struct construction only. `(expr)` is grouping; `(a=1, b=2)` is a struct.
 - Pipes: `value >> func` pipes `value` into `func`. `value >> f(x)` is equivalent to `f(value, x)` — the piped value is prepended to the argument list.
@@ -169,7 +171,7 @@ let safe_div = { in >> let(a, b);
 ## Standard Library Principles
 
 - Pure, functional, and pipe-friendly.
-- Collections: arrays and strings with method-based API (`map`, `filter`, `fold`, `zip`, `get`, `slice`, `len`) and concatenation (`+`).
+- Collections: arrays with method-based API (`map`, `filter`, `fold`, `zip`, `get`, `slice`, `len`) and concatenation (`+`). Strings provide `byte_len`, `char_len`, and concatenation (`+`); `len` is for arrays only.
 - Struct/tuple helpers: access, merge, construct, and destructure.
 - Sum/tag combinators: pattern matching via branching.
 - Math & logic primitives: arithmetic, comparisons, boolean functions (`and`, `or`, `not`).

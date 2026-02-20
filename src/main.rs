@@ -77,8 +77,12 @@ fn repl() {
             continue;
         }
 
+        let prev_len = env.len();
         match nana::run_in_env(line, &env) {
             Ok((val, new_env)) => {
+                for w in new_env.unused_warnings_from(prev_len) {
+                    eprintln!("{}", w);
+                }
                 env = new_env;
                 println!("{}", val);
             }

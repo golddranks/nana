@@ -16,26 +16,31 @@
 
 - **Primitives:** `int` (64-bit), `float` (64-bit), `bool` (`true`/`false`), `byte` (unsigned 8-bit integer; literal `b'a'`, `0xF4`, or `4`), `char` (Unicode scalar value, as in Rust; literal `'a'`), `string` (UTF-8 bytes). Other bit sizes available via separate constructors. Numeric literals are literal-typed and convert automatically to the required type.
 - **Unit:** `()` is the zero-field struct, used as the unit value.
-- **Arrays:** single-type, created with `[1, 2, 3]`. Indexing via `arr[0]`, slicing via `arr[1..3]`, concatenation (`+`), destructuring via `let[...]` with `...` for rest capture. An empty array `[]` has an undecided element type, refined on first use.
+- **Arrays:** single-type, created with `[1, 2, 3]`. Element access via `arr.get(0)`, slicing via `arr.slice(1..3)`, concatenation (`+`), destructuring via `let[...]` with `...` for rest capture. An empty array `[]` has an undecided element type, refined on first use.
 - **Ranges:** `1..3` is sugar for `(start=1, end=3)`.
-- **Strings:** UTF-8 byte sequences. Not directly indexable; use `as_bytes` to convert to a byte array, then index. Concatenation via `+`. Literals use `"…"` with escape sequences. Multi-line strings use `\\` prefix per line (Zig-style). No single-quoted strings.
-- **Structs/Tuples/Records:** unified as structs with optional labels (default numeric 0,1,…). Created with `(a=1, b=2)` for labeled fields or `(1, 2)` for positional. Spread via `...`: `(a=99, ...rest)` creates a new struct with `a` replaced. Trailing commas are allowed. `(1)` is just `1` — a single value is a one-element sequence.
+- **Strings:** UTF-8 byte sequences. Not directly indexable; use `as_bytes` to convert to a byte array, then index. Standard library provides `chars()` to iterate Unicode codepoints. Char literals `'a'` denote a single Unicode codepoint. Concatenation via `+`. Literals use `"…"` with escape sequences. String interpolation via `{expr}` inside string literals: `"Hello, {name}!"` evaluates the expression and converts the result to a string. Use `\{` to escape a literal brace. Multi-line strings use `\\` prefix per line (Zig-style). No single-quoted strings.
+- **Structs/Tuples/Records:** unified as structs with optional labels (default numeric 0,1,…). Created with `(a=1, b=2)` for labeled fields or `(1, 2)` for positional. Spread via `...`: `(a=99, ...rest)` creates a new struct with `a` replaced. Positional fields from a spread are re-indexed after any preceding explicit fields: `(99, ...s)` where `s = (10, 20)` produces `(99, 10, 20)`. Trailing commas are allowed. `(1)` is just the parenthesized expression `1`. There is no distinct single-element tuple type.
 - **Tags / Sum Types:** generated via `tag(hoge)` (sugar for `new_tag >> let(hoge)`). Tags have type `T -> tag[T]`; a no-payload tag wraps `()`. Tags are nominal, generative, and lexical.
 
 ### Name binding
 
-- `let` is the only binding form. There is no `=` assignment syntax. (`=` appears only inside `()` for field labeling in struct construction and destructuring.)
-- `let(name)` introduces a new lexical scope: it acts like an implicit `(`, extending as far right as possible (to the end of the enclosing block or parenthesized expression).
+- `let` is the only binding form.
+- `let(name)` introduces a new lexical scope: it extends to the end of the current block.
 - `let(x)` returns `x`, so the bound value flows through pipes: `value >> let(x) >> log` works.
-- `;` sequences let-scopes. It has the lowest precedence (lower than `>>`).
+- `let name = expr;` is sugar for `expr >> let(name)`. The `=` here is part of the let sugar, not a general assignment operator. (`=` also appears inside `()` for field labeling in struct construction and destructuring.)
+- `let(a, b)` destructures a struct: if the struct has fields named `a` and `b`, it binds by name; otherwise, if the struct has positional fields, it binds positionally. If neither matches, it is an error. This is all-or-nothing: partial name matches are errors.
+- `;` sequences expressions. It has the lowest precedence (lower than `>>`). Let-scopes extend to the end of the enclosing block, not to the next `;`.
 - Shadowing is allowed; each `let` creates a fresh scope.
 - `_name` binds but suppresses unused-binding warnings. `_` discards the value entirely.
 
 ```
 1 >> let(x); x + 2                              # basic binding; evaluates to 3
+let x = 1; x + 2                                # sugar form; same result
 1 >> let(x); x >> { in + 1 } >> let(y); x + y   # chained bindings; evaluates to 3
 1 >> let(x); (2 >> let(y); y + 1) + x            # parentheses limit let scope; evaluates to 4
 value >> let(x) >> log                            # let returns its value; pipes onward
+(1, 2) >> let(a, b); a + b                       # positional destructuring; evaluates to 3
+(x=1, y=2) >> let(x, y); x + y                  # named destructuring; evaluates to 3
 ```
 
 ### Generative Values
@@ -43,32 +48,32 @@ value >> let(x) >> log                            # let returns its value; pipes
 - `new_tag` is a built-in, generatively typed operator: each lexical reference to `new_tag` produces a unique tag constructor. A tag constructor has type `T -> tag[T]`.
 - `tag(hoge)` is sugar for `new_tag >> let(hoge)` — it generates a fresh tag constructor and binds it to `hoge`.
 - Per-call generation (inside lambda) would introduce dependent types; avoided by lexical generation.
-- Pattern matching and `case` operate over tags safely.
+- Pattern matching operates over tags safely.
 
 ---
 
 ## Expressions
 
 - Comments: `#` to end of line.
-- Operators: `+ - * /` (ints, floats), `+` for array and string concatenation, unary `-` for negation, comparison operators (`==`, `!=`, `<`, `>`, `<=`, `>=`). Comparisons work on primitives, arrays, structs, and tags. Functions cannot be compared with operators — use a stdlib function instead (function equality is non-trivial).
-- `and`, `or`, `not` are functions, not operators (e.g., `and(true, false)`).
-- Conditionals: `bool >> if expr else expr`, or `if bool then expr else expr` when piping is less clear. Parentheses around expressions are optional. `else` is optional only when the true branch returns `()`. Both branches must return the same type. Sugar for `case` on booleans.
-- Parentheses for grouping.
+- Operators: `+ - * /` (ints, floats), `+` for array and string concatenation, unary `-` for negation, comparison operators (`==`, `!=`, `<`, `>`, `<=`, `>=`). Comparisons work on primitives, arrays, structs, and tags. Functions cannot be compared with operators — use a stdlib function instead (function equality is non-trivial). Unary `-` combined with postfix calls is ambiguous: `-a.f()` is a syntax error; write `(-a).f()` or `-(a.f())`.
+- `and`, `or`, `not` are functions, not operators (e.g., `and(true, false)`). Evaluation order is unspecified. For conditional short-circuiting, use branching.
+- Branching: `{ pattern -> expr, pattern -> expr, ... }` is the unified conditional and pattern matching form. A branching block is a function: it receives input via `in` (like any block) and matches it against the arms. Each arm is `pattern -> expr`. Patterns can be literal values (`true`, `false`, `0`), tag constructors (`Ok(x)`, `Err(msg)`), or bindings. Arms support `if` guards: `Ok(x) if x > 0 -> expr`. All arms must return the same type. Non-exhaustive matches are errors. `in` is available in arm bodies.
+- Ternary sugar: `{ a | b }` is sugar for `{ true -> a, false -> b }`. It is a shorthand for boolean branching that short-circuits — only the taken branch is evaluated. `in` is available in both branches. `|` has very low precedence inside the block (just above `;`), so `{ x + 1 | y * 2 }` parses as `{ (x + 1) | (y * 2) }`.
+- Parentheses for grouping and struct construction only. `(expr)` is grouping; `(a=1, b=2)` is a struct.
 - Pipes: `value >> func` pipes `value` into `func`. `value >> f(x)` is equivalent to `f(value, x)` — the piped value is prepended to the argument list.
 - `;` sequences expressions (lowest precedence).
-- External imports via `import(external_name) >> let(name)`.
+- `import` is resolved at compile/module-load time; the argument must be a literal word or string. `import` is a built-in special form, not a runtime function. External imports via `import(external_name) >> let(name)`.
 - `use(name)` is sugar for `import(name) >> let(name)`.
 
 ### Operator Precedence (tightest to loosest)
 
-1. `f(x)` / `f.x` — function call / field access (left-to-right)
-2. `-x` — unary negation
-3. `*` `/` — multiplication and division. `/` only accepts a single operand on the right; use parentheses for complex right-hand expressions (e.g., `a / (b * c)`). `a / b * c` is a syntax error; `a * b / c` is valid.
+1. `f(x)` / `f{}` / `f[]` / `f.x` — function call (with parens, block, or array) / field access / method call (left-to-right). `-f(x)` is a syntax error; write `-(f(x))` or `(-f)(x)`.
+2. `-x` — unary negation (of simple operands only; see above)
+3. `*` `/` — multiplication and division. `a / b * c` is a syntax error; `a * b / c` is valid. `/` requires a single operand on the right, so parentheses must be used for complex expressions (e.g., `a / (b * c)`).
 4. `+ -` — addition, subtraction, concatenation
 5. Comparisons — `==`, `!=`, `<`, `>`, `<=`, `>=`
 6. `>>` — pipe (left-to-right)
-7. `if`/`else`, `case` — conditionals and pattern matching. Mixing `>>` after `if`/`else` requires parentheses: `a >> if c else d >> e` is a syntax error; write `a >> (if c else d) >> e` or `a >> if c else (d >> e)`.
-8. `;` — sequencing
+7. `;` — sequencing
 
 ---
 
@@ -78,39 +83,65 @@ value >> let(x) >> log                            # let returns its value; pipes
 - `in` always refers to the nearest enclosing block's input. To access an outer block's input, rebind it with `let`.
 - The top-level program is itself a `{ … }` block, so `in` at the top level is the program's input.
 - Single-argument; multi-argument functions take a struct. `f(x, y)` is `f((x, y))` — the call parentheses are struct construction.
-- `{ >> f }` is sugar for `{ in >> f }`. More generally, `{ op x }` where `op` is a binary operator is sugar for `{ in op x }`.
-- This sugar applies only to binary operators at the start of a block. `{ f }` is not sugar — it evaluates to `f` as a value. Use `{ in >> f }` to apply `f` to the input.
+- Three call syntaxes: `f(args)` passes a struct, `f{ body }` passes a block, `f[elems]` passes an array. These are postfix and left-to-right: `f(x){ body }` calls `f` with a struct, then calls the result with a block.
+- Blocks have two forms, both receiving input via `in`:
+  - **Expression block:** `{ expr }` — evaluates the body expression. `{ >> f }` is sugar for `{ in >> f }`. `{ op x }` is sugar for `{ in op x }`.
+  - **Branching block:** `{ pattern -> expr, ... }` — matches `in` against the arms. This is the unified form for conditionals and pattern matching.
+- Both forms are functions. A branching block is not a separate construct — it is a block that pattern-matches its input.
+- `{ f }` (expression block) is not sugar — it evaluates to a function that returns `f` as a value (`f` is evaluated when the block is called, not when created). Use `{ in >> f }` to apply `f` to the input.
 - A block always has an input slot; if the block body doesn't reference `in`, the input type is unconstrained (generic).
 - Examples:
 
 ```text
-3 >> { in + 1 }                                  # explicit form; result is 4
+3 >> { in + 1 }                                  # expression block; result is 4
 3 >> { + 1 }                                     # sugar for { in + 1 }; same result
 { in * 2 } >> let(f); 3 >> f                     # bind a lambda, then apply; result is 6
 3 >> { in >> let(outer); 4 >> { outer + in } }   # nested blocks; result is 7
+true >> { true -> "yes", false -> "no" }         # branching block; result is "yes"
+true >> { "yes" | "no" }                         # ternary sugar; same result
+x > 0 >> { "positive" | "non-positive" }         # ternary with comparison
 ```
 
-- Recursion is not possible: there are no recursive bindings, and the Y-combinator is prevented by the occurs check (no recursive/infinite types). The language is total — every program terminates. Recursive operations like `map`, `filter`, and `fold` are provided as built-in stdlib functions.
+### Method Calls
+
+- `.name` on a value accesses a field (for structs) or calls a type-based method.
+- Method dispatch is type-based: the method is resolved by the type of the receiver. For example, `arr.map{ * 2 }` calls the `map` method defined on arrays.
+- Methods use the same call syntaxes: `arr.map{ * 2 }`, `arr.fold(0, f)`, `arr.get(0)`, `str.as_bytes[]`.
+- There is no UFCS (uniform function call syntax); `>>` and methods are distinct mechanisms. `>>` pipes into a function, `.method` dispatches on the receiver's type.
+
+```text
+[1, 2, 3].map{ * 2 }                            # [2, 4, 6]
+[1, 2, 3].filter{ > 1 }                         # [2, 3]
+[1, 2, 3].fold(0, { in.acc + in.elem })          # 6
+[1, 2, 3].get(0)                                 # 1
+```
+
+### Totality
+
+- Recursion is not possible: there are no recursive bindings, and the Y-combinator is prevented by the occurs check (no recursive/infinite types). The language is total — every program terminates. User code cannot express unbounded recursion. Some built-in stdlib operations may internally iterate over finite collections. Totality refers to the core language surface.
 
 
 ## Destructuring
 
-- Arrays and strings are destructured positionally via `let[…]`. Structs are destructured by named labels via `let(…)`.
-- Destructuring patterns are only valid inside `let`; a bare pattern outside `let` is a syntax error.
+- Arrays and strings are destructured positionally via `let[…]`. Structs are destructured via `let(…)`.
+- `let(a, b)` binds by name if the struct has fields `a` and `b`; otherwise binds positionally. All-or-nothing: partial name matches are errors.
+- `let(a=x)` explicitly binds field `a` to variable `x` (always by name).
+- A `let[…]` or `let(…)` binding is lexical; names exist only within the let-scope. Destructuring patterns are only valid inside `let`; a bare pattern outside `let` is a syntax error.
+- If a pattern in `let[…]` or `let(…)` fails to match the value at runtime, it is an error and halts evaluation.
 - `...name` captures remaining elements in arrays or remaining fields in structs. `_` discards an element. `_name` binds but suppresses unused-binding warnings.
-- `case` is a keyword; each arm `Tag(x) -> expr` binds `x` only within that arm's body. All arms must return the same type. Arms support `if` guards: `Tag(x) if x > 0 -> expr`.
+- Tag matching uses branching blocks: `value >> { TagA(x) -> expr, TagB(y) -> expr }`. Each arm binds within its body. All arms must return the same type. Arms support `if` guards: `Ok(x) if x > 0 -> expr`.
 
 ```text
 arr >> let[first, ...rest]; first + rest          # head and tail
 arr >> let[start, ...mid, end]                    # first, middle, last
 arr >> let[_, second, ...]                        # discard first, bind second, ignore rest
 hoge >> let(a=hoge_a, ...rest); hoge_a            # bind one field, capture remaining fields as a struct
-tagsum >> case(                                   # pattern match on tags (multi-arm, comma-separated)
+tagsum >> {                                       # pattern match on tags via branching block
   TagA(x) -> x + 1,
   TagB(y) -> y * 2
-)
+}
 ```
-- All destructuring is done through `let` (with `[…]` for arrays/strings, `(…)` for structs/tuples) and `case` for tags.
+- All destructuring is done through `let` (with `[…]` for arrays/strings, `(…)` for structs/tuples) and branching blocks `{ pattern -> expr, ... }` for tags.
 
 ## Complete Example
 
@@ -119,15 +150,17 @@ tag(Ok);
 tag(Err);
 
 # safe_div : (int, int) -> tag[int] | tag[string]
-{ in >> let(a, b);
-  if b == 0 then Err("division by zero")
-    else (a * 100 / b >> Ok)
-} >> let(safe_div);
+let safe_div = { in >> let(a, b);
+  b == 0 >> {
+    true -> Err("division by zero"),
+    false -> a * 100 / b >> Ok
+  }
+};
 
-(10, 3) >> safe_div >> case(
+(10, 3) >> safe_div >> {
   Ok(result) -> result,
   Err(_) -> 0
-)
+}
 # evaluates to 333
 ```
 
@@ -136,17 +169,17 @@ tag(Err);
 ## Standard Library Principles
 
 - Pure, functional, and pipe-friendly.
-- Collections: arrays and strings with map, filter, fold, zip, and concatenation.
+- Collections: arrays and strings with method-based API (`map`, `filter`, `fold`, `zip`, `get`, `slice`, `len`) and concatenation (`+`).
 - Struct/tuple helpers: access, merge, construct, and destructure.
-- Sum/tag combinators: `map_tag`, `bind_tag`, pattern matching helpers.
-- Math & logic primitives: arithmetic, comparisons, boolean operations.
+- Sum/tag combinators: pattern matching via branching.
+- Math & logic primitives: arithmetic, comparisons, boolean functions (`and`, `or`, `not`).
 
 
 ---
 
 ## Modules and Imports
 
-- Modules are represented as structs.
+- Modules are represented as structs. Imports are resolved at module-load time; exported structs contain bound tag constructors. Importing the same module yields the same tag identities.
 - Access modules with `use(name)` or `import(external_name) >> let(name)`.
 - Unifies external modules, structs, and sum types under one system.
 
@@ -155,7 +188,7 @@ tag(Err);
 ## Error Handling
 
 - Division by zero, array out-of-bounds, and similar runtime errors halt execution.
-- Non-exhaustive `case` matches are compile-time errors.
+- Non-exhaustive branch matches are compile-time errors.
 - Since compilation and evaluation are the same process, halting and compile errors are equivalent.
 
 ---
@@ -164,9 +197,7 @@ tag(Err);
 
 - Resource types originate from external sources (e.g., loggers, file handles, streams).
 - Cannot be cloned: `(a=logger, b=logger)` is a compile error.
-- Can be passed to functions as implicit borrows: the callee uses the resource, but does not consume it. The resource is implicitly returned when the function exits.
-- A function cannot return a borrowed resource in its return value — the borrow does not escape.
-- The original owner retains the resource after a call.
+- A resource value passed to a function is temporarily borrowed. The borrow cannot escape the callee (cannot be returned or stored in a heap object). The original owner retains the resource. Attempts to escape a borrow are errors and halt evaluation.
 - A struct containing a resource field is itself a resource type: it cannot be cloned or returned. Destructuring separates the fields; non-resource fields regain normal clonable/droppable semantics.
 - Internally, ordinary expressions remain clonable and droppable; resource restrictions only apply to resource-typed values.
 

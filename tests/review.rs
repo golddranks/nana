@@ -25,8 +25,31 @@ fn byte(v: u8) -> Value {
     Value::Byte(v)
 }
 
+const STD_PRELUDE: &str = "\
+use(std); \
+apply(std.array_methods); \
+apply(std.string_methods); \
+let not = std.not; \
+let and = std.and; \
+let or = std.or; \
+let len = std.len; \
+let print = std.print; \
+let map = std.map; \
+let filter = std.filter; \
+let fold = std.fold; \
+let zip = std.zip; \
+let byte = std.byte; \
+let int = std.int; \
+let float = std.float; \
+let char = std.char; \
+let ref_eq = std.ref_eq; \
+let val_eq = std.val_eq; \
+let method_set = std.method_set; \
+";
+
 fn assert_val(input: &str, expected: Value) {
-    let result = nana::run(input);
+    let full = format!("{}{}", STD_PRELUDE, input);
+    let result = nana::run_with_std(&full);
     let val = result.unwrap_or_else(|e| panic!("program failed.\n  input: {input}\n  error: {e}"));
     assert_eq!(
         val, expected,
@@ -35,7 +58,8 @@ fn assert_val(input: &str, expected: Value) {
 }
 
 fn assert_output(input: &str, expected: &str) {
-    let result = nana::run(input);
+    let full = format!("{}{}", STD_PRELUDE, input);
+    let result = nana::run_with_std(&full);
     let val = result.unwrap_or_else(|e| panic!("program failed.\n  input: {input}\n  error: {e}"));
     let output = val.to_string();
     assert_eq!(
@@ -45,7 +69,8 @@ fn assert_output(input: &str, expected: &str) {
 }
 
 fn assert_warnings(input: &str, expected_warnings: &[&str]) {
-    let result = nana::run_with_warnings(input);
+    let full = format!("{}{}", STD_PRELUDE, input);
+    let result = nana::run_with_std_and_warnings(&full);
     let (_val, warnings) =
         result.unwrap_or_else(|e| panic!("program failed.\n  input: {input}\n  error: {e}"));
     assert_eq!(
@@ -65,7 +90,8 @@ fn assert_warnings(input: &str, expected_warnings: &[&str]) {
 }
 
 fn assert_no_warnings(input: &str) {
-    let result = nana::run_with_warnings(input);
+    let full = format!("{}{}", STD_PRELUDE, input);
+    let result = nana::run_with_std_and_warnings(&full);
     let (_val, warnings) =
         result.unwrap_or_else(|e| panic!("program failed.\n  input: {input}\n  error: {e}"));
     assert!(
@@ -76,7 +102,8 @@ fn assert_no_warnings(input: &str) {
 }
 
 fn assert_error(input: &str, expected_fragment: &str) {
-    let result = nana::run(input);
+    let full = format!("{}{}", STD_PRELUDE, input);
+    let result = nana::run_with_std(&full);
     let err = result.expect_err(&format!(
         "expected error but program succeeded.\n  input: {input}"
     ));
@@ -8858,8 +8885,8 @@ fn std_type_constructors() {
     // Type constructors should be in std
     assert_std(r#"
         use(std);
-        let ms = method_set(std.Array, (
-            count = { >> let(arr); len(arr) }
+        let ms = std.method_set(std.Array, (
+            count = { >> let(arr); std.len(arr) }
         ));
         apply(ms);
         [1, 2, 3].count()

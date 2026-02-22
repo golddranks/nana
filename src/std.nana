@@ -1,0 +1,58 @@
+use(core);
+
+let _array_methods = method_set(core.Array, (
+    get = core.array_get,
+    slice = core.array_slice,
+    len = core.array_len,
+    map = core.array_map,
+    filter = core.array_filter,
+    fold = core.array_fold,
+    zip = core.array_zip,
+));
+
+let _string_methods = method_set(core.String, (
+    byte_len = core.string_byte_len,
+    char_len = core.string_char_len,
+    byte_get = core.string_byte_get,
+    char_get = core.string_char_get,
+    as_bytes = core.string_as_bytes,
+    chars = core.string_chars,
+    split = core.string_split,
+    trim = core.string_trim,
+    contains = core.string_contains,
+    slice = core.string_slice,
+    starts_with = core.string_starts_with,
+    ends_with = core.string_ends_with,
+    replace = core.string_replace,
+));
+
+(
+    Array = core.Array,
+    String = core.String,
+    Int = core.Int,
+    Float = core.Float,
+    Bool = core.Bool,
+    Char = core.Char,
+    Byte = core.Byte,
+    Unit = core.Unit,
+
+    array_methods = _array_methods,
+    string_methods = _string_methods,
+
+    not = core.not,
+    and = core.and,
+    or = core.or,
+    len = core.len,
+    print = core.print,
+    map = core.map,
+    filter = core.filter,
+    fold = core.fold,
+    zip = core.zip,
+    byte = core.byte,
+    int = core.int,
+    float = core.float,
+    char = core.char,
+    ref_eq = core.ref_eq,
+    val_eq = core.val_eq,
+    method_set = core.method_set,
+)

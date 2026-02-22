@@ -161,8 +161,7 @@ pub fn eval(expr: &Expr, env: &Env, input: &Value) -> Result<Value, String> {
                     return apply(&func, combined);
                 }
             }
-            let arg_val = eval(arg, env, input)?;
-            eval_method(&recv, method, arg_val)
+            Err(format!("no method '{}' on {}", method, recv))
         }
 
         // ── Function call ──
@@ -374,7 +373,7 @@ fn eval_pipe(lhs_val: &Value, rhs: &Expr, env: &Env, input: &Value) -> Result<Va
                     return apply(&func, recv_combined);
                 }
             }
-            eval_method(&recv, method, combined)
+            Err(format!("no method '{}' on {}", method, recv))
         }
 
         // value >> expr — eval rhs to a function, apply to value
@@ -805,243 +804,6 @@ fn prepend_arg(receiver: &Value, arg: Value) -> Value {
             ("0".to_string(), receiver.clone()),
             ("1".to_string(), single),
         ]),
-    }
-}
-
-// ── Method dispatch ─────────────────────────────────────────────
-
-fn eval_method(receiver: &Value, method: &str, arg: Value) -> Result<Value, String> {
-    match receiver {
-        Value::Array(elems) => eval_array_method(elems, method, arg),
-        Value::Str(s) => eval_string_method(s, method, arg),
-        _ => Err(format!("no method '{}' on value: {}", method, receiver)),
-    }
-}
-
-fn eval_array_method(elems: &[Value], method: &str, arg: Value) -> Result<Value, String> {
-    match method {
-        "get" => {
-            let idx = match arg {
-                Value::Int(i) => i,
-                _ => return Err("get: expected integer index".to_string()),
-            };
-            if idx < 0 {
-                return Err(format!("negative array index: {}", idx));
-            }
-            let idx = idx as usize;
-            elems
-                .get(idx)
-                .cloned()
-                .ok_or_else(|| format!("array index {} out of bounds (len {})", idx, elems.len()))
-        }
-        "slice" => {
-            // arg should be a range struct (start=n, end=m)
-            let (start, end) = match arg {
-                Value::Struct(fields) => {
-                    let s = fields.iter().find(|(l, _)| l == "start")
-                        .map(|(_, v)| v.clone())
-                        .ok_or("slice: expected range with 'start' field")?;
-                    let e = fields.iter().find(|(l, _)| l == "end")
-                        .map(|(_, v)| v.clone())
-                        .ok_or("slice: expected range with 'end' field")?;
-                    match (s, e) {
-                        (Value::Int(s), Value::Int(e)) => (s, e),
-                        _ => return Err("slice: start and end must be integers".to_string()),
-                    }
-                }
-                _ => return Err("slice: expected a range argument".to_string()),
-            };
-            if start < 0 || end < 0 {
-                return Err("slice: negative index".to_string());
-            }
-            let start = start as usize;
-            let end = end as usize;
-            if start > elems.len() || end > elems.len() || start > end {
-                return Err(format!("slice: indices {}..{} out of bounds (len {})", start, end, elems.len()));
-            }
-            Ok(Value::Array(elems[start..end].to_vec()))
-        }
-        "len" => Ok(Value::Int(elems.len() as i64)),
-        "map" => {
-            let func = arg;
-            let result: Result<Vec<Value>, String> =
-                elems.iter().map(|v| apply(&func, v.clone())).collect();
-            Ok(Value::Array(result?))
-        }
-        "filter" => {
-            let func = arg;
-            let mut result = Vec::new();
-            for v in elems {
-                let keep = apply(&func, v.clone())?;
-                match keep {
-                    Value::Bool(true) => result.push(v.clone()),
-                    Value::Bool(false) => {}
-                    _ => return Err("filter: predicate must return bool".to_string()),
-                }
-            }
-            Ok(Value::Array(result))
-        }
-        "fold" => {
-            // arg should be (init, func)
-            match arg {
-                Value::Struct(fields) if fields.len() == 2 => {
-                    let mut acc = fields[0].1.clone();
-                    let func = &fields[1].1;
-                    for v in elems {
-                        let pair = Value::Struct(vec![
-                            ("acc".to_string(), acc),
-                            ("elem".to_string(), v.clone()),
-                        ]);
-                        acc = apply(func, pair)?;
-                    }
-                    Ok(acc)
-                }
-                _ => Err("fold: expected (init, function)".to_string()),
-            }
-        }
-        "zip" => {
-            // arg should be another array
-            match arg {
-                Value::Array(other) => {
-                    let result: Vec<Value> = elems
-                        .iter()
-                        .zip(other)
-                        .map(|(a, b)| {
-                            Value::Struct(vec![
-                                ("0".to_string(), a.clone()),
-                                ("1".to_string(), b),
-                            ])
-                        })
-                        .collect();
-                    Ok(Value::Array(result))
-                }
-                _ => Err("zip: expected an array argument".to_string()),
-            }
-        }
-        _ => Err(format!("no method '{}' on array", method)),
-    }
-}
-
-fn eval_string_method(s: &str, method: &str, arg: Value) -> Result<Value, String> {
-    match method {
-        "byte_len" => Ok(Value::Int(s.len() as i64)),
-        "char_len" => Ok(Value::Int(s.chars().count() as i64)),
-        "byte_get" => {
-            let idx = match arg {
-                Value::Int(i) => i,
-                _ => return Err("byte_get: expected integer index".to_string()),
-            };
-            if idx < 0 {
-                return Err(format!("byte_get: negative index: {}", idx));
-            }
-            let idx = idx as usize;
-            s.as_bytes()
-                .get(idx)
-                .copied()
-                .map(Value::Byte)
-                .ok_or_else(|| format!("byte_get: index {} out of bounds (byte_len {})", idx, s.len()))
-        }
-        "char_get" => {
-            let idx = match arg {
-                Value::Int(i) => i,
-                _ => return Err("char_get: expected integer index".to_string()),
-            };
-            if idx < 0 {
-                return Err(format!("char_get: negative index: {}", idx));
-            }
-            let idx = idx as usize;
-            s.chars()
-                .nth(idx)
-                .map(Value::Char)
-                .ok_or_else(|| format!("char_get: index {} out of bounds (char_len {})", idx, s.chars().count()))
-        }
-        "as_bytes" => {
-            let bytes = s.bytes().map(Value::Byte).collect();
-            Ok(Value::Array(bytes))
-        }
-        "chars" => {
-            let chars = s.chars().map(Value::Char).collect();
-            Ok(Value::Array(chars))
-        }
-        "split" => {
-            let delimiter = match arg {
-                Value::Str(d) => d,
-                _ => return Err("split: expected string delimiter".to_string()),
-            };
-            let parts: Vec<Value> = s.split(&delimiter).map(|p| Value::Str(p.to_string())).collect();
-            Ok(Value::Array(parts))
-        }
-        "trim" => Ok(Value::Str(s.trim().to_string())),
-        "contains" => {
-            let needle = match arg {
-                Value::Str(n) => n,
-                Value::Char(c) => c.to_string(),
-                _ => return Err("contains: expected string or char".to_string()),
-            };
-            Ok(Value::Bool(s.contains(&needle)))
-        }
-        "slice" => {
-            // arg should be a range struct (start=n, end=m) — byte indices
-            let (start, end) = match arg {
-                Value::Struct(fields) => {
-                    let s = fields.iter().find(|(l, _)| l == "start")
-                        .map(|(_, v)| v.clone())
-                        .ok_or("slice: expected range with 'start' field")?;
-                    let e = fields.iter().find(|(l, _)| l == "end")
-                        .map(|(_, v)| v.clone())
-                        .ok_or("slice: expected range with 'end' field")?;
-                    match (s, e) {
-                        (Value::Int(s), Value::Int(e)) => (s, e),
-                        _ => return Err("slice: start and end must be integers".to_string()),
-                    }
-                }
-                _ => return Err("slice: expected a range argument".to_string()),
-            };
-            if start < 0 || end < 0 {
-                return Err("slice: negative index".to_string());
-            }
-            let start = start as usize;
-            let end = end as usize;
-            if start > s.len() || end > s.len() || start > end {
-                return Err(format!("slice: indices {}..{} out of bounds (len {})", start, end, s.len()));
-            }
-            if !s.is_char_boundary(start) || !s.is_char_boundary(end) {
-                return Err("slice: index is not on a UTF-8 character boundary".to_string());
-            }
-            Ok(Value::Str(s[start..end].to_string()))
-        }
-        "starts_with" => {
-            let prefix = match arg {
-                Value::Str(p) => p,
-                _ => return Err("starts_with: expected string".to_string()),
-            };
-            Ok(Value::Bool(s.starts_with(&prefix)))
-        }
-        "ends_with" => {
-            let suffix = match arg {
-                Value::Str(p) => p,
-                _ => return Err("ends_with: expected string".to_string()),
-            };
-            Ok(Value::Bool(s.ends_with(&suffix)))
-        }
-        "replace" => {
-            // arg should be (pattern, replacement)
-            match arg {
-                Value::Struct(fields) if fields.len() == 2 => {
-                    let pattern = match &fields[0].1 {
-                        Value::Str(p) => p.clone(),
-                        _ => return Err("replace: first argument must be a string".to_string()),
-                    };
-                    let replacement = match &fields[1].1 {
-                        Value::Str(r) => r.clone(),
-                        _ => return Err("replace: second argument must be a string".to_string()),
-                    };
-                    Ok(Value::Str(s.replace(&pattern, &replacement)))
-                }
-                _ => Err("replace: expected (pattern, replacement)".to_string()),
-            }
-        }
-        _ => Err(format!("no method '{}' on string", method)),
     }
 }
 
@@ -1782,22 +1544,14 @@ pub fn build_core_module() -> Value {
     Value::Struct(fields)
 }
 
-/// Create the default environment with builtins.
+/// Create the default environment (no builtins pre-bound).
+/// Programs should `use(std)` to access builtins.
 pub fn default_env() -> Env {
-    let mut env = Env::new();
-    for name in &["not", "and", "or", "len", "print", "map", "filter", "fold", "zip",
-                   "byte", "int", "float", "char", "ref_eq", "val_eq", "method_set"] {
-        env = env.bind(name.to_string(), Value::BuiltinFn(name.to_string()));
-    }
-    env
+    Env::new()
 }
 
-/// Create the default environment with builtins and provided modules.
+/// Create the default environment with provided modules (no builtins pre-bound).
+/// Programs should `use(std)` to access builtins.
 pub fn default_env_with_modules(modules: std::collections::HashMap<String, Value>) -> Env {
-    let mut env = Env::with_modules(modules);
-    for name in &["not", "and", "or", "len", "print", "map", "filter", "fold", "zip",
-                   "byte", "int", "float", "char", "ref_eq", "val_eq", "method_set"] {
-        env = env.bind(name.to_string(), Value::BuiltinFn(name.to_string()));
-    }
-    env
+    Env::with_modules(modules)
 }

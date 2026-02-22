@@ -141,7 +141,6 @@ Celsius(42).show()            # "42°C"
 
 - Recursion is not possible: there are no recursive bindings, and the Y-combinator is prevented by the occurs check (no recursive/infinite types). The language is total — every program terminates. User code cannot express unbounded recursion. Some built-in stdlib operations may internally iterate over finite collections. Totality refers to the core language surface.
 
-
 ## Destructuring
 
 - Arrays and strings are destructured positionally via `let[…]`. Structs are destructured via `let(…)`.
@@ -162,6 +161,7 @@ tagsum >> {                                       # pattern match on tags via br
   TagB(y) -> y * 2
 }
 ```
+
 - All destructuring is done through `let` (with `[…]` for arrays/strings, `(…)` for structs/tuples) and branching blocks `{ pattern -> expr, ... }` for tags.
 
 ## Complete Example
@@ -194,7 +194,6 @@ let safe_div = { in >> let(a, b);
 - Struct/tuple helpers: access, merge, construct, and destructure.
 - Sum/tag combinators: pattern matching via branching.
 - Math & logic primitives: arithmetic, comparisons, boolean functions (`and`, `or`, `not`).
-
 
 ---
 
@@ -259,9 +258,20 @@ A small, expressive, statically typed, pure functional DSL for:
 
 Influences include:
 
-- Functional languages: F#, OCaml, Haskell, Elm
-- Expression-oriented DSLs: Nix, Racket
-- Array-centric languages: J, K, APL
-- Spreadsheet formulas: Excel LAMBDA, SheetJS scripting
+- Rust, Haskell, Nix, JavaScript, R, List
 
 The result is a **pure, composable, pipeable, and deterministic environment** for technical computations.
+
+## Appendix: Desugaring
+
+There is a desugaring of the AST.
+
+- Binary operators + - \* / == desugar to methods: .add() .subtract() .times() .divided_by(), .eq() etc.
+- methods desugar to function calls
+- pipes desugar to function calls
+- importing nana modules desugars to inlining them
+- tag desugars to new_tag and let, use desugars to import and let
+- named structs desugar to positional structs
+- { a | b } desugar to { true -> a, false -> b }
+- complex destructuring desugar to simple bindings, for example let(( a=hoge, b)) = foo; desugar to let hoge = foo.a; let b = foo.b;
+- Functions with constant arguments get evaluated

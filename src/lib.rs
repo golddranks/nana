@@ -11,74 +11,19 @@ pub use value::Env;
 use value::Value;
 
 /// The std module source code, written in nana.
-const STD_SOURCE: &str = r#"
-use(core);
-
-let _array_methods = method_set(core.Array, (
-    get = core.array_get,
-    slice = core.array_slice,
-    len = core.array_len,
-    map = core.array_map,
-    filter = core.array_filter,
-    fold = core.array_fold,
-    zip = core.array_zip,
-));
-
-let _string_methods = method_set(core.String, (
-    byte_len = core.string_byte_len,
-    char_len = core.string_char_len,
-    byte_get = core.string_byte_get,
-    char_get = core.string_char_get,
-    as_bytes = core.string_as_bytes,
-    chars = core.string_chars,
-    split = core.string_split,
-    trim = core.string_trim,
-    contains = core.string_contains,
-    slice = core.string_slice,
-    starts_with = core.string_starts_with,
-    ends_with = core.string_ends_with,
-    replace = core.string_replace,
-));
-
-(
-    Array = core.Array,
-    String = core.String,
-    Int = core.Int,
-    Float = core.Float,
-    Bool = core.Bool,
-    Char = core.Char,
-    Byte = core.Byte,
-    Unit = core.Unit,
-
-    array_methods = _array_methods,
-    string_methods = _string_methods,
-
-    not = core.not,
-    and = core.and,
-    or = core.or,
-    len = core.len,
-    print = core.print,
-    map = core.map,
-    filter = core.filter,
-    fold = core.fold,
-    zip = core.zip,
-    byte = core.byte,
-    int = core.int,
-    float = core.float,
-    char = core.char,
-    ref_eq = core.ref_eq,
-    val_eq = core.val_eq,
-    method_set = core.method_set,
-)
-"#;
+const STD_SOURCE: &str = include_str!("std.nana");
 
 /// Evaluate the std module source with core available, returning the std module value.
 fn eval_std_module() -> Result<Value, String> {
     let core = eval::build_core_module();
     let mut modules = HashMap::new();
     modules.insert("core".to_string(), core);
-    // std needs method_set builtin to build method sets
-    let env = eval::default_env_with_modules(modules);
+    let mut env = eval::default_env_with_modules(modules);
+    // std source needs method_set as a bare builtin to build method sets
+    env = env.bind(
+        "method_set".to_string(),
+        Value::BuiltinFn("method_set".to_string()),
+    );
     let ast = parse(STD_SOURCE)?;
     let (val, _) = eval::eval_toplevel(&ast, &env, &Value::Unit)
         .map_err(|e| format!("std module error: {}", e))?;
@@ -90,7 +35,8 @@ pub fn parse(source: &str) -> Result<Expr, String> {
     let mut lex = lexer::Lexer::new(source);
     let tokens = lex.tokenize().map_err(|e| format!("lexer error: {}", e))?;
     let mut par = parser::Parser::new(tokens);
-    par.parse_program().map_err(|e| format!("parse error: {}", e))
+    par.parse_program()
+        .map_err(|e| format!("parse error: {}", e))
 }
 
 /// Parse source code and return the list of module names referenced by `import()`.
@@ -145,8 +91,7 @@ pub fn run_with_modules_and_warnings(
 /// and the updated environment. Used by the REPL to persist bindings.
 pub fn run_in_env(source: &str, env: &Env) -> Result<(Value, Env), String> {
     let ast = parse(source)?;
-    eval::eval_toplevel(&ast, env, &Value::Unit)
-        .map_err(|e| format!("runtime error: {}", e))
+    eval::eval_toplevel(&ast, env, &Value::Unit).map_err(|e| format!("runtime error: {}", e))
 }
 
 /// Create the default environment with builtins (no modules).

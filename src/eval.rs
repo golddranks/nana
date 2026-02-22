@@ -148,6 +148,19 @@ pub fn eval(expr: &Expr, env: &Env, input: &Value) -> Result<Value, String> {
                     return apply(&func, arg_val);
                 }
             }
+            // Check method sets for tagged values and primitive types
+            let type_id = match &recv {
+                Value::Tagged { id, .. } => Some(*id),
+                other => builtin_tag_id(other),
+            };
+            if let Some(tid) = type_id {
+                if let Some(func) = env.find_method_in_method_sets(tid, method) {
+                    let func = func.clone();
+                    let arg_val = eval(arg, env, input)?;
+                    let combined = prepend_arg(&recv, arg_val);
+                    return apply(&func, combined);
+                }
+            }
             let arg_val = eval(arg, env, input)?;
             eval_method(&recv, method, arg_val)
         }
@@ -230,6 +243,18 @@ pub fn eval(expr: &Expr, env: &Env, input: &Value) -> Result<Value, String> {
             .cloned()
             .ok_or_else(|| format!("module not provided: {}", name)),
 
+        // ── Apply (method set scope) ──
+        ExprKind::Apply { expr, body } => {
+            let ms = eval(expr, env, input)?;
+            match &ms {
+                Value::MethodSet { .. } => {
+                    let new_env = env.bind(format!("\0ms"), ms);
+                    eval(body, &new_env, input)
+                }
+                _ => Err("apply: expected a method set value".to_string()),
+            }
+        }
+
         // ── Group (transparent) ──
         ExprKind::Group(inner) => eval(inner, env, input),
     }
@@ -297,6 +322,17 @@ fn eval_pipe(lhs_val: &Value, rhs: &Expr, env: &Env, input: &Value) -> Result<Va
             eval(body, &new_env, input)
         }
 
+        ExprKind::Apply { expr: ms_expr, body } => {
+            let ms = eval(ms_expr, env, input)?;
+            match &ms {
+                Value::MethodSet { .. } => {
+                    let new_env = env.bind(format!("\0ms"), ms);
+                    eval(body, &new_env, input)
+                }
+                _ => Err("apply: expected a method set value".to_string()),
+            }
+        }
+
         // value >> receiver.method(args) → prepend piped value to method args
         ExprKind::MethodCall { receiver, method, arg } => {
             let recv = eval(receiver, env, input)?;
@@ -324,6 +360,18 @@ fn eval_pipe(lhs_val: &Value, rhs: &Expr, env: &Env, input: &Value) -> Result<Va
                 if let Some((_, field_val)) = fields.iter().find(|(l, _)| l == method) {
                     let func = field_val.clone();
                     return apply(&func, combined);
+                }
+            }
+            // Check method sets for tagged values and primitive types
+            let type_id = match &recv {
+                Value::Tagged { id, .. } => Some(*id),
+                other => builtin_tag_id(other),
+            };
+            if let Some(tid) = type_id {
+                if let Some(func) = env.find_method_in_method_sets(tid, method) {
+                    let func = func.clone();
+                    let recv_combined = prepend_arg(&recv, combined);
+                    return apply(&func, recv_combined);
                 }
             }
             eval_method(&recv, method, combined)
@@ -645,6 +693,119 @@ fn bind_array_pattern(
         ));
     }
     Ok(new_env)
+}
+
+/// Extract the receiver (field "0") as an array, and the remaining arg.
+/// When called via method set dispatch, the receiver is prepended as field "0".
+fn extract_receiver_array(arg: &Value, name: &str) -> Result<(Vec<Value>, Value), String> {
+    match arg {
+        Value::Array(elems) => Ok((elems.clone(), Value::Unit)),
+        Value::Struct(fields) => {
+            let recv = fields.iter().find(|(l, _)| l == "0")
+                .map(|(_, v)| v)
+                .ok_or_else(|| format!("{}: expected array as first argument", name))?;
+            let elems = match recv {
+                Value::Array(e) => e.clone(),
+                _ => return Err(format!("{}: expected array as first argument", name)),
+            };
+            // Remaining arg: if there's a field "1" and only 2 positional fields, return it directly
+            let rest = extract_rest_arg(fields);
+            Ok((elems, rest))
+        }
+        _ => Err(format!("{}: expected array as first argument", name)),
+    }
+}
+
+/// Extract the receiver (field "0") as a string, and the remaining arg.
+fn extract_receiver_str(arg: &Value, name: &str) -> Result<(String, Value), String> {
+    match arg {
+        Value::Str(s) => Ok((s.clone(), Value::Unit)),
+        Value::Struct(fields) => {
+            let recv = fields.iter().find(|(l, _)| l == "0")
+                .map(|(_, v)| v)
+                .ok_or_else(|| format!("{}: expected string as first argument", name))?;
+            let s = match recv {
+                Value::Str(s) => s.clone(),
+                _ => return Err(format!("{}: expected string as first argument", name)),
+            };
+            let rest = extract_rest_arg(fields);
+            Ok((s, rest))
+        }
+        _ => Err(format!("{}: expected string as first argument", name)),
+    }
+}
+
+/// Extract the remaining argument after the receiver (field "0") has been consumed.
+/// If there's only field "0", return Unit. If there's exactly one remaining field
+/// (positional "1"), return it directly. Otherwise, return a struct of the remaining
+/// fields with positional fields re-numbered from "0".
+fn extract_rest_arg(fields: &[(String, Value)]) -> Value {
+    let rest: Vec<&(String, Value)> = fields.iter()
+        .filter(|(l, _)| l != "0")
+        .collect();
+    if rest.is_empty() {
+        return Value::Unit;
+    }
+    // If there's exactly one positional field "1" and no named fields, return it directly
+    if rest.len() == 1 && rest[0].0 == "1" {
+        return rest[0].1.clone();
+    }
+    // Otherwise return a struct with remaining fields, re-numbering positional ones
+    let mut rest_fields = Vec::new();
+    let mut idx = 0u64;
+    for (label, val) in fields {
+        if label == "0" {
+            continue;
+        }
+        if label.parse::<u64>().is_ok() {
+            rest_fields.push((idx.to_string(), val.clone()));
+            idx += 1;
+        } else {
+            rest_fields.push((label.clone(), val.clone()));
+        }
+    }
+    Value::Struct(rest_fields)
+}
+
+/// Extract a range (start, end) from a struct value.
+fn extract_range(arg: &Value, name: &str) -> Result<(i64, i64), String> {
+    match arg {
+        Value::Struct(fields) => {
+            let s = fields.iter().find(|(l, _)| l == "start")
+                .map(|(_, v)| v.clone())
+                .ok_or_else(|| format!("{}: expected range with 'start' field", name))?;
+            let e = fields.iter().find(|(l, _)| l == "end")
+                .map(|(_, v)| v.clone())
+                .ok_or_else(|| format!("{}: expected range with 'end' field", name))?;
+            match (s, e) {
+                (Value::Int(s), Value::Int(e)) => Ok((s, e)),
+                _ => Err(format!("{}: start and end must be integers", name)),
+            }
+        }
+        _ => Err(format!("{}: expected a range argument", name)),
+    }
+}
+
+/// Prepend a receiver to an argument for method set dispatch.
+fn prepend_arg(receiver: &Value, arg: Value) -> Value {
+    match arg {
+        Value::Unit => receiver.clone(),
+        Value::Struct(mut fields) => {
+            let mut new_fields = vec![("0".to_string(), receiver.clone())];
+            for (label, val) in fields.drain(..) {
+                if let Ok(n) = label.parse::<u64>() {
+                    new_fields.push(((n + 1).to_string(), val));
+                } else {
+                    new_fields.push((label, val));
+                }
+            }
+            Value::Struct(new_fields)
+        }
+        single => Value::Struct(vec![
+            ("0".to_string(), receiver.clone()),
+            ("1".to_string(), single),
+        ]),
+    }
 }
 
 // ── Method dispatch ─────────────────────────────────────────────
@@ -1275,6 +1436,231 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             }
             _ => Err("val_eq: expected (value, value)".to_string()),
         },
+        // ── Array method builtins (receiver is first arg) ──
+        "array_get" => {
+            let (elems, rest) = extract_receiver_array(&arg, "array_get")?;
+            let idx = match rest {
+                Value::Int(i) => i,
+                _ => return Err("get: expected integer index".to_string()),
+            };
+            if idx < 0 {
+                return Err(format!("negative array index: {}", idx));
+            }
+            let idx = idx as usize;
+            elems.get(idx).cloned()
+                .ok_or_else(|| format!("array index {} out of bounds (len {})", idx, elems.len()))
+        }
+        "array_slice" => {
+            let (elems, rest) = extract_receiver_array(&arg, "array_slice")?;
+            let (start, end) = extract_range(&rest, "slice")?;
+            if start < 0 || end < 0 {
+                return Err("slice: negative index".to_string());
+            }
+            let start = start as usize;
+            let end = end as usize;
+            if start > elems.len() || end > elems.len() || start > end {
+                return Err(format!("slice: indices {}..{} out of bounds (len {})", start, end, elems.len()));
+            }
+            Ok(Value::Array(elems[start..end].to_vec()))
+        }
+        "array_len" => {
+            let (elems, _) = extract_receiver_array(&arg, "array_len")?;
+            Ok(Value::Int(elems.len() as i64))
+        }
+        "array_map" => {
+            let (elems, func) = extract_receiver_array(&arg, "array_map")?;
+            let result: Result<Vec<Value>, String> =
+                elems.iter().map(|v| apply(&func, v.clone())).collect();
+            Ok(Value::Array(result?))
+        }
+        "array_filter" => {
+            let (elems, func) = extract_receiver_array(&arg, "array_filter")?;
+            let mut result = Vec::new();
+            for v in elems {
+                let keep = apply(&func, v.clone())?;
+                match keep {
+                    Value::Bool(true) => result.push(v.clone()),
+                    Value::Bool(false) => {}
+                    _ => return Err("filter: predicate must return bool".to_string()),
+                }
+            }
+            Ok(Value::Array(result))
+        }
+        "array_fold" => {
+            let (elems, rest) = extract_receiver_array(&arg, "array_fold")?;
+            match rest {
+                Value::Struct(fields) if fields.len() == 2 => {
+                    let mut acc = fields[0].1.clone();
+                    let func = &fields[1].1;
+                    for v in elems {
+                        let pair = Value::Struct(vec![
+                            ("acc".to_string(), acc),
+                            ("elem".to_string(), v.clone()),
+                        ]);
+                        acc = apply(func, pair)?;
+                    }
+                    Ok(acc)
+                }
+                _ => Err("fold: expected (init, function)".to_string()),
+            }
+        }
+        "array_zip" => {
+            let (elems, rest) = extract_receiver_array(&arg, "array_zip")?;
+            match rest {
+                Value::Array(other) => {
+                    let result: Vec<Value> = elems.iter()
+                        .zip(other)
+                        .map(|(a, b)| {
+                            Value::Struct(vec![
+                                ("0".to_string(), a.clone()),
+                                ("1".to_string(), b),
+                            ])
+                        })
+                        .collect();
+                    Ok(Value::Array(result))
+                }
+                _ => Err("zip: expected an array argument".to_string()),
+            }
+        }
+        // ── String method builtins (receiver is first arg) ──
+        "string_byte_len" => {
+            let (s, _) = extract_receiver_str(&arg, "string_byte_len")?;
+            Ok(Value::Int(s.len() as i64))
+        }
+        "string_char_len" => {
+            let (s, _) = extract_receiver_str(&arg, "string_char_len")?;
+            Ok(Value::Int(s.chars().count() as i64))
+        }
+        "string_byte_get" => {
+            let (s, rest) = extract_receiver_str(&arg, "string_byte_get")?;
+            let idx = match rest {
+                Value::Int(i) => i,
+                _ => return Err("byte_get: expected integer index".to_string()),
+            };
+            if idx < 0 {
+                return Err(format!("byte_get: negative index: {}", idx));
+            }
+            let idx = idx as usize;
+            s.as_bytes().get(idx).copied().map(Value::Byte)
+                .ok_or_else(|| format!("byte_get: index {} out of bounds (byte_len {})", idx, s.len()))
+        }
+        "string_char_get" => {
+            let (s, rest) = extract_receiver_str(&arg, "string_char_get")?;
+            let idx = match rest {
+                Value::Int(i) => i,
+                _ => return Err("char_get: expected integer index".to_string()),
+            };
+            if idx < 0 {
+                return Err(format!("char_get: negative index: {}", idx));
+            }
+            let idx = idx as usize;
+            s.chars().nth(idx).map(Value::Char)
+                .ok_or_else(|| format!("char_get: index {} out of bounds (char_len {})", idx, s.chars().count()))
+        }
+        "string_as_bytes" => {
+            let (s, _) = extract_receiver_str(&arg, "string_as_bytes")?;
+            Ok(Value::Array(s.bytes().map(Value::Byte).collect()))
+        }
+        "string_chars" => {
+            let (s, _) = extract_receiver_str(&arg, "string_chars")?;
+            Ok(Value::Array(s.chars().map(Value::Char).collect()))
+        }
+        "string_split" => {
+            let (s, rest) = extract_receiver_str(&arg, "string_split")?;
+            let delimiter = match rest {
+                Value::Str(d) => d,
+                _ => return Err("split: expected string delimiter".to_string()),
+            };
+            let parts: Vec<Value> = s.split(&delimiter).map(|p| Value::Str(p.to_string())).collect();
+            Ok(Value::Array(parts))
+        }
+        "string_trim" => {
+            let (s, _) = extract_receiver_str(&arg, "string_trim")?;
+            Ok(Value::Str(s.trim().to_string()))
+        }
+        "string_contains" => {
+            let (s, rest) = extract_receiver_str(&arg, "string_contains")?;
+            let needle = match rest {
+                Value::Str(n) => n,
+                Value::Char(c) => c.to_string(),
+                _ => return Err("contains: expected string or char".to_string()),
+            };
+            Ok(Value::Bool(s.contains(&needle)))
+        }
+        "string_slice" => {
+            let (s, rest) = extract_receiver_str(&arg, "string_slice")?;
+            let (start, end) = extract_range(&rest, "slice")?;
+            if start < 0 || end < 0 {
+                return Err("slice: negative index".to_string());
+            }
+            let start = start as usize;
+            let end = end as usize;
+            if start > s.len() || end > s.len() || start > end {
+                return Err(format!("slice: indices {}..{} out of bounds (len {})", start, end, s.len()));
+            }
+            if !s.is_char_boundary(start) || !s.is_char_boundary(end) {
+                return Err("slice: index is not on a UTF-8 character boundary".to_string());
+            }
+            Ok(Value::Str(s[start..end].to_string()))
+        }
+        "string_starts_with" => {
+            let (s, rest) = extract_receiver_str(&arg, "string_starts_with")?;
+            let prefix = match rest {
+                Value::Str(p) => p,
+                _ => return Err("starts_with: expected string".to_string()),
+            };
+            Ok(Value::Bool(s.starts_with(&prefix)))
+        }
+        "string_ends_with" => {
+            let (s, rest) = extract_receiver_str(&arg, "string_ends_with")?;
+            let suffix = match rest {
+                Value::Str(p) => p,
+                _ => return Err("ends_with: expected string".to_string()),
+            };
+            Ok(Value::Bool(s.ends_with(&suffix)))
+        }
+        "string_replace" => {
+            let (s, rest) = extract_receiver_str(&arg, "string_replace")?;
+            match rest {
+                Value::Struct(fields) if fields.len() == 2 => {
+                    let pattern = match &fields[0].1 {
+                        Value::Str(p) => p.clone(),
+                        _ => return Err("replace: first argument must be a string".to_string()),
+                    };
+                    let replacement = match &fields[1].1 {
+                        Value::Str(r) => r.clone(),
+                        _ => return Err("replace: second argument must be a string".to_string()),
+                    };
+                    Ok(Value::Str(s.replace(&pattern, &replacement)))
+                }
+                _ => Err("replace: expected (pattern, replacement)".to_string()),
+            }
+        }
+        "method_set" => match arg {
+            Value::Struct(fields) if fields.len() == 2 => {
+                let tag_id = match &fields[0].1 {
+                    Value::TagConstructor { id, .. } => *id,
+                    _ => return Err("method_set: first argument must be a type constructor".to_string()),
+                };
+                let methods = match &fields[1].1 {
+                    Value::Struct(method_fields) => {
+                        for (label, _) in method_fields {
+                            if label.parse::<u64>().is_ok() {
+                                return Err("method_set: second argument must be a struct with named fields".to_string());
+                            }
+                        }
+                        method_fields.clone()
+                    }
+                    _ => return Err("method_set: second argument must be a struct of functions".to_string()),
+                };
+                Ok(Value::MethodSet {
+                    id: next_closure_id(),
+                    tag_id,
+                    methods,
+                })
+            }
+            _ => Err("method_set: expected (constructor, struct_of_functions)".to_string()),
+        },
         _ => Err(format!("unknown builtin function: {}", name)),
     }
 }
@@ -1301,6 +1687,16 @@ fn eval_collecting(expr: &Expr, env: &Env, input: &Value) -> Result<(Value, Env)
             let new_env = new_env.bind("\0".to_string(), input.clone());
             eval_collecting(body, &new_env, input)
         }
+        ExprKind::Apply { expr: ms_expr, body } => {
+            let ms = eval(ms_expr, env, input)?;
+            match &ms {
+                Value::MethodSet { .. } => {
+                    let new_env = env.bind(format!("\0ms"), ms);
+                    eval_collecting(body, &new_env, input)
+                }
+                _ => Err("apply: expected a method set value".to_string()),
+            }
+        }
         _ => {
             let val = eval(expr, env, input)?;
             Ok((val, env.clone()))
@@ -1320,6 +1716,16 @@ fn eval_pipe_collecting(lhs_val: &Value, rhs: &Expr, env: &Env, input: &Value) -
             let new_env = new_env.bind("\0".to_string(), lhs_val.clone());
             eval_collecting(body, &new_env, input)
         }
+        ExprKind::Apply { expr: ms_expr, body } => {
+            let ms = eval(ms_expr, env, input)?;
+            match &ms {
+                Value::MethodSet { .. } => {
+                    let new_env = env.bind(format!("\0ms"), ms);
+                    eval_collecting(body, &new_env, input)
+                }
+                _ => Err("apply: expected a method set value".to_string()),
+            }
+        }
         _ => {
             let val = eval_pipe(lhs_val, rhs, env, input)?;
             Ok((val, env.clone()))
@@ -1329,16 +1735,58 @@ fn eval_pipe_collecting(lhs_val: &Value, rhs: &Expr, env: &Env, input: &Value) -
 
 fn has_toplevel_let(expr: &Expr) -> bool {
     match expr.as_ref() {
-        ExprKind::Let { .. } | ExprKind::LetArray { .. } => true,
+        ExprKind::Let { .. } | ExprKind::LetArray { .. } | ExprKind::Apply { .. } => true,
         _ => false,
     }
+}
+
+/// Build the core module as a Value::Struct.
+pub fn build_core_module() -> Value {
+    let mut fields = Vec::new();
+
+    // Type constructors for primitive types (using reserved TagIds)
+    let type_constructors = [
+        ("Int", TAG_ID_INT),
+        ("Float", TAG_ID_FLOAT),
+        ("Bool", TAG_ID_BOOL),
+        ("String", TAG_ID_STRING),
+        ("Char", TAG_ID_CHAR),
+        ("Byte", TAG_ID_BYTE),
+        ("Array", TAG_ID_ARRAY),
+        ("Unit", TAG_ID_UNIT),
+    ];
+    for (name, id) in &type_constructors {
+        fields.push((name.to_string(), Value::TagConstructor {
+            id: *id,
+            name: name.to_string(),
+        }));
+    }
+
+    // All builtin functions
+    let builtins = [
+        "not", "and", "or", "len", "print", "map", "filter", "fold", "zip",
+        "byte", "int", "float", "char", "ref_eq", "val_eq", "method_set",
+        // Array method builtins (receiver as first arg)
+        "array_get", "array_slice", "array_len", "array_map", "array_filter",
+        "array_fold", "array_zip",
+        // String method builtins (receiver as first arg)
+        "string_byte_len", "string_char_len", "string_byte_get", "string_char_get",
+        "string_as_bytes", "string_chars", "string_split", "string_trim",
+        "string_contains", "string_slice", "string_starts_with", "string_ends_with",
+        "string_replace",
+    ];
+    for name in &builtins {
+        fields.push((name.to_string(), Value::BuiltinFn(name.to_string())));
+    }
+
+    Value::Struct(fields)
 }
 
 /// Create the default environment with builtins.
 pub fn default_env() -> Env {
     let mut env = Env::new();
     for name in &["not", "and", "or", "len", "print", "map", "filter", "fold", "zip",
-                   "byte", "int", "float", "char", "ref_eq", "val_eq"] {
+                   "byte", "int", "float", "char", "ref_eq", "val_eq", "method_set"] {
         env = env.bind(name.to_string(), Value::BuiltinFn(name.to_string()));
     }
     env
@@ -1348,7 +1796,7 @@ pub fn default_env() -> Env {
 pub fn default_env_with_modules(modules: std::collections::HashMap<String, Value>) -> Env {
     let mut env = Env::with_modules(modules);
     for name in &["not", "and", "or", "len", "print", "map", "filter", "fold", "zip",
-                   "byte", "int", "float", "char", "ref_eq", "val_eq"] {
+                   "byte", "int", "float", "char", "ref_eq", "val_eq", "method_set"] {
         env = env.bind(name.to_string(), Value::BuiltinFn(name.to_string()));
     }
     env

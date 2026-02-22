@@ -118,6 +118,25 @@ x > 0 >> { "positive" | "non-positive" }         # ternary with comparison
 [1, 2, 3].get(0)                                 # 1
 ```
 
+### Method Sets
+
+- `method_set(cons, struct_of_funcs)` returns a method set value. `cons` is a type constructor, and `struct_of_funcs` is a struct with named fields where each field is a function whose first argument is the type created by `cons`.
+- Each method set value has a unique type, distinct from all other method sets.
+- `apply(ms);` opens a new scope (like `let`) in which the method set `ms` is active. Within this scope, values of the type whose constructor was passed to `method_set` gain methods with the names defined in `struct_of_funcs`.
+- Method sets apply **lexically only**, extending to the end of the enclosing scope (like `let`).
+- If an inner `apply` introduces a method that already exists on a type, the inner one wins (like `let` shadowing).
+
+```text
+tag(Celsius);
+
+let to_string = method_set(Celsius, (
+  show = { >> let(Celsius(v)); "{v}°C" }
+));
+
+apply(to_string);
+Celsius(42).show()            # "42°C"
+```
+
 ### Totality
 
 - Recursion is not possible: there are no recursive bindings, and the Y-combinator is prevented by the occurs check (no recursive/infinite types). The language is total — every program terminates. User code cannot express unbounded recursion. Some built-in stdlib operations may internally iterate over finite collections. Totality refers to the core language surface.

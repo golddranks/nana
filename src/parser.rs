@@ -2,7 +2,8 @@ use crate::ast::*;
 use crate::lexer::{StringPart, Token};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-static TAG_COUNTER: AtomicU64 = AtomicU64::new(0);
+// IDs 0–15 are reserved for built-in primitive types (see value.rs).
+static TAG_COUNTER: AtomicU64 = AtomicU64::new(16);
 
 fn next_tag_id() -> u64 {
     TAG_COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -113,6 +114,7 @@ impl Parser {
                     let field = match self.advance() {
                         Token::Ident(name) => name,
                         Token::Int(n) => n.to_string(),
+                        Token::Apply => "apply".to_string(),
                         tok => {
                             return Err(format!("expected field name after '.', got {:?}", tok))
                         }
@@ -415,6 +417,19 @@ impl Parser {
                     body: new_body,
                 }))
             }
+            ExprKind::Apply { expr, body } if matches!(*body, ExprKind::Unit) => {
+                Ok(Box::new(ExprKind::Apply {
+                    expr,
+                    body: rhs,
+                }))
+            }
+            ExprKind::Apply { expr, body } if Self::has_replaceable_let(&body) => {
+                let new_body = self.attach_body(body, rhs)?;
+                Ok(Box::new(ExprKind::Apply {
+                    expr,
+                    body: new_body,
+                }))
+            }
             ExprKind::Pipe(pipe_lhs, pipe_rhs) if Self::has_replaceable_let(&pipe_rhs) => {
                 let new_rhs = self.attach_body(pipe_rhs, rhs)?;
                 Ok(Box::new(ExprKind::Pipe(pipe_lhs, new_rhs)))
@@ -467,6 +482,13 @@ impl Parser {
                     Self::has_replaceable_let(body)
                 }
             }
+            ExprKind::Apply { body, .. } => {
+                if matches!(body.as_ref(), ExprKind::Unit) {
+                    true
+                } else {
+                    Self::has_replaceable_let(body)
+                }
+            }
             ExprKind::Pipe(_, rhs) => Self::has_replaceable_let(rhs),
             _ => false,
         }
@@ -485,6 +507,13 @@ impl Parser {
                 }
             }
             ExprKind::LetArray { .. } => true,
+            ExprKind::Apply { body, .. } => {
+                if matches!(body.as_ref(), ExprKind::Unit) {
+                    true
+                } else {
+                    Self::has_nestable_binding(body)
+                }
+            }
             ExprKind::Pipe(_, rhs) => Self::has_nestable_binding(rhs),
             _ => false,
         }
@@ -538,6 +567,16 @@ impl Parser {
                     patterns,
                     body: Box::new(ExprKind::Pipe(body, new_let)),
                 })
+            }
+            ExprKind::Apply { expr, body } if matches!(*body, ExprKind::Unit) => {
+                Box::new(ExprKind::Apply {
+                    expr,
+                    body: new_let,
+                })
+            }
+            ExprKind::Apply { expr, body } if Self::has_nestable_binding(&body) => {
+                let new_body = Self::nest_let_in_let(body, new_let);
+                Box::new(ExprKind::Apply { expr, body: new_body })
             }
             ExprKind::Pipe(pipe_lhs, pipe_rhs) if Self::has_nestable_binding(&pipe_rhs) => {
                 let new_rhs = Self::nest_let_in_let(pipe_rhs, new_let);
@@ -653,6 +692,9 @@ impl Parser {
 
             // use(name) — sugar for import(name) >> let(name)
             Token::Use => self.parse_use(),
+
+            // apply(ms) — activate method set in lexical scope
+            Token::Apply => self.parse_apply(),
 
             tok => Err(format!("unexpected token in expression: {:?}", tok)),
         }
@@ -1104,6 +1146,7 @@ impl Parser {
                     let field = match self.advance() {
                         Token::Ident(name) => name,
                         Token::Int(n) => n.to_string(),
+                        Token::Apply => "apply".to_string(),
                         tok => {
                             return Err(format!("expected field name after '.', got {:?}", tok))
                         }
@@ -1341,13 +1384,15 @@ impl Parser {
     fn is_labeled_field(&self) -> bool {
         matches!(
             (self.peek(), self.peek_at(1)),
-            (Token::Ident(_), Token::Assign)
+            (Token::Ident(_), Token::Assign) | (Token::Apply, Token::Assign)
         )
     }
 
     fn parse_labeled_field(&mut self) -> Result<(String, Expr), String> {
-        let Token::Ident(label) = self.advance() else {
-            return Err("expected identifier for field label".to_string());
+        let label = match self.advance() {
+            Token::Ident(name) => name,
+            Token::Apply => "apply".to_string(),
+            _ => return Err("expected identifier for field label".to_string()),
         };
         self.expect(&Token::Assign)?;
         let value = self.parse_expr(bp::SEMI_L + 1)?;
@@ -1481,6 +1526,18 @@ impl Parser {
                 body,
             }),
         )))
+    }
+
+    fn parse_apply(&mut self) -> Result<Expr, String> {
+        self.advance(); // consume 'apply'
+        self.expect(&Token::LParen)?;
+        let expr = self.parse_expr(0)?;
+        self.expect(&Token::RParen)?;
+        // Body is Unit placeholder; attach_body fills it with the continuation after `;`.
+        Ok(Box::new(ExprKind::Apply {
+            expr,
+            body: Box::new(ExprKind::Unit),
+        }))
     }
 
     // ── Let pattern parsing ──────────────────────────────────────────

@@ -79,6 +79,12 @@ pub enum ExprKind {
     // Import
     Import(String),
 
+    // apply(ms); body — activate method set in lexical scope
+    Apply {
+        expr: Expr,
+        body: Expr,
+    },
+
     // Grouping: `(expr)` — semantically transparent, but prevents `let x = (expr)`
     // desugaring from nesting into the inner expression's let chain.
     Group(Expr),
@@ -225,6 +231,10 @@ fn collect_imports_inner(expr: &Expr, names: &mut Vec<String>) {
         }
         ExprKind::Let { body, .. } => collect_imports_inner(body, names),
         ExprKind::LetArray { body, .. } => collect_imports_inner(body, names),
+        ExprKind::Apply { expr, body } => {
+            collect_imports_inner(expr, names);
+            collect_imports_inner(body, names);
+        }
         ExprKind::Range(start, end) => {
             collect_imports_inner(start, names);
             collect_imports_inner(end, names);

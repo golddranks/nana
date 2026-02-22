@@ -7,6 +7,32 @@ use crate::ast::{BranchArm, Expr};
 
 pub type TagId = u64;
 
+// Reserved TagIds for built-in primitive types (0–15).
+// User-generated tag IDs start at 16 (see parser.rs TAG_COUNTER).
+pub const TAG_ID_INT: TagId = 0;
+pub const TAG_ID_FLOAT: TagId = 1;
+pub const TAG_ID_BOOL: TagId = 2;
+pub const TAG_ID_STRING: TagId = 3;
+pub const TAG_ID_CHAR: TagId = 4;
+pub const TAG_ID_BYTE: TagId = 5;
+pub const TAG_ID_ARRAY: TagId = 6;
+pub const TAG_ID_UNIT: TagId = 7;
+
+/// Map a primitive Value to its built-in TagId for method set dispatch.
+pub fn builtin_tag_id(value: &Value) -> Option<TagId> {
+    match value {
+        Value::Int(_) => Some(TAG_ID_INT),
+        Value::Float(_) => Some(TAG_ID_FLOAT),
+        Value::Bool(_) => Some(TAG_ID_BOOL),
+        Value::Str(_) => Some(TAG_ID_STRING),
+        Value::Char(_) => Some(TAG_ID_CHAR),
+        Value::Byte(_) => Some(TAG_ID_BYTE),
+        Value::Array(_) => Some(TAG_ID_ARRAY),
+        Value::Unit => Some(TAG_ID_UNIT),
+        _ => None,
+    }
+}
+
 // ── Environment ──────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -94,6 +120,26 @@ impl Env {
     pub fn len(&self) -> usize {
         self.bindings.len()
     }
+
+    /// Find a method in active method sets for a given tag ID.
+    /// Only considers method sets activated via `apply` (bound with `\0ms` prefix).
+    /// Scans backwards (most recent first) for shadowing semantics.
+    pub fn find_method_in_method_sets(&self, tag_id: TagId, method_name: &str) -> Option<&Value> {
+        for b in self.bindings.iter().rev() {
+            if !b.name.starts_with("\0ms") {
+                continue;
+            }
+            if let Value::MethodSet { tag_id: ms_tag_id, methods, .. } = &b.value {
+                if *ms_tag_id == tag_id {
+                    if let Some((_, func)) = methods.iter().find(|(name, _)| name == method_name) {
+                        b.used.set(true);
+                        return Some(func);
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -127,6 +173,11 @@ pub enum Value {
         payload: Box<Value>,
     },
     BuiltinFn(String),
+    MethodSet {
+        id: u64,
+        tag_id: TagId,
+        methods: Vec<(String, Value)>,
+    },
 }
 
 impl Value {
@@ -245,6 +296,7 @@ impl fmt::Display for Value {
                 }
             }
             Value::BuiltinFn(name) => write!(f, "<builtin {}>", name),
+            Value::MethodSet { .. } => write!(f, "<method_set>"),
         }
     }
 }
@@ -293,6 +345,7 @@ impl PartialEq for Value {
                 id1 == id2
             }
             (Value::BuiltinFn(a), Value::BuiltinFn(b)) => a == b,
+            (Value::MethodSet { id: id1, .. }, Value::MethodSet { id: id2, .. }) => id1 == id2,
             _ => false,
         }
     }

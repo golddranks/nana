@@ -63,6 +63,7 @@ pub enum Token {
     False,
     Import,
     Use,
+    Apply,
 
     // Identifier
     Ident(String),
@@ -581,6 +582,7 @@ impl Lexer {
             "false" => Token::False,
             "import" => Token::Import,
             "use" => Token::Use,
+            "apply" => Token::Apply,
             _ => Token::Ident(name),
         };
         Ok(tok)

@@ -8616,3 +8616,252 @@ fn function_eq_error() {
 fn mismatched_type_compare_still_generic() {
     assert_error(r#"1 == "hello""#, "cannot compare values");
 }
+
+// ── Method sets ──────────────────────────────────────────────────
+
+#[test]
+fn method_set_basic() {
+    assert_val(r#"
+        tag(Celsius);
+        let ms = method_set(Celsius, (
+            show = { Celsius(v) -> "{v}°C" }
+        ));
+        apply(ms);
+        Celsius(42).show()
+    "#, s("42°C"));
+}
+
+#[test]
+fn method_set_multiple_methods() {
+    assert_val(r#"
+        tag(Celsius);
+        let ms = method_set(Celsius, (
+            show = { Celsius(v) -> "{v}°C" },
+            value = { Celsius(v) -> v }
+        ));
+        apply(ms);
+        Celsius(42).value()
+    "#, int(42));
+}
+
+#[test]
+fn method_set_lexical_scope() {
+    // Method should not be available outside apply scope
+    assert_error(r#"
+        tag(Celsius);
+        let ms = method_set(Celsius, (
+            show = { Celsius(v) -> "{v}°C" }
+        ));
+        (apply(ms); Celsius(42));
+        Celsius(100).show()
+    "#, "no method");
+}
+
+#[test]
+fn method_set_shadowing() {
+    assert_val(r#"
+        tag(Celsius);
+        let ms1 = method_set(Celsius, (
+            show = { Celsius(v) -> "{v} degrees" }
+        ));
+        let ms2 = method_set(Celsius, (
+            show = { Celsius(v) -> "{v}°C" }
+        ));
+        apply(ms1);
+        apply(ms2);
+        Celsius(42).show()
+    "#, s("42°C"));
+}
+
+#[test]
+fn method_set_error_outside_scope() {
+    assert_error(r#"
+        tag(Celsius);
+        Celsius(42).show()
+    "#, "no method");
+}
+
+#[test]
+fn method_set_with_additional_args() {
+    assert_val(r#"
+        tag(Vec2);
+        let ms = method_set(Vec2, (
+            add = { >> let(a, b);
+                a >> { Vec2(av) -> av } >> let(ax, ay);
+                b >> { Vec2(bv) -> bv } >> let(bx, by);
+                Vec2((ax + bx, ay + by))
+            }
+        ));
+        apply(ms);
+        Vec2((1, 2)).add(Vec2((3, 4))) >> { Vec2(r) -> r }
+    "#, Value::Struct(vec![
+        ("0".to_string(), int(4)),
+        ("1".to_string(), int(6)),
+    ]));
+}
+
+#[test]
+fn method_set_design_example() {
+    // Example from DESIGN.md
+    assert_val(r#"
+        tag(Celsius);
+        let to_string = method_set(Celsius, (
+            show = { Celsius(v) -> "{v}°C" }
+        ));
+        apply(to_string);
+        Celsius(42).show()
+    "#, s("42°C"));
+}
+
+// ── std module tests ──
+
+fn assert_std(input: &str, expected: Value) {
+    let result = nana::run_with_std(input);
+    let val = result.unwrap_or_else(|e| panic!("program failed.\n  input: {input}\n  error: {e}"));
+    assert_eq!(
+        val, expected,
+        "\n  input: {input}\n  expected: {expected}\n  got: {val}"
+    );
+}
+
+#[test]
+fn std_array_methods_via_method_set() {
+    assert_std(r#"
+        use(std);
+        apply(std.array_methods);
+        [1, 2, 3].map{ * 2 }
+    "#, Value::Array(vec![int(2), int(4), int(6)]));
+}
+
+#[test]
+fn std_array_filter_via_method_set() {
+    assert_std(r#"
+        use(std);
+        apply(std.array_methods);
+        [1, 2, 3, 4].filter{ > 2 }
+    "#, Value::Array(vec![int(3), int(4)]));
+}
+
+#[test]
+fn std_array_fold_via_method_set() {
+    assert_std(r#"
+        use(std);
+        apply(std.array_methods);
+        [1, 2, 3].fold(0, { >> let(acc, elem); acc + elem })
+    "#, int(6));
+}
+
+#[test]
+fn std_array_len_via_method_set() {
+    assert_std(r#"
+        use(std);
+        apply(std.array_methods);
+        [1, 2, 3].len()
+    "#, int(3));
+}
+
+#[test]
+fn std_array_get_via_method_set() {
+    assert_std(r#"
+        use(std);
+        apply(std.array_methods);
+        [10, 20, 30].get(1)
+    "#, int(20));
+}
+
+#[test]
+fn std_array_zip_via_method_set() {
+    assert_std(r#"
+        use(std);
+        apply(std.array_methods);
+        [1, 2].zip([3, 4])
+    "#, Value::Array(vec![
+        Value::Struct(vec![("0".to_string(), int(1)), ("1".to_string(), int(3))]),
+        Value::Struct(vec![("0".to_string(), int(2)), ("1".to_string(), int(4))]),
+    ]));
+}
+
+#[test]
+fn std_array_slice_via_method_set() {
+    assert_std(r#"
+        use(std);
+        apply(std.array_methods);
+        [10, 20, 30, 40].slice(1..3)
+    "#, Value::Array(vec![int(20), int(30)]));
+}
+
+#[test]
+fn std_string_methods_via_method_set() {
+    assert_std(r#"
+        use(std);
+        apply(std.string_methods);
+        "hello world".contains("world")
+    "#, Value::Bool(true));
+}
+
+#[test]
+fn std_string_char_len_via_method_set() {
+    assert_std(r#"
+        use(std);
+        apply(std.string_methods);
+        "hello".char_len()
+    "#, int(5));
+}
+
+#[test]
+fn std_string_split_via_method_set() {
+    assert_std(r#"
+        use(std);
+        apply(std.string_methods);
+        "a,b,c".split(",")
+    "#, Value::Array(vec![s("a"), s("b"), s("c")]));
+}
+
+#[test]
+fn std_string_trim_via_method_set() {
+    assert_std(r#"
+        use(std);
+        apply(std.string_methods);
+        "  hello  ".trim()
+    "#, s("hello"));
+}
+
+#[test]
+fn std_string_starts_with_via_method_set() {
+    assert_std(r#"
+        use(std);
+        apply(std.string_methods);
+        "hello".starts_with("hel")
+    "#, Value::Bool(true));
+}
+
+#[test]
+fn std_string_replace_via_method_set() {
+    assert_std(r#"
+        use(std);
+        apply(std.string_methods);
+        "hello world".replace("world", "nana")
+    "#, s("hello nana"));
+}
+
+#[test]
+fn std_builtins_accessible() {
+    // Builtins should be accessible through std
+    assert_std(r#"
+        use(std);
+        std.not(true)
+    "#, Value::Bool(false));
+}
+
+#[test]
+fn std_type_constructors() {
+    // Type constructors should be in std
+    assert_std(r#"
+        use(std);
+        let ms = method_set(std.Array, (
+            count = { >> let(arr); len(arr) }
+        ));
+        apply(ms);
+        [1, 2, 3].count()
+    "#, int(3));
+}

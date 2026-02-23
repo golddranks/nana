@@ -9,8 +9,8 @@
 
 use std::collections::HashMap;
 
-use crate::ast::Pattern;
-use crate::mir::{Mir, MirKind};
+use crate::ast::{ArrayPat, BranchBinding, Pattern};
+use crate::mir::{Mir, MirBranchPattern, MirKind};
 use crate::value::{
     TagId, TAG_ID_ARRAY, TAG_ID_BOOL, TAG_ID_BYTE, TAG_ID_CHAR, TAG_ID_FLOAT, TAG_ID_INT,
     TAG_ID_STRING, TAG_ID_UNIT,
@@ -44,10 +44,19 @@ pub enum Ty {
 
 // ── Type environment ────────────────────────────────────────────
 
+/// Registry entry for a method set: tag_id + methods struct type.
+#[derive(Debug, Clone)]
+pub struct MethodSetInfo {
+    pub tag_id: TagId,
+    pub methods: Ty, // always Ty::Struct(...)
+}
+
 pub struct TyEnv {
     bindings: Vec<(std::string::String, Ty)>,
     modules: HashMap<std::string::String, Ty>,
     next_ms_id: u64,
+    /// Global registry: method set id → info (tag_id + methods struct).
+    method_sets: HashMap<u64, MethodSetInfo>,
 }
 
 impl TyEnv {
@@ -56,11 +65,19 @@ impl TyEnv {
             bindings: Vec::new(),
             modules: HashMap::new(),
             next_ms_id: 0,
+            method_sets: HashMap::new(),
         }
     }
 
     pub fn with_module(mut self, name: impl Into<std::string::String>, ty: Ty) -> Self {
         self.modules.insert(name.into(), ty);
+        self
+    }
+
+    /// Create a new TyEnv inheriting the method set registry from another env.
+    pub fn with_method_sets_from(mut self, other: &TyEnv) -> Self {
+        self.method_sets = other.method_sets.clone();
+        self.next_ms_id = other.next_ms_id;
         self
     }
 
@@ -92,6 +109,48 @@ impl TyEnv {
         self.next_ms_id += 1;
         id
     }
+
+    fn register_method_set(&mut self, id: u64, tag_id: TagId, methods: Ty) {
+        self.method_sets.insert(id, MethodSetInfo { tag_id, methods });
+    }
+
+    /// Find a method's type by searching active method sets in scope.
+    /// Scans backwards (most recent first) for shadowing semantics,
+    /// mirroring `Env::find_method_in_method_sets`.
+    fn find_method_type(&self, tag_id: TagId, method_name: &str) -> Option<Ty> {
+        for (name, ty) in self.bindings.iter().rev() {
+            if !name.starts_with("\0ms") {
+                continue;
+            }
+            if let Ty::MethodSet { id, tag_id: ms_tag_id } = ty {
+                if *ms_tag_id == tag_id {
+                    if let Some(info) = self.method_sets.get(id) {
+                        if let Ty::Struct(fields) = &info.methods {
+                            if let Some((_, method_ty)) = fields.iter().find(|(n, _)| n == method_name) {
+                                return Some(method_ty.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Map a primitive Ty to its built-in TagId for method set dispatch.
+fn ty_to_tag_id(ty: &Ty) -> Option<TagId> {
+    match ty {
+        Ty::Int => Some(TAG_ID_INT),
+        Ty::Float => Some(TAG_ID_FLOAT),
+        Ty::Bool => Some(TAG_ID_BOOL),
+        Ty::String => Some(TAG_ID_STRING),
+        Ty::Char => Some(TAG_ID_CHAR),
+        Ty::Byte => Some(TAG_ID_BYTE),
+        Ty::Array => Some(TAG_ID_ARRAY),
+        Ty::Unit => Some(TAG_ID_UNIT),
+        _ => None,
+    }
 }
 
 // ── Core module type ────────────────────────────────────────────
@@ -120,37 +179,206 @@ pub fn core_module_type() -> Ty {
         fields.push((name.to_string(), Ty::TagConstructor(*id)));
     }
 
-    // All builtins as Fn(Unknown -> Unknown)
-    let builtins: &[&str] = &[
-        "not", "and", "or", "len", "print", "map", "filter", "fold", "zip",
-        "byte", "int", "float", "char", "ref_eq", "val_eq", "method_set",
-        "array_get", "array_slice", "array_len", "array_map", "array_filter",
-        "array_fold", "array_zip",
-        "array_add", "array_eq", "array_not_eq",
-        "string_byte_len", "string_char_len", "string_byte_get", "string_char_get",
-        "string_as_bytes", "string_chars", "string_split", "string_trim",
-        "string_contains", "string_slice", "string_starts_with", "string_ends_with",
-        "string_replace",
-        "string_add", "string_eq", "string_not_eq", "string_lt", "string_gt",
-        "string_lt_eq", "string_gt_eq", "string_to_string",
-        "int_add", "int_subtract", "int_times", "int_divided_by", "int_negate",
-        "int_eq", "int_not_eq", "int_lt", "int_gt", "int_lt_eq", "int_gt_eq",
-        "int_to_string",
-        "float_add", "float_subtract", "float_times", "float_divided_by", "float_negate",
-        "float_eq", "float_not_eq", "float_lt", "float_gt", "float_lt_eq", "float_gt_eq",
-        "float_to_string",
-        "bool_eq", "bool_not_eq", "bool_to_string",
-        "char_eq", "char_not_eq", "char_lt", "char_gt", "char_lt_eq", "char_gt_eq",
-        "char_to_string",
-        "byte_eq", "byte_not_eq", "byte_lt", "byte_gt", "byte_lt_eq", "byte_gt_eq",
-        "byte_to_string",
-        "unit_eq", "unit_not_eq",
-    ];
-    for name in builtins {
-        fields.push((name.to_string(), fn_ty()));
-    }
+    // Builtins with precise return types.
+    // Params are Unknown (not checked yet); return types enable type propagation.
+    let f = |ret: Ty| Ty::Fn {
+        param: Box::new(Ty::Unknown),
+        ret: Box::new(ret),
+    };
+
+    // Logical builtins
+    fields.push(("not".into(), f(Ty::Bool)));
+    fields.push(("and".into(), f(Ty::Bool)));
+    fields.push(("or".into(), f(Ty::Bool)));
+
+    // Collection builtins
+    fields.push(("len".into(), f(Ty::Int)));
+    fields.push(("print".into(), f(Ty::Unit)));
+    fields.push(("map".into(), f(Ty::Array)));
+    fields.push(("filter".into(), f(Ty::Array)));
+    fields.push(("fold".into(), f(Ty::Unknown))); // return type depends on accumulator
+    fields.push(("zip".into(), f(Ty::Array)));
+
+    // Conversion builtins
+    fields.push(("byte".into(), f(Ty::Byte)));
+    fields.push(("int".into(), f(Ty::Int)));
+    fields.push(("float".into(), f(Ty::Float)));
+    fields.push(("char".into(), f(Ty::Char)));
+
+    // Equality builtins
+    fields.push(("ref_eq".into(), f(Ty::Bool)));
+    fields.push(("val_eq".into(), f(Ty::Bool)));
+    fields.push(("method_set".into(), fn_ty())); // generative, handled specially
+
+    // Array methods
+    fields.push(("array_get".into(), f(Ty::Unknown))); // element type unknown
+    fields.push(("array_slice".into(), f(Ty::Array)));
+    fields.push(("array_len".into(), f(Ty::Int)));
+    fields.push(("array_map".into(), f(Ty::Array)));
+    fields.push(("array_filter".into(), f(Ty::Array)));
+    fields.push(("array_fold".into(), f(Ty::Unknown)));
+    fields.push(("array_zip".into(), f(Ty::Array)));
+    fields.push(("array_add".into(), f(Ty::Array)));
+    fields.push(("array_eq".into(), f(Ty::Bool)));
+    fields.push(("array_not_eq".into(), f(Ty::Bool)));
+
+    // String methods
+    fields.push(("string_byte_len".into(), f(Ty::Int)));
+    fields.push(("string_char_len".into(), f(Ty::Int)));
+    fields.push(("string_byte_get".into(), f(Ty::Byte)));
+    fields.push(("string_char_get".into(), f(Ty::Char)));
+    fields.push(("string_as_bytes".into(), f(Ty::Array)));
+    fields.push(("string_chars".into(), f(Ty::Array)));
+    fields.push(("string_split".into(), f(Ty::Array)));
+    fields.push(("string_trim".into(), f(Ty::String)));
+    fields.push(("string_contains".into(), f(Ty::Bool)));
+    fields.push(("string_slice".into(), f(Ty::String)));
+    fields.push(("string_starts_with".into(), f(Ty::Bool)));
+    fields.push(("string_ends_with".into(), f(Ty::Bool)));
+    fields.push(("string_replace".into(), f(Ty::String)));
+    fields.push(("string_add".into(), f(Ty::String)));
+    fields.push(("string_eq".into(), f(Ty::Bool)));
+    fields.push(("string_not_eq".into(), f(Ty::Bool)));
+    fields.push(("string_lt".into(), f(Ty::Bool)));
+    fields.push(("string_gt".into(), f(Ty::Bool)));
+    fields.push(("string_lt_eq".into(), f(Ty::Bool)));
+    fields.push(("string_gt_eq".into(), f(Ty::Bool)));
+    fields.push(("string_to_string".into(), f(Ty::String)));
+
+    // Int methods
+    fields.push(("int_add".into(), f(Ty::Int)));
+    fields.push(("int_subtract".into(), f(Ty::Int)));
+    fields.push(("int_times".into(), f(Ty::Int)));
+    fields.push(("int_divided_by".into(), f(Ty::Int)));
+    fields.push(("int_negate".into(), f(Ty::Int)));
+    fields.push(("int_eq".into(), f(Ty::Bool)));
+    fields.push(("int_not_eq".into(), f(Ty::Bool)));
+    fields.push(("int_lt".into(), f(Ty::Bool)));
+    fields.push(("int_gt".into(), f(Ty::Bool)));
+    fields.push(("int_lt_eq".into(), f(Ty::Bool)));
+    fields.push(("int_gt_eq".into(), f(Ty::Bool)));
+    fields.push(("int_to_string".into(), f(Ty::String)));
+
+    // Float methods
+    fields.push(("float_add".into(), f(Ty::Float)));
+    fields.push(("float_subtract".into(), f(Ty::Float)));
+    fields.push(("float_times".into(), f(Ty::Float)));
+    fields.push(("float_divided_by".into(), f(Ty::Float)));
+    fields.push(("float_negate".into(), f(Ty::Float)));
+    fields.push(("float_eq".into(), f(Ty::Bool)));
+    fields.push(("float_not_eq".into(), f(Ty::Bool)));
+    fields.push(("float_lt".into(), f(Ty::Bool)));
+    fields.push(("float_gt".into(), f(Ty::Bool)));
+    fields.push(("float_lt_eq".into(), f(Ty::Bool)));
+    fields.push(("float_gt_eq".into(), f(Ty::Bool)));
+    fields.push(("float_to_string".into(), f(Ty::String)));
+
+    // Bool methods
+    fields.push(("bool_eq".into(), f(Ty::Bool)));
+    fields.push(("bool_not_eq".into(), f(Ty::Bool)));
+    fields.push(("bool_to_string".into(), f(Ty::String)));
+
+    // Char methods
+    fields.push(("char_eq".into(), f(Ty::Bool)));
+    fields.push(("char_not_eq".into(), f(Ty::Bool)));
+    fields.push(("char_lt".into(), f(Ty::Bool)));
+    fields.push(("char_gt".into(), f(Ty::Bool)));
+    fields.push(("char_lt_eq".into(), f(Ty::Bool)));
+    fields.push(("char_gt_eq".into(), f(Ty::Bool)));
+    fields.push(("char_to_string".into(), f(Ty::String)));
+
+    // Byte methods
+    fields.push(("byte_eq".into(), f(Ty::Bool)));
+    fields.push(("byte_not_eq".into(), f(Ty::Bool)));
+    fields.push(("byte_lt".into(), f(Ty::Bool)));
+    fields.push(("byte_gt".into(), f(Ty::Bool)));
+    fields.push(("byte_lt_eq".into(), f(Ty::Bool)));
+    fields.push(("byte_gt_eq".into(), f(Ty::Bool)));
+    fields.push(("byte_to_string".into(), f(Ty::String)));
+
+    // Unit methods
+    fields.push(("unit_eq".into(), f(Ty::Bool)));
+    fields.push(("unit_not_eq".into(), f(Ty::Bool)));
 
     Ty::Struct(fields)
+}
+
+// ── Unification ─────────────────────────────────────────────────
+
+/// Check if two types are compatible and return the unified type.
+/// `Unknown` is compatible with any type (acts as a wildcard).
+pub fn unify(a: &Ty, b: &Ty) -> Result<Ty, std::string::String> {
+    match (a, b) {
+        // Unknown unifies with anything
+        (Ty::Unknown, other) | (other, Ty::Unknown) => Ok(other.clone()),
+
+        // Primitives: must match exactly
+        (Ty::Int, Ty::Int) => Ok(Ty::Int),
+        (Ty::Float, Ty::Float) => Ok(Ty::Float),
+        (Ty::Bool, Ty::Bool) => Ok(Ty::Bool),
+        (Ty::String, Ty::String) => Ok(Ty::String),
+        (Ty::Char, Ty::Char) => Ok(Ty::Char),
+        (Ty::Byte, Ty::Byte) => Ok(Ty::Byte),
+        (Ty::Unit, Ty::Unit) => Ok(Ty::Unit),
+        (Ty::Array, Ty::Array) => Ok(Ty::Array),
+
+        // Functions: unify param and return types
+        (Ty::Fn { param: p1, ret: r1 }, Ty::Fn { param: p2, ret: r2 }) => {
+            let param = unify(p1, p2)?;
+            let ret = unify(r1, r2)?;
+            Ok(Ty::Fn {
+                param: Box::new(param),
+                ret: Box::new(ret),
+            })
+        }
+
+        // Structs: must have same fields in same order, unify each
+        (Ty::Struct(f1), Ty::Struct(f2)) => {
+            if f1.len() != f2.len() {
+                return Err(format!(
+                    "type error: cannot unify structs with {} and {} fields",
+                    f1.len(),
+                    f2.len()
+                ));
+            }
+            let mut unified = Vec::with_capacity(f1.len());
+            for ((n1, t1), (n2, t2)) in f1.iter().zip(f2.iter()) {
+                if n1 != n2 {
+                    return Err(format!(
+                        "type error: cannot unify struct fields '{}' and '{}'",
+                        n1, n2
+                    ));
+                }
+                let t = unify(t1, t2)?;
+                unified.push((n1.clone(), t));
+            }
+            Ok(Ty::Struct(unified))
+        }
+
+        // TagConstructor: must have same tag ID
+        (Ty::TagConstructor(id1), Ty::TagConstructor(id2)) => {
+            if id1 == id2 {
+                Ok(Ty::TagConstructor(*id1))
+            } else {
+                Err("type error: cannot unify different type constructors".to_string())
+            }
+        }
+
+        // MethodSet: must have same generative ID (same lexical site)
+        (Ty::MethodSet { id: id1, tag_id: t1 }, Ty::MethodSet { id: id2, tag_id: t2 }) => {
+            if id1 == id2 && t1 == t2 {
+                Ok(Ty::MethodSet { id: *id1, tag_id: *t1 })
+            } else {
+                Err("type error: cannot unify different method set types".to_string())
+            }
+        }
+
+        // Everything else: mismatch
+        _ => Err(format!(
+            "type error: cannot unify {:?} with {:?}",
+            a, b
+        )),
+    }
 }
 
 // ── Type checker ────────────────────────────────────────────────
@@ -170,7 +398,7 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
         MirKind::Ident(name) => {
             env.get(name)
                 .cloned()
-                .ok_or_else(|| format!("type error: undefined variable '{}'", name))
+                .ok_or_else(|| format!("type error: undefined variable: {}", name))
         }
 
         // ── Import ──
@@ -178,7 +406,7 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
             env.modules
                 .get(name)
                 .cloned()
-                .ok_or_else(|| format!("type error: module '{}' not found", name))
+                .ok_or_else(|| format!("type error: module not provided: {}", name))
         }
 
         // ── FieldAccess ──
@@ -190,10 +418,10 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                         .iter()
                         .find(|(name, _)| name == field)
                         .map(|(_, ty)| ty.clone())
-                        .ok_or_else(|| format!("type error: no field '{}' in struct", field))
+                        .ok_or_else(|| format!("type error: field '{}' not found in struct", field))
                 }
                 Ty::Unknown => Ok(Ty::Unknown),
-                _ => Err(format!("type error: field access on non-struct type")),
+                _ => Err(format!("type error: field access on non-struct value")),
             }
         }
 
@@ -203,15 +431,38 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
             let mut positional_idx = 0u64;
             for field in fields {
                 let ty = check(&field.value, env)?;
-                let label = match &field.label {
-                    Some(name) => name.clone(),
-                    None => {
-                        let label = positional_idx.to_string();
-                        positional_idx += 1;
-                        label
+                if field.is_spread {
+                    // Spread: merge fields from the spread value
+                    match &ty {
+                        Ty::Struct(spread_fields) => {
+                            for (name, fty) in spread_fields {
+                                if name.parse::<u64>().is_ok() {
+                                    // Re-index positional fields
+                                    typed_fields.push((positional_idx.to_string(), fty.clone()));
+                                    positional_idx += 1;
+                                } else {
+                                    typed_fields.push((name.clone(), fty.clone()));
+                                }
+                            }
+                        }
+                        Ty::Unit => {} // spreading unit is a no-op
+                        _ => {
+                            // Unknown or non-struct spread — can't track fields
+                            typed_fields.push((positional_idx.to_string(), ty));
+                            positional_idx += 1;
+                        }
                     }
-                };
-                typed_fields.push((label, ty));
+                } else {
+                    let label = match &field.label {
+                        Some(name) => name.clone(),
+                        None => {
+                            let label = positional_idx.to_string();
+                            positional_idx += 1;
+                            label
+                        }
+                    };
+                    typed_fields.push((label, ty));
+                }
             }
             Ok(Ty::Struct(typed_fields))
         }
@@ -244,7 +495,12 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
         MirKind::Apply { expr, body } => {
             let ms_ty = check(expr, env)?;
             match &ms_ty {
-                Ty::MethodSet { .. } => check(body, env),
+                Ty::MethodSet { .. } => {
+                    env.bind("\0ms".to_string(), ms_ty);
+                    let result = check(body, env);
+                    env.pop_binding();
+                    result
+                }
                 Ty::Unknown => check(body, env),
                 _ => Err("type error: apply expects a method set".to_string()),
             }
@@ -253,12 +509,88 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
         // ── NewTag ──
         MirKind::NewTag(id, _name) => Ok(Ty::TagConstructor(*id)),
 
-        // ── Everything else → Unknown ──
-        MirKind::Block(_)
-        | MirKind::BranchBlock(_)
-        | MirKind::Array(_)
-        | MirKind::MethodCall { .. }
-        | MirKind::LetArray { .. } => Ok(Ty::Unknown),
+        // ── Block (lambda) ──
+        MirKind::Block(body) => {
+            env.bind("in".to_string(), Ty::Unknown);
+            let body_ty = check(body, env)?;
+            env.pop_binding();
+            Ok(Ty::Fn {
+                param: Box::new(Ty::Unknown),
+                ret: Box::new(body_ty),
+            })
+        }
+
+        // ── BranchBlock (pattern-matching lambda) ──
+        MirKind::BranchBlock(arms) => {
+            env.bind("in".to_string(), Ty::Unknown);
+            let mut result_ty: Option<Ty> = None;
+            for arm in arms {
+                // Bind pattern variables for this arm
+                let bindings_added = bind_branch_pattern(&arm.pattern, env);
+                // Check guard if present (don't use its type)
+                if let Some(guard) = &arm.guard {
+                    let _ = check(guard, env)?;
+                }
+                let arm_ty = check(&arm.body, env)?;
+                // Pop pattern bindings
+                for _ in 0..bindings_added {
+                    env.pop_binding();
+                }
+                result_ty = Some(match result_ty {
+                    None => arm_ty,
+                    Some(prev) => unify(&prev, &arm_ty)?,
+                });
+            }
+            env.pop_binding(); // pop "in"
+            let ret = result_ty.unwrap_or(Ty::Unknown);
+            Ok(Ty::Fn {
+                param: Box::new(Ty::Unknown),
+                ret: Box::new(ret),
+            })
+        }
+
+        // ── Array ──
+        MirKind::Array(elems) => {
+            for elem in elems {
+                let _ = check(elem, env)?;
+            }
+            Ok(Ty::Array)
+        }
+
+        // ── LetArray (standalone, not via pipe) ──
+        MirKind::LetArray { patterns, body } => {
+            check_let_array(patterns, body, env)
+        }
+
+        // ── MethodCall ──
+        MirKind::MethodCall { receiver, method, arg } => {
+            let recv_ty = check(receiver, env)?;
+            let _arg_ty = check(arg, env)?;
+
+            // Stage 1: struct field access (method stored as field)
+            if let Ty::Struct(fields) = &recv_ty {
+                if let Some((_, field_ty)) = fields.iter().find(|(n, _)| n == method) {
+                    return match field_ty {
+                        Ty::Fn { ret, .. } => Ok(*ret.clone()),
+                        Ty::Unknown => Ok(Ty::Unknown),
+                        _ => Ok(Ty::Unknown),
+                    };
+                }
+            }
+
+            // Stage 2: method set lookup
+            if let Some(tag_id) = ty_to_tag_id(&recv_ty) {
+                if let Some(method_ty) = env.find_method_type(tag_id, method) {
+                    return match method_ty {
+                        Ty::Fn { ret, .. } => Ok(*ret),
+                        _ => Ok(Ty::Unknown),
+                    };
+                }
+            }
+
+            // Unknown receiver or method not found — don't error, return Unknown
+            Ok(Ty::Unknown)
+        }
     }
 }
 
@@ -267,14 +599,24 @@ fn check_pipe(lhs: &Mir, rhs: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::
     match rhs.as_ref() {
         // Pipe into let: `expr >> let(pattern); body`
         // The lhs value is bound to the pattern.
+        // Also bind \0 (passthrough variable) like eval_pipe does.
         MirKind::Let { pattern, body } => {
-            check_let(pattern, body, &lhs_ty, env)
+            check_let_with_passthrough(pattern, body, &lhs_ty, env)
+        }
+        // Pipe into let array: `expr >> let[a, b, c]; body`
+        MirKind::LetArray { patterns, body } => {
+            check_let_array_with_passthrough(patterns, body, &lhs_ty, env)
         }
         // Pipe into apply: `expr >> apply(ms); body`
         MirKind::Apply { expr, body } => {
             let ms_ty = check(expr, env)?;
             match &ms_ty {
-                Ty::MethodSet { .. } => check(body, env),
+                Ty::MethodSet { .. } => {
+                    env.bind("\0ms".to_string(), ms_ty);
+                    let result = check(body, env);
+                    env.pop_binding();
+                    result
+                }
                 Ty::Unknown => check(body, env),
                 _ => Err("type error: apply expects a method set".to_string()),
             }
@@ -297,11 +639,113 @@ fn check_let(
             Ok(body_ty)
         }
         Pattern::Discard => check(body, env),
-        Pattern::Fields(_) => {
-            // Destructuring not yet supported
-            check(body, env)
+        Pattern::Fields(fields) => {
+            let mut bindings_added = 0usize;
+            let mut positional_idx = 0u64;
+            for field in fields {
+                if field.binding == "_" && !field.is_rest {
+                    // Discard — don't bind, but consume positional index
+                    if field.label.is_none() {
+                        positional_idx += 1;
+                    }
+                    continue;
+                }
+                if field.is_rest {
+                    // Rest pattern — bind to Unknown (we don't track remaining fields)
+                    if field.binding != "_" && !field.binding.is_empty() {
+                        env.bind(field.binding.clone(), Ty::Unknown);
+                        bindings_added += 1;
+                    }
+                    continue;
+                }
+                // Look up field type from input struct if known
+                let field_ty = match input_ty {
+                    Ty::Struct(struct_fields) => {
+                        let lookup_key = match &field.label {
+                            Some(label) => label.clone(),
+                            None => {
+                                let key = positional_idx.to_string();
+                                positional_idx += 1;
+                                key
+                            }
+                        };
+                        struct_fields
+                            .iter()
+                            .find(|(n, _)| *n == lookup_key)
+                            .map(|(_, ty)| ty.clone())
+                            .unwrap_or(Ty::Unknown)
+                    }
+                    _ => {
+                        if field.label.is_none() {
+                            positional_idx += 1;
+                        }
+                        Ty::Unknown
+                    }
+                };
+                env.bind(field.binding.clone(), field_ty);
+                bindings_added += 1;
+            }
+            let body_ty = check(body, env)?;
+            for _ in 0..bindings_added {
+                env.pop_binding();
+            }
+            Ok(body_ty)
         }
     }
+}
+
+fn check_let_array(
+    patterns: &[ArrayPat],
+    body: &Mir,
+    env: &mut TyEnv,
+) -> Result<Ty, std::string::String> {
+    let mut bindings_added = 0usize;
+    for pat in patterns {
+        match pat {
+            ArrayPat::Name(name) => {
+                env.bind(name.clone(), Ty::Unknown);
+                bindings_added += 1;
+            }
+            ArrayPat::Discard => {}
+            ArrayPat::Rest(Some(name)) => {
+                env.bind(name.clone(), Ty::Array);
+                bindings_added += 1;
+            }
+            ArrayPat::Rest(None) => {}
+        }
+    }
+    let body_ty = check(body, env)?;
+    for _ in 0..bindings_added {
+        env.pop_binding();
+    }
+    Ok(body_ty)
+}
+
+/// Like check_let but also binds the \0 passthrough variable (used by pipe >> let).
+fn check_let_with_passthrough(
+    pattern: &Pattern,
+    body: &Mir,
+    input_ty: &Ty,
+    env: &mut TyEnv,
+) -> Result<Ty, std::string::String> {
+    // Bind \0 passthrough variable like eval_pipe does
+    env.bind("\0".to_string(), input_ty.clone());
+    let result = check_let(pattern, body, input_ty, env);
+    env.pop_binding(); // pop \0
+    result
+}
+
+/// Like check_let_array but also binds the \0 passthrough variable.
+fn check_let_array_with_passthrough(
+    patterns: &[ArrayPat],
+    body: &Mir,
+    input_ty: &Ty,
+    env: &mut TyEnv,
+) -> Result<Ty, std::string::String> {
+    env.bind("\0".to_string(), input_ty.clone());
+    let result = check_let_array(patterns, body, env);
+    env.pop_binding(); // pop \0
+    result
 }
 
 fn check_call(func: &Mir, arg: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
@@ -319,7 +763,26 @@ fn check_call(func: &Mir, arg: &Mir, env: &mut TyEnv) -> Result<Ty, std::string:
         Ty::Fn { ret, .. } => Ok(*ret),
         Ty::TagConstructor(_) => Ok(Ty::Unknown),
         Ty::Unknown => Ok(Ty::Unknown),
-        _ => Err(format!("type error: calling a non-function")),
+        _ => Err(format!("type error: cannot call non-function")),
+    }
+}
+
+/// Bind variables introduced by a branch pattern. Returns the number of bindings added.
+fn bind_branch_pattern(pattern: &MirBranchPattern, env: &mut TyEnv) -> usize {
+    match pattern {
+        MirBranchPattern::Literal(_) => 0,
+        MirBranchPattern::Tag(_, binding) => match binding {
+            Some(BranchBinding::Name(n)) => {
+                env.bind(n.clone(), Ty::Unknown);
+                1
+            }
+            _ => 0,
+        },
+        MirBranchPattern::Binding(n) => {
+            env.bind(n.clone(), Ty::Unknown);
+            1
+        }
+        MirBranchPattern::Discard => 0,
     }
 }
 
@@ -353,6 +816,7 @@ fn check_method_set_call(arg: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::
             }
 
             let id = env.fresh_method_set_id();
+            env.register_method_set(id, tag_id, methods_ty.clone());
             Ok(Ty::MethodSet { id, tag_id })
         }
         _ => Err("type error: method_set expects (constructor, struct_of_functions)".to_string()),
@@ -571,6 +1035,354 @@ mod tests {
         ));
 
         assert!(check(&expr, &mut env).is_err());
+    }
+
+    // ── Unification tests ──
+
+    #[test]
+    fn unify_same_primitives() {
+        assert_eq!(unify(&Ty::Int, &Ty::Int).unwrap(), Ty::Int);
+        assert_eq!(unify(&Ty::Float, &Ty::Float).unwrap(), Ty::Float);
+        assert_eq!(unify(&Ty::Bool, &Ty::Bool).unwrap(), Ty::Bool);
+        assert_eq!(unify(&Ty::String, &Ty::String).unwrap(), Ty::String);
+    }
+
+    #[test]
+    fn unify_different_primitives_error() {
+        assert!(unify(&Ty::Int, &Ty::Float).is_err());
+        assert!(unify(&Ty::Int, &Ty::String).is_err());
+        assert!(unify(&Ty::Bool, &Ty::Byte).is_err());
+    }
+
+    #[test]
+    fn unify_unknown_with_anything() {
+        assert_eq!(unify(&Ty::Unknown, &Ty::Int).unwrap(), Ty::Int);
+        assert_eq!(unify(&Ty::Float, &Ty::Unknown).unwrap(), Ty::Float);
+        assert_eq!(unify(&Ty::Unknown, &Ty::Unknown).unwrap(), Ty::Unknown);
+    }
+
+    #[test]
+    fn unify_structs_same_shape() {
+        let a = Ty::Struct(vec![("x".into(), Ty::Int), ("y".into(), Ty::Float)]);
+        let b = Ty::Struct(vec![("x".into(), Ty::Int), ("y".into(), Ty::Float)]);
+        assert_eq!(unify(&a, &b).unwrap(), a);
+    }
+
+    #[test]
+    fn unify_structs_different_field_count() {
+        let a = Ty::Struct(vec![("x".into(), Ty::Int)]);
+        let b = Ty::Struct(vec![("x".into(), Ty::Int), ("y".into(), Ty::Float)]);
+        assert!(unify(&a, &b).is_err());
+    }
+
+    #[test]
+    fn unify_structs_different_field_names() {
+        let a = Ty::Struct(vec![("x".into(), Ty::Int)]);
+        let b = Ty::Struct(vec![("y".into(), Ty::Int)]);
+        assert!(unify(&a, &b).is_err());
+    }
+
+    #[test]
+    fn unify_structs_different_field_types() {
+        let a = Ty::Struct(vec![("x".into(), Ty::Int)]);
+        let b = Ty::Struct(vec![("x".into(), Ty::Float)]);
+        assert!(unify(&a, &b).is_err());
+    }
+
+    #[test]
+    fn unify_method_sets_same_id() {
+        let a = Ty::MethodSet { id: 0, tag_id: TAG_ID_INT };
+        let b = Ty::MethodSet { id: 0, tag_id: TAG_ID_INT };
+        assert_eq!(unify(&a, &b).unwrap(), a);
+    }
+
+    #[test]
+    fn unify_method_sets_different_id() {
+        let a = Ty::MethodSet { id: 0, tag_id: TAG_ID_INT };
+        let b = Ty::MethodSet { id: 1, tag_id: TAG_ID_INT };
+        assert!(unify(&a, &b).is_err());
+    }
+
+    #[test]
+    fn unify_functions() {
+        let a = Ty::Fn { param: Box::new(Ty::Int), ret: Box::new(Ty::Bool) };
+        let b = Ty::Fn { param: Box::new(Ty::Int), ret: Box::new(Ty::Bool) };
+        assert_eq!(unify(&a, &b).unwrap(), a);
+    }
+
+    #[test]
+    fn unify_functions_unknown_fills() {
+        let a = Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Unknown) };
+        let b = Ty::Fn { param: Box::new(Ty::Int), ret: Box::new(Ty::Bool) };
+        assert_eq!(unify(&a, &b).unwrap(), b);
+    }
+
+    // ── Block and branch tests ──
+
+    #[test]
+    fn block_types_as_fn() {
+        let mut env = TyEnv::new();
+        // { 42 } is a lambda that returns Int
+        let expr = mir(MirKind::Block(mir(MirKind::Int(42))));
+        let ty = check(&expr, &mut env).unwrap();
+        assert_eq!(
+            ty,
+            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Int) }
+        );
+    }
+
+    #[test]
+    fn branch_same_type_arms() {
+        use crate::mir::{MirBranchArm, MirBranchPattern};
+        let mut env = TyEnv::new();
+        // { true -> 1, false -> 2 }
+        let expr = mir(MirKind::BranchBlock(vec![
+            MirBranchArm {
+                pattern: MirBranchPattern::Literal(mir(MirKind::Bool(true))),
+                guard: None,
+                body: mir(MirKind::Int(1)),
+            },
+            MirBranchArm {
+                pattern: MirBranchPattern::Literal(mir(MirKind::Bool(false))),
+                guard: None,
+                body: mir(MirKind::Int(2)),
+            },
+        ]));
+        let ty = check(&expr, &mut env).unwrap();
+        assert_eq!(
+            ty,
+            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Int) }
+        );
+    }
+
+    #[test]
+    fn branch_different_type_arms_error() {
+        use crate::mir::{MirBranchArm, MirBranchPattern};
+        let mut env = TyEnv::new();
+        // { true -> 1, false -> "hello" }
+        let expr = mir(MirKind::BranchBlock(vec![
+            MirBranchArm {
+                pattern: MirBranchPattern::Literal(mir(MirKind::Bool(true))),
+                guard: None,
+                body: mir(MirKind::Int(1)),
+            },
+            MirBranchArm {
+                pattern: MirBranchPattern::Literal(mir(MirKind::Bool(false))),
+                guard: None,
+                body: mir(MirKind::Str("hello".into())),
+            },
+        ]));
+        assert!(check(&expr, &mut env).is_err());
+    }
+
+    #[test]
+    fn branch_with_binding_pattern() {
+        use crate::mir::{MirBranchArm, MirBranchPattern};
+        let mut env = TyEnv::new();
+        // { x -> x } — catch-all returns Unknown (input type unknown)
+        let expr = mir(MirKind::BranchBlock(vec![
+            MirBranchArm {
+                pattern: MirBranchPattern::Binding("x".into()),
+                guard: None,
+                body: mir(MirKind::Ident("x".into())),
+            },
+        ]));
+        let ty = check(&expr, &mut env).unwrap();
+        assert_eq!(
+            ty,
+            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Unknown) }
+        );
+    }
+
+    // ── Q5: Two lexical method_set calls in branches → error ──
+
+    #[test]
+    fn q5_two_method_set_calls_in_branch_error() {
+        use crate::mir::{MirBranchArm, MirBranchPattern};
+        let mut env = TyEnv::new();
+        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        let fn_ty = Ty::Fn {
+            param: Box::new(Ty::Unknown),
+            ret: Box::new(Ty::Unknown),
+        };
+        env.bind("int_to_string".into(), fn_ty.clone());
+        env.bind("int_to_string_other".into(), fn_ty);
+        env.bind(
+            "method_set".into(),
+            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Unknown) },
+        );
+
+        // Helper to build method_set(Int, (to_string = f))
+        let make_ms = |f: &str| {
+            mir(MirKind::Call(
+                mir(MirKind::Ident("method_set".into())),
+                mir(MirKind::Struct(vec![
+                    MirField { label: None, value: mir(MirKind::Ident("Int".into())), is_spread: false },
+                    MirField {
+                        label: None,
+                        value: mir(MirKind::Struct(vec![MirField {
+                            label: Some("to_string".into()),
+                            value: mir(MirKind::Ident(f.into())),
+                            is_spread: false,
+                        }])),
+                        is_spread: false,
+                    },
+                ])),
+            ))
+        };
+
+        // { true -> method_set(Int, ...), false -> method_set(Int, ...) }
+        let branch = mir(MirKind::BranchBlock(vec![
+            MirBranchArm {
+                pattern: MirBranchPattern::Literal(mir(MirKind::Bool(true))),
+                guard: None,
+                body: make_ms("int_to_string"),
+            },
+            MirBranchArm {
+                pattern: MirBranchPattern::Literal(mir(MirKind::Bool(false))),
+                guard: None,
+                body: make_ms("int_to_string_other"),
+            },
+        ]));
+
+        // The two method_set calls produce different generative IDs → unification fails
+        let result = check(&branch, &mut env);
+        assert!(result.is_err(), "expected error from two different method_set types in branch");
+    }
+
+    // ── Q4: One method_set with varying struct arg → OK ──
+
+    #[test]
+    fn q4_one_method_set_with_varying_struct_ok() {
+        let mut env = TyEnv::new();
+        let fn_ty = Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Unknown) };
+        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        env.bind("int_to_string".into(), fn_ty.clone());
+        env.bind("int_to_string_other".into(), fn_ty.clone());
+        env.bind(
+            "method_set".into(),
+            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Unknown) },
+        );
+
+        // let int_ms1 = (to_string = int_to_string)
+        // let int_ms2 = (to_string = int_to_string_other)
+        // method_set(Int, in >> { int_ms1 | int_ms2 })
+        //
+        // The branch { int_ms1 | int_ms2 } unifies because both are
+        // Struct([(to_string, Fn(Unknown->Unknown))]) — same shape, same types.
+        // Then method_set sees the branch result (a function returning a struct) and accepts.
+
+        // Build: { true -> int_ms1, false -> int_ms2 }
+        use crate::mir::{MirBranchArm, MirBranchPattern};
+        let branch = mir(MirKind::BranchBlock(vec![
+            MirBranchArm {
+                pattern: MirBranchPattern::Literal(mir(MirKind::Bool(true))),
+                guard: None,
+                body: mir(MirKind::Struct(vec![MirField {
+                    label: Some("to_string".into()),
+                    value: mir(MirKind::Ident("int_to_string".into())),
+                    is_spread: false,
+                }])),
+            },
+            MirBranchArm {
+                pattern: MirBranchPattern::Literal(mir(MirKind::Bool(false))),
+                guard: None,
+                body: mir(MirKind::Struct(vec![MirField {
+                    label: Some("to_string".into()),
+                    value: mir(MirKind::Ident("int_to_string_other".into())),
+                    is_spread: false,
+                }])),
+            },
+        ]));
+
+        // The branch should typecheck fine — both arms are same-shaped structs
+        let branch_ty = check(&branch, &mut env).unwrap();
+        match &branch_ty {
+            Ty::Fn { ret, .. } => {
+                assert!(matches!(ret.as_ref(), Ty::Struct(_)));
+            }
+            other => panic!("expected Fn, got {:?}", other),
+        }
+    }
+
+    // ── MethodCall resolution tests ──
+
+    #[test]
+    fn method_call_resolves_via_method_set() {
+        let mut env = TyEnv::new();
+        // Set up: method_set(Int, (add = fn(Unknown->Int)))
+        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        let int_add_ty = Ty::Fn {
+            param: Box::new(Ty::Unknown),
+            ret: Box::new(Ty::Int),
+        };
+        env.bind("int_add".into(), int_add_ty);
+        env.bind(
+            "method_set".into(),
+            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Unknown) },
+        );
+
+        // Create the method set: method_set(Int, (add = int_add))
+        let ms_call = mir(MirKind::Call(
+            mir(MirKind::Ident("method_set".into())),
+            mir(MirKind::Struct(vec![
+                MirField { label: None, value: mir(MirKind::Ident("Int".into())), is_spread: false },
+                MirField {
+                    label: None,
+                    value: mir(MirKind::Struct(vec![MirField {
+                        label: Some("add".into()),
+                        value: mir(MirKind::Ident("int_add".into())),
+                        is_spread: false,
+                    }])),
+                    is_spread: false,
+                },
+            ])),
+        ));
+        let ms_ty = check(&ms_call, &mut env).unwrap();
+        assert!(matches!(ms_ty, Ty::MethodSet { tag_id, .. } if tag_id == TAG_ID_INT));
+
+        // Apply the method set and call 1.add(2)
+        let expr = mir(MirKind::Apply {
+            expr: ms_call.clone(),
+            body: mir(MirKind::MethodCall {
+                receiver: mir(MirKind::Int(1)),
+                method: "add".into(),
+                arg: mir(MirKind::Int(2)),
+            }),
+        });
+        // Note: ms_call is checked again inside Apply — this allocates a second ms id,
+        // but the Apply handler binds it. We need a fresh env for this test.
+        let mut env2 = TyEnv::new();
+        env2.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        env2.bind("int_add".into(), Ty::Fn {
+            param: Box::new(Ty::Unknown),
+            ret: Box::new(Ty::Int),
+        });
+        env2.bind(
+            "method_set".into(),
+            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Unknown) },
+        );
+        let ty = check(&expr, &mut env2).unwrap();
+        assert_eq!(ty, Ty::Int);
+    }
+
+    #[test]
+    fn method_call_on_struct_field() {
+        let mut env = TyEnv::new();
+        // A struct with a method-like field: (add = fn(Unknown->Int))
+        let struct_ty = Ty::Struct(vec![(
+            "add".into(),
+            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Int) },
+        )]);
+        env.bind("s".into(), struct_ty);
+        // s.add(1)
+        let expr = mir(MirKind::MethodCall {
+            receiver: mir(MirKind::Ident("s".into())),
+            method: "add".into(),
+            arg: mir(MirKind::Int(1)),
+        });
+        let ty = check(&expr, &mut env).unwrap();
+        assert_eq!(ty, Ty::Int);
     }
 
     #[test]

@@ -1,5 +1,7 @@
 use(core);
 
+let method_set = core.method_set;
+
 let _int_methods = method_set(core.Int, (
     add = core.int_add,
     subtract = core.int_subtract,

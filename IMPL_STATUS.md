@@ -76,7 +76,7 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | `and`, `or`, `not` as functions | Implemented | Builtins, not operators |
 | Branching blocks `{ pattern -> expr, ... }` | Implemented | Unified conditional / pattern matching form |
 | `if` guards in branch arms | Implemented | `pattern if guard -> expr` |
-| All arms must return same type | Not enforced | No type system |
+| All arms must return same type | Implemented | Type checker unifies branch arm types (`types::unify`) |
 | Non-exhaustive branch is error | Implemented | Runtime error (compile = eval in this language) |
 | Ternary sugar `{ a \| b }` | Implemented | Desugars to `{ true -> a, false -> b }`; short-circuits |
 | Parentheses for grouping | Implemented | |
@@ -158,7 +158,7 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | `_name` suppresses warnings | Implemented | `_` prefix suppresses unused-binding warnings |
 | Branching block pattern matching on tags | Implemented | `value >> { Tag(x) -> expr, ... }` |
 | `if` guards in branch arms | Implemented | `Ok(x) if x > 0 -> expr` |
-| All arms must return same type | Not enforced | No type system |
+| All arms must return same type | Implemented | Type checker unifies branch arm types (`types::unify`) |
 | Non-exhaustive branch is error | Implemented | Runtime error (compile = eval in this language) |
 | Strict destructuring (all fields consumed) | Implemented | |
 
@@ -237,8 +237,8 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 
 | Spec Feature | Status | Notes |
 |---|---|---|
-| Static typing | Not implemented | Dynamically typed; type errors at runtime |
-| Type inference | Not implemented | No types to infer |
+| Static typing | Partial | `types.rs`: forward-only checker validates std module and user code; method sets, branch arms, structs, field access, spread, destructuring |
+| Type inference | Partial | Forward propagation + branch arm unification; no bidirectional inference yet |
 | Occurs check | Not implemented | Totality maintained by disallowing recursion syntactically |
 | Compilation = evaluation | Implemented | Single pass |
 

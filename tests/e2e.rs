@@ -8025,9 +8025,9 @@ fn ternary_in_available() {
 
 #[test]
 fn ternary_short_circuits() {
-    // Only the taken branch is evaluated; the other should NOT cause an error
-    assert_val(r#"true >> { "ok" | 1 / 0 }"#, s("ok"));
-    assert_val(r#"false >> { 1 / 0 | "ok" }"#, s("ok"));
+    // Only the taken branch is evaluated; the other should NOT cause a runtime error
+    assert_val(r#"true >> { 1 | 1 / 0 }"#, int(1));
+    assert_val(r#"false >> { 1 / 0 | 1 }"#, int(1));
 }
 
 #[test]
@@ -8370,7 +8370,7 @@ fn default_arm_with_nested_block() {
 #[test]
 fn default_arm_with_function_call() {
     // Default expression has commas inside function args
-    assert_val(r#"5 >> { 1 -> "one", and(true, true) }"#, T);
+    assert_val(r#"5 >> { 1 -> and(true, false), and(true, true) }"#, T);
 }
 
 #[test]

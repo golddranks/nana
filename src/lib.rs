@@ -16,22 +16,15 @@ use value::Value;
 const STD_SOURCE: &str = include_str!("std.nana");
 
 /// Type-check the std module source against the core module type.
-/// Returns the std module's type.
-fn typecheck_std_module() -> Result<types::Ty, String> {
+/// Returns the std module's type and the TyEnv (which has the method set registry).
+fn typecheck_std_module() -> Result<(types::Ty, types::TyEnv), String> {
     let ast = parse(STD_SOURCE)?;
     let mir = mir::lower(&ast);
     let mut ty_env = types::TyEnv::new()
         .with_module("core", types::core_module_type());
-    // std.nana needs method_set as a bare binding
-    ty_env.bind_external(
-        "method_set".to_string(),
-        types::Ty::Fn {
-            param: Box::new(types::Ty::Unknown),
-            ret: Box::new(types::Ty::Unknown),
-        },
-    );
-    types::check(&mir, &mut ty_env)
-        .map_err(|e| format!("std module type error: {}", e))
+    let ty = types::check(&mir, &mut ty_env)
+        .map_err(|e| format!("std module type error: {}", e))?;
+    Ok((ty, ty_env))
 }
 
 /// Evaluate the std module source with core available, returning the std module value.
@@ -138,9 +131,9 @@ pub fn default_env_with_modules(modules: HashMap<String, Value>) -> Env {
 ///
 /// Also type-checks the std module and returns both the runtime env and the
 /// std module type (for use when type-checking user code).
-fn env_with_std_and_types() -> Result<(Env, types::Ty), String> {
+fn env_with_std_and_types() -> Result<(Env, types::Ty, types::TyEnv), String> {
     // Type-check std module first
-    let std_ty = typecheck_std_module()?;
+    let (std_ty, std_ty_env) = typecheck_std_module()?;
 
     let core = eval::build_core_module();
     let std_val = eval_std_module()?;
@@ -165,14 +158,14 @@ fn env_with_std_and_types() -> Result<(Env, types::Ty), String> {
             }
         }
     }
-    Ok((env, std_ty))
+    Ok((env, std_ty, std_ty_env))
 }
 
 /// Create an environment with core and std modules available.
 /// `std` is automatically bound and its prelude method sets are applied,
 /// so operators (+, ==, etc.) work without explicit `use(std)` or `apply()`.
 pub fn env_with_std() -> Result<Env, String> {
-    let (env, _std_ty) = env_with_std_and_types()?;
+    let (env, _std_ty, _std_ty_env) = env_with_std_and_types()?;
     Ok(env)
 }
 
@@ -185,7 +178,30 @@ pub fn run_with_std(source: &str) -> Result<Value, String> {
 /// Run source code with core and std modules, returning value + warnings.
 pub fn run_with_std_and_warnings(source: &str) -> Result<(Value, Vec<String>), String> {
     let mir = parse_and_lower(source)?;
-    let (env, _std_ty) = env_with_std_and_types()?;
+    let (env, std_ty, std_ty_env) = env_with_std_and_types()?;
+
+    // Type-check user code — inherit method set registry from std
+    let mut ty_env = types::TyEnv::new()
+        .with_module("core", types::core_module_type())
+        .with_module("std", std_ty.clone())
+        .with_method_sets_from(&std_ty_env);
+    ty_env.bind_external("std".to_string(), std_ty.clone());
+    // Auto-apply prelude method sets (mirrors runtime's env_with_std_and_types)
+    if let types::Ty::Struct(fields) = &std_ty {
+        for (label, ty) in fields {
+            if label == "prelude" {
+                if let types::Ty::Struct(prelude_fields) = ty {
+                    for (_, ms_ty) in prelude_fields {
+                        if matches!(ms_ty, types::Ty::MethodSet { .. }) {
+                            ty_env.bind_external("\0ms".to_string(), ms_ty.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    types::check(&mir, &mut ty_env)?;
+
     let (val, final_env) = eval::eval_toplevel(&mir, &env, &Value::Unit)
         .map_err(|e| format!("runtime error: {}", e))?;
     let warnings = final_env.unused_warnings();

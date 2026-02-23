@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::ast::*;
+use crate::ast::{CmpOp, Pattern, PatField, ArrayPat};
+use crate::mir::*;
 use crate::value::*;
 
 static CLOSURE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -9,60 +10,47 @@ fn next_closure_id() -> u64 {
     CLOSURE_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-pub fn eval(expr: &Expr, env: &Env, input: &Value) -> Result<Value, String> {
+pub fn eval(expr: &Mir, env: &Env, input: &Value) -> Result<Value, String> {
     match expr.as_ref() {
         // ── Literals ──
-        ExprKind::Int(n) => Ok(Value::Int(*n)),
-        ExprKind::Float(f) => Ok(Value::Float(*f)),
-        ExprKind::Bool(b) => Ok(Value::Bool(*b)),
-        ExprKind::Str(s) => Ok(Value::Str(s.clone())),
-        ExprKind::StringInterp(parts) => {
-            let mut result = String::new();
-            for part in parts {
-                match part {
-                    StringInterpPart::Literal(s) => result.push_str(s),
-                    StringInterpPart::Expr(expr) => {
-                        let val = eval(expr, env, input)?;
-                        result.push_str(&val.print_string());
-                    }
-                }
-            }
-            Ok(Value::Str(result))
-        }
-        ExprKind::Char(c) => Ok(Value::Char(*c)),
-        ExprKind::Byte(b) => Ok(Value::Byte(*b)),
-        ExprKind::Unit => Ok(Value::Unit),
+        MirKind::Int(n) => Ok(Value::Int(*n)),
+        MirKind::Float(f) => Ok(Value::Float(*f)),
+        MirKind::Bool(b) => Ok(Value::Bool(*b)),
+        MirKind::Str(s) => Ok(Value::Str(s.clone())),
+        MirKind::Char(c) => Ok(Value::Char(*c)),
+        MirKind::Byte(b) => Ok(Value::Byte(*b)),
+        MirKind::Unit => Ok(Value::Unit),
 
         // ── Variable reference ──
-        ExprKind::Ident(name) if name == "in" => Ok(input.clone()),
-        ExprKind::Ident(name) => env
+        MirKind::Ident(name) if name == "in" => Ok(input.clone()),
+        MirKind::Ident(name) => env
             .get(name)
             .cloned()
             .ok_or_else(|| format!("undefined variable: {}", name)),
 
         // ── Block (lambda) ──
-        ExprKind::Block(body) => Ok(Value::Closure {
+        MirKind::Block(body) => Ok(Value::Closure {
             id: next_closure_id(),
             body: body.clone(),
             env: env.clone(),
         }),
 
         // ── Branching block (pattern matching lambda) ──
-        ExprKind::BranchBlock(arms) => Ok(Value::BranchClosure {
+        MirKind::BranchBlock(arms) => Ok(Value::BranchClosure {
             id: next_closure_id(),
             arms: arms.clone(),
             env: env.clone(),
         }),
 
         // ── Array ──
-        ExprKind::Array(elems) => {
+        MirKind::Array(elems) => {
             let values: Result<Vec<Value>, String> =
                 elems.iter().map(|e| eval(e, env, input)).collect();
             Ok(Value::Array(values?))
         }
 
         // ── Struct ──
-        ExprKind::Struct(fields) => {
+        MirKind::Struct(fields) => {
             let explicit_labels: Vec<String> = fields
                 .iter()
                 .filter(|f| !f.is_spread && f.label.is_some())
@@ -121,7 +109,7 @@ pub fn eval(expr: &Expr, env: &Env, input: &Value) -> Result<Value, String> {
         }
 
         // ── Field access ──
-        ExprKind::FieldAccess(expr, field) => {
+        MirKind::FieldAccess(expr, field) => {
             let val = eval(expr, env, input)?;
             match val {
                 Value::Struct(fields) => {
@@ -137,7 +125,7 @@ pub fn eval(expr: &Expr, env: &Env, input: &Value) -> Result<Value, String> {
         }
 
         // ── Method call ──
-        ExprKind::MethodCall { receiver, method, arg } => {
+        MirKind::MethodCall { receiver, method, arg } => {
             let recv = eval(receiver, env, input)?;
             // If the receiver is a struct with a field matching the method name,
             // treat this as field access + function call rather than a method call.
@@ -161,89 +149,64 @@ pub fn eval(expr: &Expr, env: &Env, input: &Value) -> Result<Value, String> {
                     return apply(&func, combined);
                 }
             }
+            // Fallback: built-in comparison for types without method sets
+            let arg_val = eval(arg, env, input)?;
+            if let Some(cmp_op) = method_to_cmp_op(method) {
+                return eval_compare(cmp_op, &recv, &arg_val);
+            }
             Err(format!("no method '{}' on {}", method, recv))
         }
 
         // ── Function call ──
-        ExprKind::Call(func_expr, arg_expr) => {
+        MirKind::Call(func_expr, arg_expr) => {
             let func = eval(func_expr, env, input)?;
             let arg = eval(arg_expr, env, input)?;
             apply(&func, arg)
         }
 
-        // ── Unary minus ──
-        ExprKind::UnaryMinus(expr) => {
-            let val = eval(expr, env, input)?;
-            match val {
-                Value::Int(n) => n
-                    .checked_neg()
-                    .map(Value::Int)
-                    .ok_or_else(|| "integer overflow in negation".to_string()),
-                Value::Float(f) => Ok(Value::Float(-f)),
-                _ => Err("unary minus on non-numeric value".to_string()),
-            }
+        // ── Bind ──
+        MirKind::Bind { name, value, body } => {
+            let val = eval(value, env, input)?;
+            let new_env = env.bind(name.clone(), val);
+            eval(body, &new_env, input)
         }
 
-        // ── Binary operators ──
-        ExprKind::BinOp(op, lhs, rhs) => {
-            let l = eval(lhs, env, input)?;
-            let r = eval(rhs, env, input)?;
-            eval_binop(*op, &l, &r)
-        }
-
-        // ── Comparisons ──
-        ExprKind::Compare(op, lhs, rhs) => {
-            let l = eval(lhs, env, input)?;
-            let r = eval(rhs, env, input)?;
-            eval_compare(*op, &l, &r)
-        }
-
-        // ── Pipe ──
-        ExprKind::Pipe(lhs, rhs) => {
-            let lhs_val = eval(lhs, env, input)?;
-            eval_pipe(&lhs_val, rhs, env, input)
-        }
-
-        // ── Let binding ──
-        ExprKind::Let { pattern, body } => {
+        // ── Let binding (pattern destructuring) ──
+        MirKind::Let { pattern, body } => {
             let new_env = bind_pattern(pattern, input, env)?;
             let new_env = new_env.bind("\0".to_string(), input.clone());
             eval(body, &new_env, input)
         }
 
         // ── Let array destructuring ──
-        ExprKind::LetArray { patterns, body } => {
+        MirKind::LetArray { patterns, body } => {
             let new_env = bind_array_pattern(patterns, input, env)?;
             let new_env = new_env.bind("\0".to_string(), input.clone());
             eval(body, &new_env, input)
         }
 
+        // ── Pipe (for let/letarray/apply targets) ──
+        MirKind::Pipe(lhs, rhs) => {
+            let lhs_val = eval(lhs, env, input)?;
+            eval_pipe(&lhs_val, rhs, env, input)
+        }
+
         // ── NewTag ──
-        ExprKind::NewTag(id, name) => Ok(Value::TagConstructor {
+        MirKind::NewTag(id, name) => Ok(Value::TagConstructor {
             id: *id,
             name: name
                 .clone()
                 .unwrap_or_else(|| format!("tag_{}", id)),
         }),
 
-        // ── Range ──
-        ExprKind::Range(start, end) => {
-            let s = eval(start, env, input)?;
-            let e = eval(end, env, input)?;
-            Ok(Value::Struct(vec![
-                ("start".to_string(), s),
-                ("end".to_string(), e),
-            ]))
-        }
-
         // ── Import ──
-        ExprKind::Import(name) => env
+        MirKind::Import(name) => env
             .get_module(name)
             .cloned()
             .ok_or_else(|| format!("module not provided: {}", name)),
 
         // ── Apply (method set scope) ──
-        ExprKind::Apply { expr, body } => {
+        MirKind::Apply { expr, body } => {
             let ms = eval(expr, env, input)?;
             match &ms {
                 Value::MethodSet { .. } => {
@@ -253,9 +216,6 @@ pub fn eval(expr: &Expr, env: &Env, input: &Value) -> Result<Value, String> {
                 _ => Err("apply: expected a method set value".to_string()),
             }
         }
-
-        // ── Group (transparent) ──
-        ExprKind::Group(inner) => eval(inner, env, input),
     }
 }
 
@@ -278,50 +238,41 @@ pub fn apply(func: &Value, arg: Value) -> Result<Value, String> {
     }
 }
 
-/// Evaluate pipe: lhs >> rhs.
-fn eval_pipe(lhs_val: &Value, rhs: &Expr, env: &Env, input: &Value) -> Result<Value, String> {
-    match rhs.as_ref() {
-        // value >> f(args) → f(value, args)
-        ExprKind::Call(func_expr, arg_expr) => {
-            let func = eval(func_expr, env, input)?;
-            let extra_arg = eval(arg_expr, env, input)?;
-            let combined = match extra_arg {
-                Value::Struct(mut fields) => {
-                    let mut new_fields = vec![("0".to_string(), lhs_val.clone())];
-                    for (label, val) in fields.drain(..) {
-                        if let Ok(n) = label.parse::<u64>() {
-                            new_fields.push(((n + 1).to_string(), val));
-                        } else {
-                            new_fields.push((label, val));
+/// If a module value has a "prelude" field that is a struct of method sets,
+/// bind all those method sets into the environment (auto-apply).
+fn apply_prelude(module: &Value, env: &Env) -> Env {
+    let mut result = env.clone();
+    if let Value::Struct(fields) = module {
+        for (label, val) in fields {
+            if label == "prelude" {
+                if let Value::Struct(prelude_fields) = val {
+                    for (_, ms_val) in prelude_fields {
+                        if matches!(ms_val, Value::MethodSet { .. }) {
+                            result = result.bind(format!("\0ms"), ms_val.clone());
                         }
                     }
-                    Value::Struct(new_fields)
                 }
-                Value::Unit => lhs_val.clone(),
-                single => Value::Struct(vec![
-                    ("0".to_string(), lhs_val.clone()),
-                    ("1".to_string(), single),
-                ]),
-            };
-            apply(&func, combined)
+            }
         }
+    }
+    result
+}
 
-        // value >> let { ... }
-        ExprKind::Let { pattern, body } => {
+/// Evaluate pipe for let/letarray/apply targets that need special input handling.
+fn eval_pipe(lhs_val: &Value, rhs: &Mir, env: &Env, input: &Value) -> Result<Value, String> {
+    match rhs.as_ref() {
+        MirKind::Let { pattern, body } => {
             let new_env = bind_pattern(pattern, lhs_val, env)?;
-            // Bind the hidden passthrough variable so multi-field patterns
-            // can pass through the original piped value.
+            let new_env = apply_prelude(lhs_val, &new_env);
             let new_env = new_env.bind("\0".to_string(), lhs_val.clone());
             eval(body, &new_env, input)
         }
-
-        ExprKind::LetArray { patterns, body } => {
+        MirKind::LetArray { patterns, body } => {
             let new_env = bind_array_pattern(patterns, lhs_val, env)?;
             let new_env = new_env.bind("\0".to_string(), lhs_val.clone());
             eval(body, &new_env, input)
         }
-
-        ExprKind::Apply { expr: ms_expr, body } => {
+        MirKind::Apply { expr: ms_expr, body } => {
             let ms = eval(ms_expr, env, input)?;
             match &ms {
                 Value::MethodSet { .. } => {
@@ -331,52 +282,8 @@ fn eval_pipe(lhs_val: &Value, rhs: &Expr, env: &Env, input: &Value) -> Result<Va
                 _ => Err("apply: expected a method set value".to_string()),
             }
         }
-
-        // value >> receiver.method(args) → prepend piped value to method args
-        ExprKind::MethodCall { receiver, method, arg } => {
-            let recv = eval(receiver, env, input)?;
-            let extra_arg = eval(arg, env, input)?;
-            let combined = match extra_arg {
-                Value::Struct(mut fields) => {
-                    let mut new_fields = vec![("0".to_string(), lhs_val.clone())];
-                    for (label, val) in fields.drain(..) {
-                        if let Ok(n) = label.parse::<u64>() {
-                            new_fields.push(((n + 1).to_string(), val));
-                        } else {
-                            new_fields.push((label, val));
-                        }
-                    }
-                    Value::Struct(new_fields)
-                }
-                Value::Unit => lhs_val.clone(),
-                single => Value::Struct(vec![
-                    ("0".to_string(), lhs_val.clone()),
-                    ("1".to_string(), single),
-                ]),
-            };
-            // Struct field takes priority over method dispatch (BUG-45)
-            if let Value::Struct(ref fields) = recv {
-                if let Some((_, field_val)) = fields.iter().find(|(l, _)| l == method) {
-                    let func = field_val.clone();
-                    return apply(&func, combined);
-                }
-            }
-            // Check method sets for tagged values and primitive types
-            let type_id = match &recv {
-                Value::Tagged { id, .. } => Some(*id),
-                other => builtin_tag_id(other),
-            };
-            if let Some(tid) = type_id {
-                if let Some(func) = env.find_method_in_method_sets(tid, method) {
-                    let func = func.clone();
-                    let recv_combined = prepend_arg(&recv, combined);
-                    return apply(&func, recv_combined);
-                }
-            }
-            Err(format!("no method '{}' on {}", method, recv))
-        }
-
-        // value >> expr — eval rhs to a function, apply to value
+        // Fallback — shouldn't normally be reached since lower() only
+        // creates Pipe for let/letarray/apply targets
         _ => {
             let rhs_val = eval(rhs, env, input)?;
             apply(&rhs_val, lhs_val.clone())
@@ -385,7 +292,7 @@ fn eval_pipe(lhs_val: &Value, rhs: &Expr, env: &Env, input: &Value) -> Result<Va
 }
 
 /// Evaluate branching: match scrutinee against branch arms.
-fn eval_branch(scrutinee: &Value, arms: &[BranchArm], env: &Env, input: &Value) -> Result<Value, String> {
+fn eval_branch(scrutinee: &Value, arms: &[MirBranchArm], env: &Env, input: &Value) -> Result<Value, String> {
     for arm in arms {
         if let Some(arm_env) = match_branch_pattern(&arm.pattern, scrutinee, env)? {
             // Check guard
@@ -405,10 +312,10 @@ fn eval_branch(scrutinee: &Value, arms: &[BranchArm], env: &Env, input: &Value) 
 
 /// Try to match a branch pattern against a value.
 /// Returns Some(env) if it matches, None if it doesn't.
-fn match_branch_pattern(pattern: &BranchPattern, value: &Value, env: &Env) -> Result<Option<Env>, String> {
+fn match_branch_pattern(pattern: &MirBranchPattern, value: &Value, env: &Env) -> Result<Option<Env>, String> {
     match pattern {
-        BranchPattern::Discard => Ok(Some(env.clone())),
-        BranchPattern::Binding(name) => {
+        MirBranchPattern::Discard => Ok(Some(env.clone())),
+        MirBranchPattern::Binding(name) => {
             // Check if the name refers to a tag constructor in the environment
             if let Some(tag_ctor) = env.get(name) {
                 if let Value::TagConstructor { id: ctor_id, .. } = tag_ctor {
@@ -430,7 +337,7 @@ fn match_branch_pattern(pattern: &BranchPattern, value: &Value, env: &Env) -> Re
             // Not a tag — catch-all binding
             Ok(Some(env.bind(name.clone(), value.clone())))
         }
-        BranchPattern::Tag(tag_name, binding) => {
+        MirBranchPattern::Tag(tag_name, binding) => {
             // Look up the tag constructor
             let tag_ctor = env.get(tag_name)
                 .ok_or_else(|| format!("undefined tag in branch pattern: {}", tag_name))?;
@@ -444,10 +351,10 @@ fn match_branch_pattern(pattern: &BranchPattern, value: &Value, env: &Env) -> Re
                     let mut arm_env = env.clone();
                     if let Some(b) = binding {
                         match b {
-                            BranchBinding::Name(name) => {
+                            crate::ast::BranchBinding::Name(name) => {
                                 arm_env = arm_env.bind(name.clone(), payload.as_ref().clone());
                             }
-                            BranchBinding::Discard => {}
+                            crate::ast::BranchBinding::Discard => {}
                         }
                     }
                     return Ok(Some(arm_env));
@@ -455,7 +362,7 @@ fn match_branch_pattern(pattern: &BranchPattern, value: &Value, env: &Env) -> Re
             }
             Ok(None)
         }
-        BranchPattern::Literal(lit_expr) => {
+        MirBranchPattern::Literal(lit_expr) => {
             // Evaluate the literal pattern (it's always a simple literal)
             let lit_val = eval(lit_expr, env, &Value::Unit)?;
             // Compare with the scrutinee; type mismatches mean no match
@@ -464,6 +371,47 @@ fn match_branch_pattern(pattern: &BranchPattern, value: &Value, env: &Env) -> Re
                 Ok(_) | Err(_) => Ok(None),
             }
         }
+    }
+}
+
+
+/// Extract the receiver (field "0") as an array, and the remaining arg.
+/// When called via method set dispatch, the receiver is prepended as field "0".
+fn extract_receiver_array(arg: &Value, name: &str) -> Result<(Vec<Value>, Value), String> {
+    match arg {
+        Value::Array(elems) => Ok((elems.clone(), Value::Unit)),
+        Value::Struct(fields) => {
+            let recv = fields.iter().find(|(l, _)| l == "0")
+                .map(|(_, v)| v)
+                .ok_or_else(|| format!("{}: expected array as first argument", name))?;
+            let elems = match recv {
+                Value::Array(e) => e.clone(),
+                _ => return Err(format!("{}: expected array as first argument", name)),
+            };
+            // Remaining arg: if there's a field "1" and only 2 positional fields, return it directly
+            let rest = extract_rest_arg(fields);
+            Ok((elems, rest))
+        }
+        _ => Err(format!("{}: expected array as first argument", name)),
+    }
+}
+
+/// Extract the receiver (field "0") as a string, and the remaining arg.
+fn extract_receiver_str(arg: &Value, name: &str) -> Result<(String, Value), String> {
+    match arg {
+        Value::Str(s) => Ok((s.clone(), Value::Unit)),
+        Value::Struct(fields) => {
+            let recv = fields.iter().find(|(l, _)| l == "0")
+                .map(|(_, v)| v)
+                .ok_or_else(|| format!("{}: expected string as first argument", name))?;
+            let s = match recv {
+                Value::Str(s) => s.clone(),
+                _ => return Err(format!("{}: expected string as first argument", name)),
+            };
+            let rest = extract_rest_arg(fields);
+            Ok((s, rest))
+        }
+        _ => Err(format!("{}: expected string as first argument", name)),
     }
 }
 
@@ -481,34 +429,25 @@ fn bind_pattern(pattern: &Pattern, value: &Value, env: &Env) -> Result<Env, Stri
                 _ => return Err("cannot destructure non-struct value with let(...)".to_string()),
             };
 
-            // Determine if we should bind by name or positionally.
-            // Check if all pattern field names (non-rest, non-labeled) match named fields in the struct.
             let unlabeled_fields: Vec<&PatField> = fields.iter()
                 .filter(|f| !f.is_rest && f.label.is_none() && f.binding != "_")
                 .collect();
 
             let has_explicit_labels = fields.iter().any(|f| f.label.is_some());
 
-            // If there are explicit labels (let(a=x)), use named binding always.
-            // If all pattern names match struct field names, bind by name.
-            // Otherwise, bind positionally.
             let bind_by_name = if has_explicit_labels {
                 true
             } else if unlabeled_fields.is_empty() {
-                // Only rest/discard patterns — use named if struct has named fields
                 struct_fields.iter().any(|(l, _)| l.parse::<u64>().is_err())
             } else {
-                // Check if ALL unlabeled field names exist as named fields in the struct
                 let all_match = unlabeled_fields.iter().all(|pf| {
                     struct_fields.iter().any(|(l, _)| l == &pf.binding)
                 });
                 if all_match {
                     true
                 } else {
-                    // Check if it's a positional struct
                     let has_positional = struct_fields.iter().any(|(l, _)| l.parse::<u64>().is_ok());
                     if has_positional {
-                        // Check that NONE of the names match (all-or-nothing)
                         let any_match = unlabeled_fields.iter().any(|pf| {
                             struct_fields.iter().any(|(l, _)| l == &pf.binding && l.parse::<u64>().is_err())
                         });
@@ -521,10 +460,7 @@ fn bind_pattern(pattern: &Pattern, value: &Value, env: &Env) -> Result<Env, Stri
                             .find(|pf| !struct_fields.iter().any(|(l, _)| l == &pf.binding))
                             .map(|pf| pf.binding.as_str())
                             .unwrap_or(&unlabeled_fields[0].binding);
-                        return Err(format!(
-                            "field '{}' not found in struct",
-                            missing
-                        ));
+                        return Err(format!("field '{}' not found in struct", missing));
                     }
                 }
             };
@@ -551,7 +487,6 @@ fn bind_pattern(pattern: &Pattern, value: &Value, env: &Env) -> Result<Env, Stri
                         new_env = new_env.bind(pat_field.binding.clone(), Value::Struct(rest));
                     }
                 } else if let Some(label) = &pat_field.label {
-                    // Explicit named field: let(label=binding)
                     let found = struct_fields
                         .iter()
                         .enumerate()
@@ -567,12 +502,10 @@ fn bind_pattern(pattern: &Pattern, value: &Value, env: &Env) -> Result<Env, Stri
                     }
                 } else if bind_by_name {
                     if pat_field.binding == "_" {
-                        // Discard — consume the next unused field positionally
                         if let Some((i, _)) = struct_fields.iter().enumerate().find(|(i, _)| !used_indices.contains(i)) {
                             used_indices.push(i);
                         }
                     } else {
-                        // Bind by name: look up field by pattern binding name
                         let found = struct_fields
                             .iter()
                             .enumerate()
@@ -588,7 +521,6 @@ fn bind_pattern(pattern: &Pattern, value: &Value, env: &Env) -> Result<Env, Stri
                         }
                     }
                 } else {
-                    // Bind positionally
                     let idx = used_indices.len();
                     let pos_label = idx.to_string();
                     let found = struct_fields
@@ -611,7 +543,6 @@ fn bind_pattern(pattern: &Pattern, value: &Value, env: &Env) -> Result<Env, Stri
                     }
                 }
             }
-            // Check for unconsumed fields
             let has_rest = fields.iter().any(|f| f.is_rest);
             if !has_rest && used_indices.len() < struct_fields.len() {
                 return Err(format!(
@@ -631,7 +562,6 @@ fn bind_array_pattern(
     value: &Value,
     env: &Env,
 ) -> Result<Env, String> {
-    // For strings, convert to an array of single-character strings for destructuring
     let string_parts: Vec<Value>;
     let elems = match value {
         Value::Array(e) => e,
@@ -694,43 +624,117 @@ fn bind_array_pattern(
     Ok(new_env)
 }
 
-/// Extract the receiver (field "0") as an array, and the remaining arg.
-/// When called via method set dispatch, the receiver is prepended as field "0".
-fn extract_receiver_array(arg: &Value, name: &str) -> Result<(Vec<Value>, Value), String> {
+/// Extract the receiver (field "0") as an int, and the remaining arg.
+fn extract_receiver_int(arg: &Value, name: &str) -> Result<(i64, Value), String> {
     match arg {
-        Value::Array(elems) => Ok((elems.clone(), Value::Unit)),
+        Value::Int(n) => Ok((*n, Value::Unit)),
         Value::Struct(fields) => {
             let recv = fields.iter().find(|(l, _)| l == "0")
                 .map(|(_, v)| v)
-                .ok_or_else(|| format!("{}: expected array as first argument", name))?;
-            let elems = match recv {
-                Value::Array(e) => e.clone(),
-                _ => return Err(format!("{}: expected array as first argument", name)),
+                .ok_or_else(|| format!("{}: expected int as first argument", name))?;
+            let n = match recv {
+                Value::Int(n) => *n,
+                _ => return Err(format!("{}: expected int as first argument", name)),
             };
-            // Remaining arg: if there's a field "1" and only 2 positional fields, return it directly
             let rest = extract_rest_arg(fields);
-            Ok((elems, rest))
+            Ok((n, rest))
         }
-        _ => Err(format!("{}: expected array as first argument", name)),
+        _ => Err(format!("{}: expected int as first argument", name)),
     }
 }
 
-/// Extract the receiver (field "0") as a string, and the remaining arg.
-fn extract_receiver_str(arg: &Value, name: &str) -> Result<(String, Value), String> {
+/// Extract the receiver (field "0") as a float, and the remaining arg.
+fn extract_receiver_float(arg: &Value, name: &str) -> Result<(f64, Value), String> {
     match arg {
-        Value::Str(s) => Ok((s.clone(), Value::Unit)),
+        Value::Float(f) => Ok((*f, Value::Unit)),
         Value::Struct(fields) => {
             let recv = fields.iter().find(|(l, _)| l == "0")
                 .map(|(_, v)| v)
-                .ok_or_else(|| format!("{}: expected string as first argument", name))?;
-            let s = match recv {
-                Value::Str(s) => s.clone(),
-                _ => return Err(format!("{}: expected string as first argument", name)),
+                .ok_or_else(|| format!("{}: expected float as first argument", name))?;
+            let f = match recv {
+                Value::Float(f) => *f,
+                _ => return Err(format!("{}: expected float as first argument", name)),
             };
             let rest = extract_rest_arg(fields);
-            Ok((s, rest))
+            Ok((f, rest))
         }
-        _ => Err(format!("{}: expected string as first argument", name)),
+        _ => Err(format!("{}: expected float as first argument", name)),
+    }
+}
+
+/// Extract the receiver (field "0") as a bool, and the remaining arg.
+fn extract_receiver_bool(arg: &Value, name: &str) -> Result<(bool, Value), String> {
+    match arg {
+        Value::Bool(b) => Ok((*b, Value::Unit)),
+        Value::Struct(fields) => {
+            let recv = fields.iter().find(|(l, _)| l == "0")
+                .map(|(_, v)| v)
+                .ok_or_else(|| format!("{}: expected bool as first argument", name))?;
+            let b = match recv {
+                Value::Bool(b) => *b,
+                _ => return Err(format!("{}: expected bool as first argument", name)),
+            };
+            let rest = extract_rest_arg(fields);
+            Ok((b, rest))
+        }
+        _ => Err(format!("{}: expected bool as first argument", name)),
+    }
+}
+
+/// Extract the receiver (field "0") as a char, and the remaining arg.
+fn extract_receiver_char(arg: &Value, name: &str) -> Result<(char, Value), String> {
+    match arg {
+        Value::Char(c) => Ok((*c, Value::Unit)),
+        Value::Struct(fields) => {
+            let recv = fields.iter().find(|(l, _)| l == "0")
+                .map(|(_, v)| v)
+                .ok_or_else(|| format!("{}: expected char as first argument", name))?;
+            let c = match recv {
+                Value::Char(c) => *c,
+                _ => return Err(format!("{}: expected char as first argument", name)),
+            };
+            let rest = extract_rest_arg(fields);
+            Ok((c, rest))
+        }
+        _ => Err(format!("{}: expected char as first argument", name)),
+    }
+}
+
+/// Extract the receiver (field "0") as a byte, and the remaining arg.
+fn extract_receiver_byte(arg: &Value, name: &str) -> Result<(u8, Value), String> {
+    match arg {
+        Value::Byte(b) => Ok((*b, Value::Unit)),
+        Value::Struct(fields) => {
+            let recv = fields.iter().find(|(l, _)| l == "0")
+                .map(|(_, v)| v)
+                .ok_or_else(|| format!("{}: expected byte as first argument", name))?;
+            let b = match recv {
+                Value::Byte(b) => *b,
+                _ => return Err(format!("{}: expected byte as first argument", name)),
+            };
+            let rest = extract_rest_arg(fields);
+            Ok((b, rest))
+        }
+        _ => Err(format!("{}: expected byte as first argument", name)),
+    }
+}
+
+/// Extract the receiver (field "0") as unit, and the remaining arg.
+fn extract_receiver_unit(arg: &Value, name: &str) -> Result<Value, String> {
+    match arg {
+        Value::Unit => Ok(Value::Unit),
+        Value::Struct(fields) => {
+            let recv = fields.iter().find(|(l, _)| l == "0")
+                .map(|(_, v)| v)
+                .ok_or_else(|| format!("{}: expected unit as first argument", name))?;
+            match recv {
+                Value::Unit => {}
+                _ => return Err(format!("{}: expected unit as first argument", name)),
+            }
+            let rest = extract_rest_arg(fields);
+            Ok(rest)
+        }
+        _ => Err(format!("{}: expected unit as first argument", name)),
     }
 }
 
@@ -807,66 +811,15 @@ fn prepend_arg(receiver: &Value, arg: Value) -> Value {
     }
 }
 
-// ── Binary operators ─────────────────────────────────────────────
-
-fn eval_binop(op: BinOp, lhs: &Value, rhs: &Value) -> Result<Value, String> {
-    match (op, lhs, rhs) {
-        // Int arithmetic
-        (BinOp::Add, Value::Int(a), Value::Int(b)) => a
-            .checked_add(*b)
-            .map(Value::Int)
-            .ok_or_else(|| "integer overflow in addition".to_string()),
-        (BinOp::Sub, Value::Int(a), Value::Int(b)) => a
-            .checked_sub(*b)
-            .map(Value::Int)
-            .ok_or_else(|| "integer overflow in subtraction".to_string()),
-        (BinOp::Mul, Value::Int(a), Value::Int(b)) => a
-            .checked_mul(*b)
-            .map(Value::Int)
-            .ok_or_else(|| "integer overflow in multiplication".to_string()),
-        (BinOp::Div, Value::Int(_), Value::Int(0)) => Err("division by zero".to_string()),
-        (BinOp::Div, Value::Int(a), Value::Int(b)) => a
-            .checked_div(*b)
-            .map(Value::Int)
-            .ok_or_else(|| "integer overflow in division".to_string()),
-
-        // Float arithmetic
-        (BinOp::Add, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
-        (BinOp::Sub, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
-        (BinOp::Mul, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
-        (BinOp::Div, Value::Float(_), Value::Float(b)) if *b == 0.0 => {
-            Err("division by zero".to_string())
-        }
-        (BinOp::Div, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
-
-        // Mixed int/float
-        (BinOp::Add, Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 + b)),
-        (BinOp::Add, Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + *b as f64)),
-        (BinOp::Sub, Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 - b)),
-        (BinOp::Sub, Value::Float(a), Value::Int(b)) => Ok(Value::Float(a - *b as f64)),
-        (BinOp::Mul, Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 * b)),
-        (BinOp::Mul, Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * *b as f64)),
-        (BinOp::Div, Value::Int(_), Value::Float(b)) if *b == 0.0 => {
-            Err("division by zero".to_string())
-        }
-        (BinOp::Div, Value::Int(a), Value::Float(b)) => Ok(Value::Float(*a as f64 / b)),
-        (BinOp::Div, Value::Float(_), Value::Int(0)) => Err("division by zero".to_string()),
-        (BinOp::Div, Value::Float(a), Value::Int(b)) => Ok(Value::Float(a / *b as f64)),
-
-        // String concatenation
-        (BinOp::Add, Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{}{}", a, b))),
-
-        // Array concatenation
-        (BinOp::Add, Value::Array(a), Value::Array(b)) => {
-            let mut result = a.clone();
-            result.extend(b.iter().cloned());
-            Ok(Value::Array(result))
-        }
-
-        _ => Err(format!(
-            "invalid operands for {:?}: {} and {}",
-            op, lhs, rhs
-        )),
+fn method_to_cmp_op(method: &str) -> Option<CmpOp> {
+    match method {
+        "eq" => Some(CmpOp::Eq),
+        "not_eq" => Some(CmpOp::NotEq),
+        "lt" => Some(CmpOp::Lt),
+        "gt" => Some(CmpOp::Gt),
+        "lt_eq" => Some(CmpOp::LtEq),
+        "gt_eq" => Some(CmpOp::GtEq),
+        _ => None,
     }
 }
 
@@ -1398,6 +1351,325 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
                 _ => Err("replace: expected (pattern, replacement)".to_string()),
             }
         }
+        // ── Int operator builtins ──
+        "int_add" => {
+            let (a, rest) = extract_receiver_int(&arg, "int_add")?;
+            match rest {
+                Value::Int(b) => a.checked_add(b).map(Value::Int)
+                    .ok_or_else(|| "integer overflow in addition".to_string()),
+                Value::Float(b) => Ok(Value::Float(a as f64 + b)),
+                _ => Err("add: expected numeric argument".to_string()),
+            }
+        }
+        "int_subtract" => {
+            let (a, rest) = extract_receiver_int(&arg, "int_subtract")?;
+            match rest {
+                Value::Int(b) => a.checked_sub(b).map(Value::Int)
+                    .ok_or_else(|| "integer overflow in subtraction".to_string()),
+                Value::Float(b) => Ok(Value::Float(a as f64 - b)),
+                _ => Err("subtract: expected numeric argument".to_string()),
+            }
+        }
+        "int_times" => {
+            let (a, rest) = extract_receiver_int(&arg, "int_times")?;
+            match rest {
+                Value::Int(b) => a.checked_mul(b).map(Value::Int)
+                    .ok_or_else(|| "integer overflow in multiplication".to_string()),
+                Value::Float(b) => Ok(Value::Float(a as f64 * b)),
+                _ => Err("times: expected numeric argument".to_string()),
+            }
+        }
+        "int_divided_by" => {
+            let (a, rest) = extract_receiver_int(&arg, "int_divided_by")?;
+            match rest {
+                Value::Int(0) => Err("division by zero".to_string()),
+                Value::Int(b) => a.checked_div(b).map(Value::Int)
+                    .ok_or_else(|| "integer overflow in division".to_string()),
+                Value::Float(b) if b == 0.0 => Err("division by zero".to_string()),
+                Value::Float(b) => Ok(Value::Float(a as f64 / b)),
+                _ => Err("divided_by: expected numeric argument".to_string()),
+            }
+        }
+        "int_negate" => {
+            let (a, _) = extract_receiver_int(&arg, "int_negate")?;
+            a.checked_neg().map(Value::Int)
+                .ok_or_else(|| "integer overflow in negation".to_string())
+        }
+        "int_eq" => {
+            let (a, rest) = extract_receiver_int(&arg, "int_eq")?;
+            match rest { Value::Int(b) => Ok(Value::Bool(a == b)), _ => Err("eq: expected int".to_string()) }
+        }
+        "int_not_eq" => {
+            let (a, rest) = extract_receiver_int(&arg, "int_not_eq")?;
+            match rest { Value::Int(b) => Ok(Value::Bool(a != b)), _ => Err("not_eq: expected int".to_string()) }
+        }
+        "int_lt" => {
+            let (a, rest) = extract_receiver_int(&arg, "int_lt")?;
+            match rest { Value::Int(b) => Ok(Value::Bool(a < b)), _ => Err("lt: expected int".to_string()) }
+        }
+        "int_gt" => {
+            let (a, rest) = extract_receiver_int(&arg, "int_gt")?;
+            match rest { Value::Int(b) => Ok(Value::Bool(a > b)), _ => Err("gt: expected int".to_string()) }
+        }
+        "int_lt_eq" => {
+            let (a, rest) = extract_receiver_int(&arg, "int_lt_eq")?;
+            match rest { Value::Int(b) => Ok(Value::Bool(a <= b)), _ => Err("lt_eq: expected int".to_string()) }
+        }
+        "int_gt_eq" => {
+            let (a, rest) = extract_receiver_int(&arg, "int_gt_eq")?;
+            match rest { Value::Int(b) => Ok(Value::Bool(a >= b)), _ => Err("gt_eq: expected int".to_string()) }
+        }
+        "int_to_string" => {
+            let (a, _) = extract_receiver_int(&arg, "int_to_string")?;
+            Ok(Value::Str(a.to_string()))
+        }
+
+        // ── Float operator builtins ──
+        "float_add" => {
+            let (a, rest) = extract_receiver_float(&arg, "float_add")?;
+            match rest {
+                Value::Float(b) => Ok(Value::Float(a + b)),
+                Value::Int(b) => Ok(Value::Float(a + b as f64)),
+                _ => Err("add: expected numeric argument".to_string()),
+            }
+        }
+        "float_subtract" => {
+            let (a, rest) = extract_receiver_float(&arg, "float_subtract")?;
+            match rest {
+                Value::Float(b) => Ok(Value::Float(a - b)),
+                Value::Int(b) => Ok(Value::Float(a - b as f64)),
+                _ => Err("subtract: expected numeric argument".to_string()),
+            }
+        }
+        "float_times" => {
+            let (a, rest) = extract_receiver_float(&arg, "float_times")?;
+            match rest {
+                Value::Float(b) => Ok(Value::Float(a * b)),
+                Value::Int(b) => Ok(Value::Float(a * b as f64)),
+                _ => Err("times: expected numeric argument".to_string()),
+            }
+        }
+        "float_divided_by" => {
+            let (a, rest) = extract_receiver_float(&arg, "float_divided_by")?;
+            match rest {
+                Value::Float(b) if b == 0.0 => Err("division by zero".to_string()),
+                Value::Float(b) => Ok(Value::Float(a / b)),
+                Value::Int(0) => Err("division by zero".to_string()),
+                Value::Int(b) => Ok(Value::Float(a / b as f64)),
+                _ => Err("divided_by: expected numeric argument".to_string()),
+            }
+        }
+        "float_negate" => {
+            let (a, _) = extract_receiver_float(&arg, "float_negate")?;
+            Ok(Value::Float(-a))
+        }
+        "float_eq" => {
+            let (a, rest) = extract_receiver_float(&arg, "float_eq")?;
+            match rest { Value::Float(b) => Ok(Value::Bool(a == b)), _ => Err("eq: expected float".to_string()) }
+        }
+        "float_not_eq" => {
+            let (a, rest) = extract_receiver_float(&arg, "float_not_eq")?;
+            match rest { Value::Float(b) => Ok(Value::Bool(a != b)), _ => Err("not_eq: expected float".to_string()) }
+        }
+        "float_lt" => {
+            let (a, rest) = extract_receiver_float(&arg, "float_lt")?;
+            match rest {
+                Value::Float(b) => a.partial_cmp(&b).map(|o| Value::Bool(o.is_lt())).ok_or_else(|| "NaN comparison".to_string()),
+                _ => Err("lt: expected float".to_string()),
+            }
+        }
+        "float_gt" => {
+            let (a, rest) = extract_receiver_float(&arg, "float_gt")?;
+            match rest {
+                Value::Float(b) => a.partial_cmp(&b).map(|o| Value::Bool(o.is_gt())).ok_or_else(|| "NaN comparison".to_string()),
+                _ => Err("gt: expected float".to_string()),
+            }
+        }
+        "float_lt_eq" => {
+            let (a, rest) = extract_receiver_float(&arg, "float_lt_eq")?;
+            match rest {
+                Value::Float(b) => a.partial_cmp(&b).map(|o| Value::Bool(o.is_le())).ok_or_else(|| "NaN comparison".to_string()),
+                _ => Err("lt_eq: expected float".to_string()),
+            }
+        }
+        "float_gt_eq" => {
+            let (a, rest) = extract_receiver_float(&arg, "float_gt_eq")?;
+            match rest {
+                Value::Float(b) => a.partial_cmp(&b).map(|o| Value::Bool(o.is_ge())).ok_or_else(|| "NaN comparison".to_string()),
+                _ => Err("gt_eq: expected float".to_string()),
+            }
+        }
+        "float_to_string" => {
+            let (a, _) = extract_receiver_float(&arg, "float_to_string")?;
+            Ok(Value::Str(format!("{}", a)))
+        }
+
+        // ── String operator builtins ──
+        "string_add" => {
+            let (a, rest) = extract_receiver_str(&arg, "string_add")?;
+            match rest {
+                Value::Str(b) => Ok(Value::Str(format!("{}{}", a, b))),
+                _ => Err("add: expected string argument".to_string()),
+            }
+        }
+        "string_eq" => {
+            let (a, rest) = extract_receiver_str(&arg, "string_eq")?;
+            match rest { Value::Str(b) => Ok(Value::Bool(a == b)), _ => Err("eq: expected string".to_string()) }
+        }
+        "string_not_eq" => {
+            let (a, rest) = extract_receiver_str(&arg, "string_not_eq")?;
+            match rest { Value::Str(b) => Ok(Value::Bool(a != b)), _ => Err("not_eq: expected string".to_string()) }
+        }
+        "string_lt" => {
+            let (a, rest) = extract_receiver_str(&arg, "string_lt")?;
+            match rest { Value::Str(b) => Ok(Value::Bool(a < b)), _ => Err("lt: expected string".to_string()) }
+        }
+        "string_gt" => {
+            let (a, rest) = extract_receiver_str(&arg, "string_gt")?;
+            match rest { Value::Str(b) => Ok(Value::Bool(a > b)), _ => Err("gt: expected string".to_string()) }
+        }
+        "string_lt_eq" => {
+            let (a, rest) = extract_receiver_str(&arg, "string_lt_eq")?;
+            match rest { Value::Str(b) => Ok(Value::Bool(a <= b)), _ => Err("lt_eq: expected string".to_string()) }
+        }
+        "string_gt_eq" => {
+            let (a, rest) = extract_receiver_str(&arg, "string_gt_eq")?;
+            match rest { Value::Str(b) => Ok(Value::Bool(a >= b)), _ => Err("gt_eq: expected string".to_string()) }
+        }
+        "string_to_string" => {
+            let (a, _) = extract_receiver_str(&arg, "string_to_string")?;
+            Ok(Value::Str(a))
+        }
+
+        // ── Array operator builtins ──
+        "array_add" => {
+            let (a, rest) = extract_receiver_array(&arg, "array_add")?;
+            match rest {
+                Value::Array(b) => {
+                    let mut result = a;
+                    result.extend(b);
+                    Ok(Value::Array(result))
+                }
+                _ => Err("add: expected array argument".to_string()),
+            }
+        }
+        "array_eq" => {
+            let (a, rest) = extract_receiver_array(&arg, "array_eq")?;
+            match rest {
+                Value::Array(b) => {
+                    if a.len() != b.len() { return Ok(Value::Bool(false)); }
+                    for (x, y) in a.iter().zip(b.iter()) {
+                        match eval_compare(CmpOp::Eq, x, y)? {
+                            Value::Bool(false) => return Ok(Value::Bool(false)),
+                            _ => {}
+                        }
+                    }
+                    Ok(Value::Bool(true))
+                }
+                _ => Err("eq: expected array".to_string()),
+            }
+        }
+        "array_not_eq" => {
+            let (a, rest) = extract_receiver_array(&arg, "array_not_eq")?;
+            match rest {
+                Value::Array(b) => {
+                    if a.len() != b.len() { return Ok(Value::Bool(true)); }
+                    for (x, y) in a.iter().zip(b.iter()) {
+                        match eval_compare(CmpOp::Eq, x, y)? {
+                            Value::Bool(false) => return Ok(Value::Bool(true)),
+                            _ => {}
+                        }
+                    }
+                    Ok(Value::Bool(false))
+                }
+                _ => Err("not_eq: expected array".to_string()),
+            }
+        }
+
+        // ── Bool operator builtins ──
+        "bool_eq" => {
+            let (a, rest) = extract_receiver_bool(&arg, "bool_eq")?;
+            match rest { Value::Bool(b) => Ok(Value::Bool(a == b)), _ => Err("eq: expected bool".to_string()) }
+        }
+        "bool_not_eq" => {
+            let (a, rest) = extract_receiver_bool(&arg, "bool_not_eq")?;
+            match rest { Value::Bool(b) => Ok(Value::Bool(a != b)), _ => Err("not_eq: expected bool".to_string()) }
+        }
+        "bool_to_string" => {
+            let (a, _) = extract_receiver_bool(&arg, "bool_to_string")?;
+            Ok(Value::Str(a.to_string()))
+        }
+
+        // ── Char operator builtins ──
+        "char_eq" => {
+            let (a, rest) = extract_receiver_char(&arg, "char_eq")?;
+            match rest { Value::Char(b) => Ok(Value::Bool(a == b)), _ => Err("eq: expected char".to_string()) }
+        }
+        "char_not_eq" => {
+            let (a, rest) = extract_receiver_char(&arg, "char_not_eq")?;
+            match rest { Value::Char(b) => Ok(Value::Bool(a != b)), _ => Err("not_eq: expected char".to_string()) }
+        }
+        "char_lt" => {
+            let (a, rest) = extract_receiver_char(&arg, "char_lt")?;
+            match rest { Value::Char(b) => Ok(Value::Bool(a < b)), _ => Err("lt: expected char".to_string()) }
+        }
+        "char_gt" => {
+            let (a, rest) = extract_receiver_char(&arg, "char_gt")?;
+            match rest { Value::Char(b) => Ok(Value::Bool(a > b)), _ => Err("gt: expected char".to_string()) }
+        }
+        "char_lt_eq" => {
+            let (a, rest) = extract_receiver_char(&arg, "char_lt_eq")?;
+            match rest { Value::Char(b) => Ok(Value::Bool(a <= b)), _ => Err("lt_eq: expected char".to_string()) }
+        }
+        "char_gt_eq" => {
+            let (a, rest) = extract_receiver_char(&arg, "char_gt_eq")?;
+            match rest { Value::Char(b) => Ok(Value::Bool(a >= b)), _ => Err("gt_eq: expected char".to_string()) }
+        }
+        "char_to_string" => {
+            let (a, _) = extract_receiver_char(&arg, "char_to_string")?;
+            Ok(Value::Str(a.to_string()))
+        }
+
+        // ── Byte operator builtins ──
+        "byte_eq" => {
+            let (a, rest) = extract_receiver_byte(&arg, "byte_eq")?;
+            match rest { Value::Byte(b) => Ok(Value::Bool(a == b)), _ => Err("eq: expected byte".to_string()) }
+        }
+        "byte_not_eq" => {
+            let (a, rest) = extract_receiver_byte(&arg, "byte_not_eq")?;
+            match rest { Value::Byte(b) => Ok(Value::Bool(a != b)), _ => Err("not_eq: expected byte".to_string()) }
+        }
+        "byte_lt" => {
+            let (a, rest) = extract_receiver_byte(&arg, "byte_lt")?;
+            match rest { Value::Byte(b) => Ok(Value::Bool(a < b)), _ => Err("lt: expected byte".to_string()) }
+        }
+        "byte_gt" => {
+            let (a, rest) = extract_receiver_byte(&arg, "byte_gt")?;
+            match rest { Value::Byte(b) => Ok(Value::Bool(a > b)), _ => Err("gt: expected byte".to_string()) }
+        }
+        "byte_lt_eq" => {
+            let (a, rest) = extract_receiver_byte(&arg, "byte_lt_eq")?;
+            match rest { Value::Byte(b) => Ok(Value::Bool(a <= b)), _ => Err("lt_eq: expected byte".to_string()) }
+        }
+        "byte_gt_eq" => {
+            let (a, rest) = extract_receiver_byte(&arg, "byte_gt_eq")?;
+            match rest { Value::Byte(b) => Ok(Value::Bool(a >= b)), _ => Err("gt_eq: expected byte".to_string()) }
+        }
+        "byte_to_string" => {
+            let (a, _) = extract_receiver_byte(&arg, "byte_to_string")?;
+            Ok(Value::Str(format!("0x{:02x}", a)))
+        }
+
+        // ── Unit operator builtins ──
+        "unit_eq" => {
+            let _ = extract_receiver_unit(&arg, "unit_eq")?;
+            Ok(Value::Bool(true))
+        }
+        "unit_not_eq" => {
+            let _ = extract_receiver_unit(&arg, "unit_not_eq")?;
+            Ok(Value::Bool(false))
+        }
+
         "method_set" => match arg {
             Value::Struct(fields) if fields.len() == 2 => {
                 let tag_id = match &fields[0].1 {
@@ -1429,27 +1701,32 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
 
 /// Evaluate an expression and return both the result value and the
 /// environment after all top-level bindings have been applied.
-pub fn eval_toplevel(expr: &Expr, env: &Env, input: &Value) -> Result<(Value, Env), String> {
+pub fn eval_toplevel(expr: &Mir, env: &Env, input: &Value) -> Result<(Value, Env), String> {
     eval_collecting(expr, env, input)
 }
 
-fn eval_collecting(expr: &Expr, env: &Env, input: &Value) -> Result<(Value, Env), String> {
+fn eval_collecting(expr: &Mir, env: &Env, input: &Value) -> Result<(Value, Env), String> {
     match expr.as_ref() {
-        ExprKind::Pipe(lhs, rhs) if has_toplevel_let(rhs) => {
+        MirKind::Bind { name, value, body } => {
+            let val = eval(value, env, input)?;
+            let new_env = env.bind(name.clone(), val);
+            eval_collecting(body, &new_env, input)
+        }
+        MirKind::Pipe(lhs, rhs) if has_toplevel_let(rhs) => {
             let lhs_val = eval(lhs, env, input)?;
             eval_pipe_collecting(&lhs_val, rhs, env, input)
         }
-        ExprKind::Let { pattern, body } => {
+        MirKind::Let { pattern, body } => {
             let new_env = bind_pattern(pattern, input, env)?;
             let new_env = new_env.bind("\0".to_string(), input.clone());
             eval_collecting(body, &new_env, input)
         }
-        ExprKind::LetArray { patterns, body } => {
+        MirKind::LetArray { patterns, body } => {
             let new_env = bind_array_pattern(patterns, input, env)?;
             let new_env = new_env.bind("\0".to_string(), input.clone());
             eval_collecting(body, &new_env, input)
         }
-        ExprKind::Apply { expr: ms_expr, body } => {
+        MirKind::Apply { expr: ms_expr, body } => {
             let ms = eval(ms_expr, env, input)?;
             match &ms {
                 Value::MethodSet { .. } => {
@@ -1466,19 +1743,20 @@ fn eval_collecting(expr: &Expr, env: &Env, input: &Value) -> Result<(Value, Env)
     }
 }
 
-fn eval_pipe_collecting(lhs_val: &Value, rhs: &Expr, env: &Env, input: &Value) -> Result<(Value, Env), String> {
+fn eval_pipe_collecting(lhs_val: &Value, rhs: &Mir, env: &Env, input: &Value) -> Result<(Value, Env), String> {
     match rhs.as_ref() {
-        ExprKind::Let { pattern, body } => {
+        MirKind::Let { pattern, body } => {
             let new_env = bind_pattern(pattern, lhs_val, env)?;
+            let new_env = apply_prelude(lhs_val, &new_env);
             let new_env = new_env.bind("\0".to_string(), lhs_val.clone());
             eval_collecting(body, &new_env, input)
         }
-        ExprKind::LetArray { patterns, body } => {
+        MirKind::LetArray { patterns, body } => {
             let new_env = bind_array_pattern(patterns, lhs_val, env)?;
             let new_env = new_env.bind("\0".to_string(), lhs_val.clone());
             eval_collecting(body, &new_env, input)
         }
-        ExprKind::Apply { expr: ms_expr, body } => {
+        MirKind::Apply { expr: ms_expr, body } => {
             let ms = eval(ms_expr, env, input)?;
             match &ms {
                 Value::MethodSet { .. } => {
@@ -1495,11 +1773,8 @@ fn eval_pipe_collecting(lhs_val: &Value, rhs: &Expr, env: &Env, input: &Value) -
     }
 }
 
-fn has_toplevel_let(expr: &Expr) -> bool {
-    match expr.as_ref() {
-        ExprKind::Let { .. } | ExprKind::LetArray { .. } | ExprKind::Apply { .. } => true,
-        _ => false,
-    }
+fn has_toplevel_let(expr: &Mir) -> bool {
+    matches!(expr.as_ref(), MirKind::Let { .. } | MirKind::LetArray { .. } | MirKind::Apply { .. })
 }
 
 /// Build the core module as a Value::Struct.
@@ -1531,11 +1806,34 @@ pub fn build_core_module() -> Value {
         // Array method builtins (receiver as first arg)
         "array_get", "array_slice", "array_len", "array_map", "array_filter",
         "array_fold", "array_zip",
+        // Array operator builtins
+        "array_add", "array_eq", "array_not_eq",
         // String method builtins (receiver as first arg)
         "string_byte_len", "string_char_len", "string_byte_get", "string_char_get",
         "string_as_bytes", "string_chars", "string_split", "string_trim",
         "string_contains", "string_slice", "string_starts_with", "string_ends_with",
         "string_replace",
+        // String operator builtins
+        "string_add", "string_eq", "string_not_eq", "string_lt", "string_gt",
+        "string_lt_eq", "string_gt_eq", "string_to_string",
+        // Int operator builtins
+        "int_add", "int_subtract", "int_times", "int_divided_by", "int_negate",
+        "int_eq", "int_not_eq", "int_lt", "int_gt", "int_lt_eq", "int_gt_eq",
+        "int_to_string",
+        // Float operator builtins
+        "float_add", "float_subtract", "float_times", "float_divided_by", "float_negate",
+        "float_eq", "float_not_eq", "float_lt", "float_gt", "float_lt_eq", "float_gt_eq",
+        "float_to_string",
+        // Bool operator builtins
+        "bool_eq", "bool_not_eq", "bool_to_string",
+        // Char operator builtins
+        "char_eq", "char_not_eq", "char_lt", "char_gt", "char_lt_eq", "char_gt_eq",
+        "char_to_string",
+        // Byte operator builtins
+        "byte_eq", "byte_not_eq", "byte_lt", "byte_gt", "byte_lt_eq", "byte_gt_eq",
+        "byte_to_string",
+        // Unit operator builtins
+        "unit_eq", "unit_not_eq",
     ];
     for name in &builtins {
         fields.push((name.to_string(), Value::BuiltinFn(name.to_string())));

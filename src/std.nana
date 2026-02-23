@@ -1,5 +1,66 @@
 use(core);
 
+let _int_methods = method_set(core.Int, (
+    add = core.int_add,
+    subtract = core.int_subtract,
+    times = core.int_times,
+    divided_by = core.int_divided_by,
+    negate = core.int_negate,
+    eq = core.int_eq,
+    not_eq = core.int_not_eq,
+    lt = core.int_lt,
+    gt = core.int_gt,
+    lt_eq = core.int_lt_eq,
+    gt_eq = core.int_gt_eq,
+    to_string = core.int_to_string,
+));
+
+let _float_methods = method_set(core.Float, (
+    add = core.float_add,
+    subtract = core.float_subtract,
+    times = core.float_times,
+    divided_by = core.float_divided_by,
+    negate = core.float_negate,
+    eq = core.float_eq,
+    not_eq = core.float_not_eq,
+    lt = core.float_lt,
+    gt = core.float_gt,
+    lt_eq = core.float_lt_eq,
+    gt_eq = core.float_gt_eq,
+    to_string = core.float_to_string,
+));
+
+let _bool_methods = method_set(core.Bool, (
+    eq = core.bool_eq,
+    not_eq = core.bool_not_eq,
+    to_string = core.bool_to_string,
+));
+
+let _char_methods = method_set(core.Char, (
+    eq = core.char_eq,
+    not_eq = core.char_not_eq,
+    lt = core.char_lt,
+    gt = core.char_gt,
+    lt_eq = core.char_lt_eq,
+    gt_eq = core.char_gt_eq,
+    to_string = core.char_to_string,
+));
+
+let _byte_methods = method_set(core.Byte, (
+    eq = core.byte_eq,
+    not_eq = core.byte_not_eq,
+    lt = core.byte_lt,
+    gt = core.byte_gt,
+    lt_eq = core.byte_lt_eq,
+    gt_eq = core.byte_gt_eq,
+    to_string = core.byte_to_string,
+));
+
+let _unit_methods = method_set(core.Unit, (
+    eq = core.unit_eq,
+    not_eq = core.unit_not_eq,
+));
+
 let _array_methods = method_set(core.Array, (
     get = core.array_get,
     slice = core.array_slice,
@@ -8,6 +69,9 @@ let _array_methods = method_set(core.Array, (
     filter = core.array_filter,
     fold = core.array_fold,
     zip = core.array_zip,
+    add = core.array_add,
+    eq = core.array_eq,
+    not_eq = core.array_not_eq,
 ));
 
 let _string_methods = method_set(core.String, (
@@ -24,6 +88,14 @@ let _string_methods = method_set(core.String, (
     starts_with = core.string_starts_with,
     ends_with = core.string_ends_with,
     replace = core.string_replace,
+    add = core.string_add,
+    eq = core.string_eq,
+    not_eq = core.string_not_eq,
+    lt = core.string_lt,
+    gt = core.string_gt,
+    lt_eq = core.string_lt_eq,
+    gt_eq = core.string_gt_eq,
+    to_string = core.string_to_string,
 ));
 
 (
@@ -36,8 +108,25 @@ let _string_methods = method_set(core.String, (
     Byte = core.Byte,
     Unit = core.Unit,
 
+    int_methods = _int_methods,
+    float_methods = _float_methods,
+    bool_methods = _bool_methods,
+    char_methods = _char_methods,
+    byte_methods = _byte_methods,
+    unit_methods = _unit_methods,
     array_methods = _array_methods,
     string_methods = _string_methods,
+
+    prelude = (
+        int_methods = _int_methods,
+        float_methods = _float_methods,
+        bool_methods = _bool_methods,
+        char_methods = _char_methods,
+        byte_methods = _byte_methods,
+        unit_methods = _unit_methods,
+        array_methods = _array_methods,
+        string_methods = _string_methods,
+    ),
 
     not = core.not,
     and = core.and,

@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod eval;
 pub mod lexer;
+pub mod mir;
 pub mod parser;
 pub mod value;
 
@@ -25,7 +26,8 @@ fn eval_std_module() -> Result<Value, String> {
         Value::BuiltinFn("method_set".to_string()),
     );
     let ast = parse(STD_SOURCE)?;
-    let (val, _) = eval::eval_toplevel(&ast, &env, &Value::Unit)
+    let mir = mir::lower(&ast);
+    let (val, _) = eval::eval_toplevel(&mir, &env, &Value::Unit)
         .map_err(|e| format!("std module error: {}", e))?;
     Ok(val)
 }
@@ -37,6 +39,12 @@ pub fn parse(source: &str) -> Result<Expr, String> {
     let mut par = parser::Parser::new(tokens);
     par.parse_program()
         .map_err(|e| format!("parse error: {}", e))
+}
+
+/// Parse and lower source code into MIR.
+pub fn parse_and_lower(source: &str) -> Result<mir::Mir, String> {
+    let ast = parse(source)?;
+    Ok(mir::lower(&ast))
 }
 
 /// Parse source code and return the list of module names referenced by `import()`.
@@ -55,9 +63,9 @@ pub fn run(source: &str) -> Result<Value, String> {
 /// Run source code and return the value plus any warnings.
 /// No modules are available — `import()` will error.
 pub fn run_with_warnings(source: &str) -> Result<(Value, Vec<String>), String> {
-    let ast = parse(source)?;
+    let mir = parse_and_lower(source)?;
     let env = eval::default_env();
-    let (val, final_env) = eval::eval_toplevel(&ast, &env, &Value::Unit)
+    let (val, final_env) = eval::eval_toplevel(&mir, &env, &Value::Unit)
         .map_err(|e| format!("runtime error: {}", e))?;
     let warnings = final_env.unused_warnings();
     Ok((val, warnings))
@@ -75,13 +83,13 @@ pub fn run_with_modules_and_warnings(
     source: &str,
     modules: &[(&str, Value)],
 ) -> Result<(Value, Vec<String>), String> {
-    let ast = parse(source)?;
+    let mir = parse_and_lower(source)?;
     let module_map: HashMap<String, Value> = modules
         .iter()
         .map(|(name, val)| (name.to_string(), val.clone()))
         .collect();
     let env = eval::default_env_with_modules(module_map);
-    let (val, final_env) = eval::eval_toplevel(&ast, &env, &Value::Unit)
+    let (val, final_env) = eval::eval_toplevel(&mir, &env, &Value::Unit)
         .map_err(|e| format!("runtime error: {}", e))?;
     let warnings = final_env.unused_warnings();
     Ok((val, warnings))
@@ -90,8 +98,8 @@ pub fn run_with_modules_and_warnings(
 /// Run source code with a given environment, returning both the value
 /// and the updated environment. Used by the REPL to persist bindings.
 pub fn run_in_env(source: &str, env: &Env) -> Result<(Value, Env), String> {
-    let ast = parse(source)?;
-    eval::eval_toplevel(&ast, env, &Value::Unit).map_err(|e| format!("runtime error: {}", e))
+    let mir = parse_and_lower(source)?;
+    eval::eval_toplevel(&mir, env, &Value::Unit).map_err(|e| format!("runtime error: {}", e))
 }
 
 /// Create the default environment with builtins (no modules).
@@ -105,14 +113,33 @@ pub fn default_env_with_modules(modules: HashMap<String, Value>) -> Env {
 }
 
 /// Create an environment with core and std modules available.
-/// Programs can `use(std)` to access all builtins and method sets.
+/// `std` is automatically bound and its prelude method sets are applied,
+/// so operators (+, ==, etc.) work without explicit `use(std)` or `apply()`.
 pub fn env_with_std() -> Result<Env, String> {
     let core = eval::build_core_module();
     let std_val = eval_std_module()?;
     let mut modules = HashMap::new();
     modules.insert("core".to_string(), core);
-    modules.insert("std".to_string(), std_val);
-    Ok(eval::default_env_with_modules(modules))
+    modules.insert("std".to_string(), std_val.clone());
+    let mut env = eval::default_env_with_modules(modules);
+    // Bind std so programs can access std.map, std.filter, etc.
+    // Use bind_used so implicit std doesn't trigger unused-binding warnings.
+    env = env.bind_used("std".to_string(), std_val.clone());
+    // Auto-apply prelude method sets so operators work out of the box
+    if let Value::Struct(fields) = &std_val {
+        for (label, val) in fields {
+            if label == "prelude" {
+                if let Value::Struct(prelude_fields) = val {
+                    for (_, ms_val) in prelude_fields {
+                        if matches!(ms_val, Value::MethodSet { .. }) {
+                            env = env.bind(format!("\0ms"), ms_val.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(env)
 }
 
 /// Run source code with core and std modules available.
@@ -123,9 +150,9 @@ pub fn run_with_std(source: &str) -> Result<Value, String> {
 
 /// Run source code with core and std modules, returning value + warnings.
 pub fn run_with_std_and_warnings(source: &str) -> Result<(Value, Vec<String>), String> {
-    let ast = parse(source)?;
+    let mir = parse_and_lower(source)?;
     let env = env_with_std()?;
-    let (val, final_env) = eval::eval_toplevel(&ast, &env, &Value::Unit)
+    let (val, final_env) = eval::eval_toplevel(&mir, &env, &Value::Unit)
         .map_err(|e| format!("runtime error: {}", e))?;
     let warnings = final_env.unused_warnings();
     Ok((val, warnings))

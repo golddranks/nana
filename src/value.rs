@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
-use crate::ast::{BranchArm, Expr};
+use crate::mir::{Mir, MirBranchArm};
 
 pub type TagId = u64;
 
@@ -17,6 +17,7 @@ pub const TAG_ID_CHAR: TagId = 4;
 pub const TAG_ID_BYTE: TagId = 5;
 pub const TAG_ID_ARRAY: TagId = 6;
 pub const TAG_ID_UNIT: TagId = 7;
+pub const TAG_ID_STRUCT: TagId = 8;
 
 /// Map a primitive Value to its built-in TagId for method set dispatch.
 pub fn builtin_tag_id(value: &Value) -> Option<TagId> {
@@ -29,6 +30,7 @@ pub fn builtin_tag_id(value: &Value) -> Option<TagId> {
         Value::Byte(_) => Some(TAG_ID_BYTE),
         Value::Array(_) => Some(TAG_ID_ARRAY),
         Value::Unit => Some(TAG_ID_UNIT),
+        Value::Struct(_) => Some(TAG_ID_STRUCT),
         _ => None,
     }
 }
@@ -84,6 +86,20 @@ impl Env {
             name,
             value,
             used: Rc::new(Cell::new(false)),
+        });
+        Env {
+            bindings: new_bindings,
+            modules: self.modules.clone(),
+        }
+    }
+
+    /// Bind a name that is considered pre-used (no unused warning).
+    pub fn bind_used(&self, name: String, value: Value) -> Env {
+        let mut new_bindings = self.bindings.clone();
+        new_bindings.push(Binding {
+            name,
+            value,
+            used: Rc::new(Cell::new(true)),
         });
         Env {
             bindings: new_bindings,
@@ -155,12 +171,12 @@ pub enum Value {
     Struct(Vec<(String, Value)>),
     Closure {
         id: u64,
-        body: Expr,
+        body: Mir,
         env: Env,
     },
     BranchClosure {
         id: u64,
-        arms: Vec<BranchArm>,
+        arms: Vec<MirBranchArm>,
         env: Env,
     },
     TagConstructor {

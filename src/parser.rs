@@ -1332,7 +1332,7 @@ impl Parser {
                 Ok(Box::new(ExprKind::Struct(fields)))
             }
             _ => Err(format!(
-                "expected ')', ',', or ';' in parenthesized expression, got {:?}",
+                "expected ')' or ',' in parenthesized expression, got {:?}",
                 self.peek()
             )),
         }

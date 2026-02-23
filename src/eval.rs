@@ -456,11 +456,11 @@ fn bind_pattern(pattern: &Pattern, value: &Value, env: &Env) -> Result<Env, Stri
                         }
                         false
                     } else {
+                        // !all_match guarantees at least one field doesn't match
                         let missing = unlabeled_fields.iter()
                             .find(|pf| !struct_fields.iter().any(|(l, _)| l == &pf.binding))
-                            .map(|pf| pf.binding.as_str())
-                            .unwrap_or(&unlabeled_fields[0].binding);
-                        return Err(format!("field '{}' not found in struct", missing));
+                            .expect("!all_match guarantees a missing field");
+                        return Err(format!("field '{}' not found in struct", missing.binding));
                     }
                 }
             };
@@ -1156,7 +1156,7 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             let (elems, rest) = extract_receiver_array(&arg, "array_get")?;
             let idx = match rest {
                 Value::Int(i) => i,
-                _ => return Err("get: expected integer index".to_string()),
+                _ => return Err("array_get: expected integer index".to_string()),
             };
             if idx < 0 {
                 return Err(format!("negative array index: {}", idx));
@@ -1196,7 +1196,7 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
                 match keep {
                     Value::Bool(true) => result.push(v.clone()),
                     Value::Bool(false) => {}
-                    _ => return Err("filter: predicate must return bool".to_string()),
+                    _ => return Err("array_filter: predicate must return bool".to_string()),
                 }
             }
             Ok(Value::Array(result))
@@ -1311,7 +1311,7 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             let start = start as usize;
             let end = end as usize;
             if start > s.len() || end > s.len() || start > end {
-                return Err(format!("slice: indices {}..{} out of bounds (len {})", start, end, s.len()));
+                return Err(format!("slice: indices {}..{} out of bounds (byte_len {})", start, end, s.len()));
             }
             if !s.is_char_boundary(start) || !s.is_char_boundary(end) {
                 return Err("slice: index is not on a UTF-8 character boundary".to_string());
@@ -1501,7 +1501,13 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
         }
         "float_to_string" => {
             let (a, _) = extract_receiver_float(&arg, "float_to_string")?;
-            Ok(Value::Str(format!("{}", a)))
+            // Match Display impl: whole-number floats get ".0" suffix
+            let s = if a.fract() == 0.0 {
+                format!("{}.0", a)
+            } else {
+                format!("{}", a)
+            };
+            Ok(Value::Str(s))
         }
 
         // ── String operator builtins ──
@@ -1662,12 +1668,12 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
 
         // ── Unit operator builtins ──
         "unit_eq" => {
-            let _ = extract_receiver_unit(&arg, "unit_eq")?;
-            Ok(Value::Bool(true))
+            let rest = extract_receiver_unit(&arg, "unit_eq")?;
+            Ok(Value::Bool(rest == Value::Unit))
         }
         "unit_not_eq" => {
-            let _ = extract_receiver_unit(&arg, "unit_not_eq")?;
-            Ok(Value::Bool(false))
+            let rest = extract_receiver_unit(&arg, "unit_not_eq")?;
+            Ok(Value::Bool(rest != Value::Unit))
         }
 
         "method_set" => match arg {

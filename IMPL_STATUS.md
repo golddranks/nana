@@ -237,8 +237,8 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 
 | Spec Feature | Status | Notes |
 |---|---|---|
-| Static typing | Partial | `types.rs`: forward-only checker validates std module and user code; method sets, branch arms, structs, field access, spread, destructuring |
-| Type inference | Partial | Forward propagation + branch arm unification; no bidirectional inference yet |
+| Static typing | Partial | `types.rs`: forward-only checker validates std module and user code; method sets, branch arms, structs, field access, spread, destructuring, tagged types, precise builtin return types, auto-apply prelude on `use(std)` |
+| Type inference | Partial | Forward propagation + branch arm unification + bidirectional inference for inline block/branch `in` parameters; parameterized arrays; tagged value method dispatch; fallback comparison/to_string typing; array method return type specialization (get→elem, filter/slice/add→same array); rest pattern struct type propagation |
 | Occurs check | Not implemented | Totality maintained by disallowing recursion syntactically |
 | Compilation = evaluation | Implemented | Single pass |
 

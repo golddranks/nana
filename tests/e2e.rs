@@ -3852,6 +3852,8 @@ fn probe17_single_elem_paren_is_not_tuple() {
 fn probe17_unit_equality() {
     // () == () should be true
     assert_val("() == ()", T);
+    // () != non-unit should be false for ==, true for !=
+    assert_val("() != ()", F);
 }
 
 #[test]
@@ -8335,7 +8337,7 @@ fn default_arm_basic() {
 
 #[test]
 fn default_arm_with_expression() {
-    assert_val(r#"5 >> { 1 -> "one", in * 2 }"#, int(10));
+    assert_val(r#"5 >> { 1 -> 100, in * 2 }"#, int(10));
 }
 
 #[test]
@@ -8894,4 +8896,11 @@ fn std_type_constructors() {
         apply(ms);
         [1, 2, 3].count()
     "#, int(3));
+}
+
+#[test]
+fn float_to_string_whole_number() {
+    // float_to_string should produce "1.0" for whole-number floats, matching Display
+    assert_val(r#""value: {1.0}""#, s("value: 1.0"));
+    assert_val(r#""value: {3.14}""#, s("value: 3.14"));
 }

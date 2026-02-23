@@ -3,6 +3,7 @@ pub mod eval;
 pub mod lexer;
 pub mod mir;
 pub mod parser;
+pub mod types;
 pub mod value;
 
 use std::collections::HashMap;
@@ -13,6 +14,25 @@ use value::Value;
 
 /// The std module source code, written in nana.
 const STD_SOURCE: &str = include_str!("std.nana");
+
+/// Type-check the std module source against the core module type.
+/// Returns the std module's type.
+fn typecheck_std_module() -> Result<types::Ty, String> {
+    let ast = parse(STD_SOURCE)?;
+    let mir = mir::lower(&ast);
+    let mut ty_env = types::TyEnv::new()
+        .with_module("core", types::core_module_type());
+    // std.nana needs method_set as a bare binding
+    ty_env.bind_external(
+        "method_set".to_string(),
+        types::Ty::Fn {
+            param: Box::new(types::Ty::Unknown),
+            ret: Box::new(types::Ty::Unknown),
+        },
+    );
+    types::check(&mir, &mut ty_env)
+        .map_err(|e| format!("std module type error: {}", e))
+}
 
 /// Evaluate the std module source with core available, returning the std module value.
 fn eval_std_module() -> Result<Value, String> {
@@ -115,7 +135,13 @@ pub fn default_env_with_modules(modules: HashMap<String, Value>) -> Env {
 /// Create an environment with core and std modules available.
 /// `std` is automatically bound and its prelude method sets are applied,
 /// so operators (+, ==, etc.) work without explicit `use(std)` or `apply()`.
-pub fn env_with_std() -> Result<Env, String> {
+///
+/// Also type-checks the std module and returns both the runtime env and the
+/// std module type (for use when type-checking user code).
+fn env_with_std_and_types() -> Result<(Env, types::Ty), String> {
+    // Type-check std module first
+    let std_ty = typecheck_std_module()?;
+
     let core = eval::build_core_module();
     let std_val = eval_std_module()?;
     let mut modules = HashMap::new();
@@ -139,6 +165,14 @@ pub fn env_with_std() -> Result<Env, String> {
             }
         }
     }
+    Ok((env, std_ty))
+}
+
+/// Create an environment with core and std modules available.
+/// `std` is automatically bound and its prelude method sets are applied,
+/// so operators (+, ==, etc.) work without explicit `use(std)` or `apply()`.
+pub fn env_with_std() -> Result<Env, String> {
+    let (env, _std_ty) = env_with_std_and_types()?;
     Ok(env)
 }
 
@@ -151,7 +185,7 @@ pub fn run_with_std(source: &str) -> Result<Value, String> {
 /// Run source code with core and std modules, returning value + warnings.
 pub fn run_with_std_and_warnings(source: &str) -> Result<(Value, Vec<String>), String> {
     let mir = parse_and_lower(source)?;
-    let env = env_with_std()?;
+    let (env, _std_ty) = env_with_std_and_types()?;
     let (val, final_env) = eval::eval_toplevel(&mir, &env, &Value::Unit)
         .map_err(|e| format!("runtime error: {}", e))?;
     let warnings = final_env.unused_warnings();

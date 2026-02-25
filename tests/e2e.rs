@@ -29,12 +29,7 @@ const STD_PRELUDE: &str = "\
 let not = std.not; \
 let and = std.and; \
 let or = std.or; \
-let len = std.len; \
 let print = std.print; \
-let map = std.map; \
-let filter = std.filter; \
-let fold = std.fold; \
-let zip = std.zip; \
 let byte = std.byte; \
 let int = std.int; \
 let float = std.float; \
@@ -226,10 +221,10 @@ fn baseline_boolean_builtins() {
 
 #[test]
 fn baseline_array_builtins() {
-    assert_val("[1, 2, 3] >> len", int(3));
-    assert_output("map([1, 2, 3], { in * 2 })", "[2, 4, 6]");
-    assert_output("filter([1, 2, 3, 4], { in > 2 })", "[3, 4]");
-    assert_val("fold([1, 2, 3], 0, { in.acc + in.elem })", int(6));
+    assert_val("[1, 2, 3].len()", int(3));
+    assert_output("[1, 2, 3].map{ * 2 }", "[2, 4, 6]");
+    assert_output("[1, 2, 3, 4].filter{ > 2 }", "[3, 4]");
+    assert_val("[1, 2, 3].fold(0, { in.acc + in.elem })", int(6));
 }
 
 #[test]
@@ -409,7 +404,7 @@ fn bug2_let_chain_with_tag() {
 #[test]
 fn bug3_block_sugar_with_range() {
     // Range produces a struct (start=1, end=10). Scalar + struct is not a valid operation.
-    assert_error("5 >> { + 1..10 }", "expected numeric argument");
+    assert_error("5 >> { + 1..10 }", "type error");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -556,7 +551,7 @@ fn minor_undefined_variable() {
 
 #[test]
 fn minor_type_error_in_binop() {
-    assert_error(r#"1 + "hello""#, "expected numeric argument");
+    assert_error(r#"1 + "hello""#, "type error");
 }
 
 #[test]
@@ -712,7 +707,7 @@ fn r2_struct_rest_pattern() {
 
 #[test]
 fn r2_pipe_prepend_args() {
-    assert_output("[1, 2, 3] >> map({ in * 10 })", "[10, 20, 30]");
+    assert_output("[1, 2, 3].map({ in * 10 })", "[10, 20, 30]");
 }
 
 #[test]
@@ -985,12 +980,12 @@ fn bug23_positional_struct_extra() {
 
 #[test]
 fn bug24_scalar_plus_struct_not_allowed() {
-    assert_error("10 + (1, 2, 3)", "expected numeric argument");
+    assert_error("10 + (1, 2, 3)", "type error");
 }
 
 #[test]
 fn bug24_scalar_mul_struct_not_allowed() {
-    assert_error("10 * (1, 2, 3)", "expected numeric argument");
+    assert_error("10 * (1, 2, 3)", "type error");
 }
 
 #[test]
@@ -1000,7 +995,7 @@ fn bug24_struct_plus_scalar_not_allowed() {
 
 #[test]
 fn bug24_scalar_sub_struct_not_allowed() {
-    assert_error("10 - (1, 2)", "expected numeric argument");
+    assert_error("10 - (1, 2)", "type error");
 }
 
 #[test]
@@ -1392,9 +1387,8 @@ fn bug32_negative_float_pattern() {
 
 #[test]
 fn bug33_fold_consistent_named_fields() {
-    // Both builtin and method fold use acc/elem named fields
+    // fold method uses acc/elem named fields
     assert_val("[1, 2, 3].fold(0, { in.acc + in.elem })", int(6));
-    assert_val("fold([1, 2, 3], 0, { in.acc + in.elem })", int(6));
 }
 
 #[test]
@@ -1402,10 +1396,6 @@ fn bug33_fold_named_destructuring() {
     // Destructuring with matching names should work
     assert_val(
         "[1, 2, 3].fold(0, { in >> let(acc, elem); acc + elem })",
-        int(6),
-    );
-    assert_val(
-        "fold([1, 2, 3], 0, { in >> let(acc, elem); acc + elem })",
         int(6),
     );
 }
@@ -1744,7 +1734,7 @@ fn bug42_let_struct_discard_passthrough() {
 #[test]
 fn bug43_let_array_passthrough_is_array() {
     // Passthrough should be an array, not a struct
-    assert_val("[1, 2, 3] >> let[a, b, c] >> len", int(3));
+    assert_val("[1, 2, 3] >> let[a, b, c] >> { in.len() }", int(3));
 }
 
 #[test]
@@ -1759,7 +1749,7 @@ fn bug43_let_array_passthrough_identity() {
 
 #[test]
 fn bug43_let_array_passthrough_with_rest() {
-    assert_val("[1, 2, 3, 4] >> let[first, ...rest] >> len", int(4));
+    assert_val("[1, 2, 3, 4] >> let[first, ...rest] >> { in.len() }", int(4));
 }
 
 #[test]
@@ -1778,7 +1768,7 @@ fn bug43_let_array_single_passthrough() {
 #[test]
 fn bug43_let_sugar_array_passthrough() {
     // `let x = [1, 2] >> let[a, b]; x` — x should be [1, 2] not (a=1, b=2)
-    assert_val("let x = [1, 2] >> let[a, b]; x >> len", int(2));
+    assert_val("let x = [1, 2] >> let[a, b]; x.len()", int(2));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2225,21 +2215,21 @@ fn edge1_empty_string_length() {
 
 #[test]
 fn edge2_string_plus_nonstring_errors() {
-    assert_error(r#""hello" + 42"#, "expected string argument");
+    assert_error(r#""hello" + 42"#, "type error");
 }
 
 // ── Edge case 3: array + non-array should error ─────────────────────────────
 
 #[test]
 fn edge3_array_plus_nonarray_errors() {
-    assert_error(r#"[] + "hello""#, "expected array argument");
+    assert_error(r#"[] + "hello""#, "type error");
 }
 
 // ── Edge case 4: cross-type comparison should error ─────────────────────────
 
 #[test]
 fn edge4_cross_type_comparison_errors() {
-    assert_error(r#"[1, 2] == "hello""#, "expected array");
+    assert_error(r#"[1, 2] == "hello""#, "type error");
 }
 
 // ── Edge case 5: out of bounds struct field access ──────────────────────────
@@ -2280,7 +2270,7 @@ fn edge8_match_untagged_with_tag_pattern() {
 
 #[test]
 fn edge9_float_index_errors() {
-    assert_error("[1, 2, 3].get(1.5)", "expected integer index");
+    assert_error("[1, 2, 3].get(1.5)", "type error");
 }
 
 // ── Edge case 10: fold with non-destructuring function ──────────────────────
@@ -3027,7 +3017,7 @@ fn string_contains_false() {
 
 #[test]
 fn string_contains_char() {
-    assert_val(r#""hello".contains('l')"#, T);
+    assert_val(r#""hello".contains_char('l')"#, T);
 }
 
 #[test]
@@ -3207,9 +3197,9 @@ fn probe20a_spec_paren_scope_limits_let() {
 #[test]
 fn probe20a_spec_let_returns_value_through_pipe() {
     // DESIGN.md: `value >> let(x) >> log` — let returns its value, pipes onward.
-    // Testing with print: 42 >> let(x) >> print prints 42 and returns ().
-    // Then `; x` evaluates to 42.
-    assert_val("42 >> let(x) >> print; x", int(42));
+    // Testing with print: "hi" >> let(x) >> print prints "hi" and returns ().
+    // Then `; x` evaluates to "hi".
+    assert_val(r#""hi" >> let(x) >> print; x"#, s("hi"));
 }
 
 // ── 2. let(x) returns x through pipes ───────────────────────────
@@ -3404,18 +3394,18 @@ fn string_order_same_not_lt() {
 #[test]
 fn string_plus_int_error() {
     // String + Int should be a type error
-    assert_error(r#""abc" + 1"#, "expected string argument");
+    assert_error(r#""abc" + 1"#, "type error");
 }
 
 #[test]
 fn string_plus_bool_error() {
-    assert_error(r#""abc" + true"#, "expected string argument");
+    assert_error(r#""abc" + true"#, "type error");
 }
 
 #[test]
 fn string_eq_int_error() {
     // Comparing string to int should error
-    assert_error(r#""abc" == 1"#, "expected string");
+    assert_error(r#""abc" == 1"#, "type error");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -3914,8 +3904,8 @@ fn probe17_pipe_into_tag_constructor() {
 
 #[test]
 fn probe17_pipe_into_builtin() {
-    // `[1, 2, 3] >> len` should give 3
-    assert_val("[1, 2, 3] >> len", int(3));
+    // `[1, 2, 3].len()` should give 3
+    assert_val("[1, 2, 3].len()", int(3));
 }
 
 // ── Probes: complex let chain interactions ──────────────────────
@@ -4018,7 +4008,7 @@ fn probe17_range_precedence_with_addition() {
     // Per the parser, range (..) is tighter than add/sub but looser than mul/div
     // So `1 + 2..3` should be parsed as `1 + (2..3)` which is
     // `1 + (start=2, end=3)` — should error since int + struct is invalid
-    assert_error("1 + 2..3", "expected numeric argument");
+    assert_error("1 + 2..3", "type error");
 }
 
 #[test]
@@ -4045,8 +4035,8 @@ fn probe17_in_not_modified_by_let() {
 
 #[test]
 fn probe17_pipe_into_function_with_args() {
-    // `value >> f(x)` is `f(value, x)` per spec
-    assert_val("fold([1, 2, 3], 0, { in.acc + in.elem })", int(6));
+    // `arr.fold(init, f)` should work
+    assert_val("[1, 2, 3].fold(0, { in.acc + in.elem })", int(6));
 }
 
 #[test]
@@ -4817,7 +4807,7 @@ fn probe17b_guard_uses_in() {
 
 #[test]
 fn probe17b_tag_with_array_payload() {
-    assert_val("tag(V); V([1, 2, 3]) >> { V(arr) -> arr >> len }", int(3));
+    assert_val("tag(V); V([1, 2, 3]) >> { V(arr) -> arr.len() }", int(3));
 }
 
 // ── 47. Multiple wildcard/binding arms — first matching wins ────────
@@ -5018,7 +5008,7 @@ fn probe17b_struct_as_scrutinee_binding() {
 #[test]
 fn probe17b_array_as_scrutinee_binding() {
     // Branch on an array — the binding gets the whole array
-    assert_val("[1, 2, 3] >> { arr -> arr >> len }", int(3));
+    assert_val("[1, 2, 3] >> { arr -> arr.len() }", int(3));
 }
 
 // ── 65. Branching where first arm is a guard-only binding ───────────
@@ -5110,7 +5100,7 @@ fn probe17b_three_tag_matching() {
 fn probe17b_branch_inside_map() {
     // Use a branching block as the function in map
     assert_output(
-        r#"[1, 2, 3] >> map({ 1 -> "one", 2 -> "two", _ -> "other" })"#,
+        r#"[1, 2, 3].map({ 1 -> "one", 2 -> "two", _ -> "other" })"#,
         r#"["one", "two", "other"]"#,
     );
 }
@@ -5121,7 +5111,7 @@ fn probe17b_branch_inside_map() {
 fn probe17b_branch_inside_filter() {
     // Use a branching block as the function in filter
     assert_output(
-        "[1, 2, 3, 4] >> filter({ x if x > 2 -> true, _ -> false })",
+        "[1, 2, 3, 4].filter({ x if x > 2 -> true, _ -> false })",
         "[3, 4]",
     );
 }
@@ -5206,7 +5196,7 @@ fn probe18b_array_chained_methods() {
 
 #[test]
 fn probe18b_pipe_len_array() {
-    assert_val("[1, 2, 3] >> len", int(3));
+    assert_val("[1, 2, 3].len()", int(3));
 }
 
 #[test]
@@ -5233,17 +5223,17 @@ fn probe18b_pipe_or() {
 
 #[test]
 fn probe18b_not_wrong_type() {
-    assert_error("42 >> not", "expected bool");
+    assert_error("42 >> not", "cannot unify"); // type checker catches Bool vs IntLiteral
 }
 
 #[test]
 fn probe18b_len_wrong_type() {
-    assert_error("42 >> len", "expected array");
+    assert_error("42.len()", "no method");
 }
 
 #[test]
 fn probe18b_and_wrong_type() {
-    assert_error("(1, 2) >> and", "expected two bools");
+    assert_error("(1, 2) >> and", "cannot unify"); // type checker catches Struct vs Bool
 }
 
 // ── 4. Method on wrong type ──────────────────────────────────────
@@ -5308,22 +5298,22 @@ fn probe18b_zip_truncate() {
 
 #[test]
 fn probe18b_pipe_into_zip() {
-    assert_output("[1, 2] >> zip([3, 4])", "[(1, 3), (2, 4)]");
+    assert_output("[1, 2].zip([3, 4])", "[(1, 3), (2, 4)]");
 }
 
 #[test]
 fn probe18b_pipe_into_map() {
-    assert_output("[1, 2, 3] >> map{ * 2 }", "[2, 4, 6]");
+    assert_output("[1, 2, 3].map{ * 2 }", "[2, 4, 6]");
 }
 
 #[test]
 fn probe18b_pipe_into_filter() {
-    assert_output("[1, 2, 3] >> filter{ > 1 }", "[2, 3]");
+    assert_output("[1, 2, 3].filter{ > 1 }", "[2, 3]");
 }
 
 #[test]
 fn probe18b_pipe_into_fold() {
-    assert_val("[1, 2, 3] >> fold(0, { in.acc + in.elem })", int(6));
+    assert_val("[1, 2, 3].fold(0, { in.acc + in.elem })", int(6));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -6428,7 +6418,7 @@ fn probe20c_complex_tag_function_pipe() {
 #[test]
 fn probe20b_type_error_string_plus_int() {
     // String + Int should produce a type error, not silently coerce.
-    assert_error(r#""hello" + 42"#, "expected string argument");
+    assert_error(r#""hello" + 42"#, "type error");
 }
 
 #[test]
@@ -6454,7 +6444,7 @@ fn probe20b_type_error_string_multiply() {
 #[test]
 fn probe20b_type_error_string_lt_int() {
     // Comparing string < int should error (incomparable types).
-    assert_error(r#""hello" < 42"#, "expected string");
+    assert_error(r#""hello" < 42"#, "type error");
 }
 
 #[test]
@@ -7125,18 +7115,18 @@ fn probe21b_neg_float_mul() {
     assert_val("-1.5 * -2.0", float(3.0));
 }
 
-// ── 8. Mixed int/float arithmetic ──
+// ── 8. Mixed int/float arithmetic is a type error ──
 
 #[test]
 fn probe21b_int_plus_float() {
-    // 1 + 2.0 → mixed → promotes to float: 3.0
-    assert_val("1 + 2.0", float(3.0));
+    // 1 + 2.0 → type error: int and float are distinct types
+    assert_error("1 + 2.0", "type error");
 }
 
 #[test]
 fn probe21b_float_times_int() {
-    // 2.0 * 3 → mixed → promotes to float: 6.0
-    assert_val("2.0 * 3", float(6.0));
+    // 2.0 * 3 → type error: float and int are distinct types
+    assert_error("2.0 * 3", "type error");
 }
 
 #[test]
@@ -7147,8 +7137,8 @@ fn probe21b_int_div_int() {
 
 #[test]
 fn probe21b_float_div_int() {
-    // 7.0 / 2 → mixed → float division: 3.5
-    assert_val("7.0 / 2", float(3.5));
+    // 7.0 / 2 → type error: float and int are distinct types
+    assert_error("7.0 / 2", "type error");
 }
 
 // ── 9. Byte arithmetic ──
@@ -7211,7 +7201,7 @@ fn probe22a_filter_normal() {
 fn probe22a_get_no_arg_error() {
     // .get needs an argument — calling with no args should fail
     // [1, 2, 3].get() passes Unit to get, which expects an int index
-    assert_error("[1, 2, 3].get()", "expected integer index");
+    assert_error("[1, 2, 3].get()", "type error");
 }
 
 #[test]
@@ -7960,7 +7950,7 @@ fn probe24_array_of_functions_pipe_bug() {
     // not to prepend to get's args.
     assert_error(
         "let fns = [{ + 1 }, { * 2 }, { + 3 }]; 5 >> fns.get(1)",
-        "get: expected integer index",
+        "type error",
     );
 }
 
@@ -8154,17 +8144,17 @@ fn bug67_shadowed_both_unused() {
 #[test]
 fn bug68_int_float_comparison_error() {
     // Comparing int to float should be a type error, not silently coerce.
-    assert_error("1 == 1.0", "expected int");
+    assert_error("1 == 1.0", "type error");
 }
 
 #[test]
 fn bug68_float_int_comparison_error() {
-    assert_error("1.0 == 1", "expected float");
+    assert_error("1.0 == 1", "type error");
 }
 
 #[test]
 fn bug68_int_float_lt_error() {
-    assert_error("1 < 2.0", "expected int");
+    assert_error("1 < 2.0", "type error");
 }
 
 // ── BUG-69: TagConstructor equality comparison missing ───────────────
@@ -8245,8 +8235,8 @@ fn bug72_string_len_removed() {
 
 #[test]
 fn bug72_builtin_len_string_removed() {
-    // builtin len() should no longer accept strings
-    assert_error(r#"len("hello")"#, "expected array");
+    // strings use .char_len(), not .len()
+    assert_error(r#""hello".len()"#, "no method");
 }
 
 // ── Value::Debug string escaping ──────────────────────────────────
@@ -8544,6 +8534,15 @@ fn byte_constructor() {
 }
 
 #[test]
+fn byte_auto_coercion() {
+    // Int literals auto-coerce to byte when used in byte context
+    assert_val("b'A' == 65", T);
+    assert_val("b'A' != 66", T);
+    assert_val("b'A' < 66", T);
+    assert_val("b'Z' > 65", T);
+}
+
+#[test]
 fn byte_constructor_out_of_range() {
     assert_error("byte(256)", "out of range");
     assert_error("byte(-1)", "out of range");
@@ -8551,25 +8550,29 @@ fn byte_constructor_out_of_range() {
 
 #[test]
 fn int_constructor() {
-    assert_val("int(3.14)", int(3));
-    assert_val("int(b'A')", int(65));
-    assert_val("int('A')", int(65));
-    assert_val("int(true)", int(1));
-    assert_val("int(false)", int(0));
+    // int() is a literal constructor: IntLiteral → Int
     assert_val("int(42)", int(42));
+    // conversions from other types use methods
+    assert_error("int(3.14)", "type error");
+    assert_error("int(true)", "type error");
 }
 
 #[test]
 fn float_constructor() {
-    assert_val("float(42)", float(42.0));
+    // float() is a literal constructor: FloatLiteral → Float
     assert_val("float(3.14)", float(3.14));
+    assert_val("float(0.0)", float(0.0));
+    // int literals are not float literals
+    assert_error("float(42)", "type error");
 }
 
 #[test]
 fn char_constructor() {
+    // char() constructs from an int literal code point
     assert_val("char(65)", ch('A'));
     assert_val("char(0)", ch('\0'));
-    assert_val("char(b'z')", ch('z'));
+    // byte literals are not int literals
+    assert_error("char(b'z')", "type error");
 }
 
 #[test]
@@ -8577,6 +8580,53 @@ fn char_constructor_invalid() {
     assert_error("char(-1)", "negative value");
     assert_error("char(1114112)", "not a valid Unicode scalar value"); // 0x110000
     assert_error("char(55296)", "not a valid Unicode scalar value");  // 0xD800 surrogate
+}
+
+// ── Conversion methods ───────────────────────────────────────────
+
+#[test]
+fn int_to_float() {
+    assert_val("42.to_float()", float(42.0));
+    assert_val("(-3).to_float()", float(-3.0));
+}
+
+#[test]
+fn int_to_byte() {
+    assert_val("65.to_byte()", byte(65));
+    assert_error("256.to_byte()", "out of range");
+    assert_error("(-1).to_byte()", "out of range");
+}
+
+#[test]
+fn int_to_char() {
+    assert_val("65.to_char()", ch('A'));
+    assert_val("0.to_char()", ch('\0'));
+    assert_error("(-1).to_char()", "negative value");
+    assert_error("1114112.to_char()", "not a valid Unicode scalar value");
+}
+
+#[test]
+fn float_rounding() {
+    assert_val("3.7.ceil()", int(4));
+    assert_val("3.2.floor()", int(3));
+    assert_val("3.5.round()", int(4));
+    assert_val("3.9.trunc()", int(3));
+    assert_val("(-3.7).ceil()", int(-3));
+    assert_val("(-3.7).floor()", int(-4));
+    assert_val("(-3.5).round()", int(-4));
+    assert_val("(-3.9).trunc()", int(-3));
+}
+
+#[test]
+fn char_to_int() {
+    assert_val("'A'.to_int()", int(65));
+    assert_val("'\\0'.to_int()", int(0));
+}
+
+#[test]
+fn byte_to_int() {
+    assert_val("b'A'.to_int()", int(65));
+    assert_val("b'\\0'.to_int()", int(0));
 }
 
 // ── ref_eq, val_eq, and function comparison ──────────────────────
@@ -8598,7 +8648,7 @@ fn ref_eq_different_closures() {
 fn ref_eq_builtins() {
     // Builtins are singletons — same name means same identity
     assert_val("ref_eq(print, print)", T);
-    assert_val("ref_eq(print, len)", F);
+    assert_val("ref_eq(print, not)", F);
 }
 
 #[test]
@@ -8624,7 +8674,7 @@ fn val_eq_closures() {
 #[test]
 fn val_eq_builtins() {
     assert_val("val_eq(print, print)", T);
-    assert_val("val_eq(print, len)", F);
+    assert_val("val_eq(print, not)", F);
 }
 
 #[test]
@@ -8643,7 +8693,7 @@ fn function_eq_error() {
 
 #[test]
 fn mismatched_type_compare_still_generic() {
-    assert_error(r#"1 == "hello""#, "expected int");
+    assert_error(r#"1 == "hello""#, "type error");
 }
 
 // ── Method sets ──────────────────────────────────────────────────
@@ -8891,7 +8941,7 @@ fn std_type_constructors() {
     assert_std(r#"
         use(std);
         let ms = std.method_set(std.Array, (
-            count = { >> let(arr); std.len(arr) }
+            count = { >> let(arr); arr.len() }
         ));
         apply(ms);
         [1, 2, 3].count()

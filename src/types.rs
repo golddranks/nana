@@ -1,19 +1,18 @@
 //! Type checker for nana.
 //!
-//! A forward-only type checker operating on the MIR. No bidirectional inference,
-//! no unification, no type variables — just concrete type propagation.
-//!
-//! The primary use case is validating method set construction: each lexical
-//! `method_set(...)` call produces a generative type (like tags) that doesn't
-//! unify with other method set types.
+//! A forward type checker operating on the MIR with unification and bidirectional
+//! inference. Validates all expressions: literals, bindings, calls, method dispatch,
+//! branch arm consistency, struct/array construction, destructuring, and method set
+//! generativity. Numeric literal types (`IntLiteral`, `FloatLiteral`) coerce to
+//! concrete types via unification.
 
 use std::collections::HashMap;
 
 use crate::ast::{ArrayPat, BranchBinding, Pattern};
 use crate::mir::{Mir, MirBranchPattern, MirKind};
 use crate::value::{
-    TagId, TAG_ID_ARRAY, TAG_ID_BOOL, TAG_ID_BYTE, TAG_ID_CHAR, TAG_ID_FLOAT, TAG_ID_INT,
-    TAG_ID_STRING, TAG_ID_UNIT,
+    TAG_ID_ARRAY, TAG_ID_BOOL, TAG_ID_BYTE, TAG_ID_CHAR, TAG_ID_FLOAT, TAG_ID_INT, TAG_ID_STRING,
+    TAG_ID_UNIT, TagId,
 };
 
 // ── Types ───────────────────────────────────────────────────────
@@ -42,8 +41,20 @@ pub enum Ty {
         id: u64,
         tag_id: TagId,
     },
-    /// Escape hatch for constructs we don't type yet.
-    Unknown,
+    /// Sum type: one of several possible types (e.g. `Ok(Int) | Err(String)`).
+    /// Variants are always flattened (no nested unions).
+    Union(Vec<Ty>),
+    /// Numeric literal types: coerce to compatible types during unification.
+    /// `IntLiteral` coerces to `Int` or `Byte`.
+    /// `FloatLiteral` coerces to `Float`.
+    /// When no context forces coercion, they default to `Int` / `Float`.
+    IntLiteral,
+    FloatLiteral,
+    /// Polymorphic type: unifies with any type. Used for genuinely generic
+    /// function parameters (e.g. `print` accepts any type), unresolved block
+    /// params before a call site is known, and empty array element types
+    /// before refinement.
+    Any,
 }
 
 // ── Type environment ────────────────────────────────────────────
@@ -61,6 +72,10 @@ pub struct TyEnv {
     next_ms_id: u64,
     /// Global registry: method set id → info (tag_id + methods struct).
     method_sets: HashMap<u64, MethodSetInfo>,
+    /// Block bodies stored for deferred re-checking on call.
+    /// When `let f = { body }`, we store body here keyed by binding name.
+    /// On `f(x)`, we re-check body with `in` bound to arg type.
+    block_bodies: HashMap<std::string::String, Mir>,
 }
 
 impl TyEnv {
@@ -70,6 +85,7 @@ impl TyEnv {
             modules: HashMap::new(),
             next_ms_id: 0,
             method_sets: HashMap::new(),
+            block_bodies: HashMap::new(),
         }
     }
 
@@ -91,13 +107,10 @@ impl TyEnv {
     }
 
     fn get(&self, name: &str) -> Option<&Ty> {
-        self.bindings.iter().rev().find_map(|(n, ty)| {
-            if n == name {
-                Some(ty)
-            } else {
-                None
-            }
-        })
+        self.bindings
+            .iter()
+            .rev()
+            .find_map(|(n, ty)| if n == name { Some(ty) } else { None })
     }
 
     fn bind(&mut self, name: std::string::String, ty: Ty) {
@@ -115,7 +128,8 @@ impl TyEnv {
     }
 
     fn register_method_set(&mut self, id: u64, tag_id: TagId, methods: Ty) {
-        self.method_sets.insert(id, MethodSetInfo { tag_id, methods });
+        self.method_sets
+            .insert(id, MethodSetInfo { tag_id, methods });
     }
 
     /// Find a method's type by searching active method sets in scope.
@@ -126,11 +140,17 @@ impl TyEnv {
             if !name.starts_with("\0ms") {
                 continue;
             }
-            if let Ty::MethodSet { id, tag_id: ms_tag_id } = ty {
+            if let Ty::MethodSet {
+                id,
+                tag_id: ms_tag_id,
+            } = ty
+            {
                 if *ms_tag_id == tag_id {
                     if let Some(info) = self.method_sets.get(id) {
                         if let Ty::Struct(fields) = &info.methods {
-                            if let Some((_, method_ty)) = fields.iter().find(|(n, _)| n == method_name) {
+                            if let Some((_, method_ty)) =
+                                fields.iter().find(|(n, _)| n == method_name)
+                            {
                                 return Some(method_ty.clone());
                             }
                         }
@@ -145,8 +165,8 @@ impl TyEnv {
 /// Map a primitive Ty to its built-in TagId for method set dispatch.
 fn ty_to_tag_id(ty: &Ty) -> Option<TagId> {
     match ty {
-        Ty::Int => Some(TAG_ID_INT),
-        Ty::Float => Some(TAG_ID_FLOAT),
+        Ty::Int | Ty::IntLiteral => Some(TAG_ID_INT),
+        Ty::Float | Ty::FloatLiteral => Some(TAG_ID_FLOAT),
         Ty::Bool => Some(TAG_ID_BOOL),
         Ty::String => Some(TAG_ID_STRING),
         Ty::Char => Some(TAG_ID_CHAR),
@@ -158,10 +178,14 @@ fn ty_to_tag_id(ty: &Ty) -> Option<TagId> {
     }
 }
 
-/// Specialize a generic (Unknown) method return type based on the receiver type.
-/// For example, `Array(Int).get(i)` returns `Int` (not `Unknown`).
-fn specialize_method_return(recv_ty: &Ty, method: &str, ret: Ty) -> Ty {
-    if ret != Ty::Unknown {
+/// Specialize a generic (Unknown) method return type based on the receiver type
+/// and the argument type. For example, `Array(Int).get(i)` returns `Int` (not `Unknown`).
+///
+/// Note: `arg_ty` is the type of the *original* method arg (before receiver prepend).
+/// At runtime, `prepend_arg(&recv, arg)` creates `(recv, arg)` — but the type checker
+/// sees the arg as-is from the MIR.
+fn specialize_method_return(recv_ty: &Ty, method: &str, arg_ty: &Ty, ret: Ty) -> Ty {
+    if ret != Ty::Any {
         return ret; // already specific, no need to specialize
     }
     match recv_ty {
@@ -169,10 +193,102 @@ fn specialize_method_return(recv_ty: &Ty, method: &str, ret: Ty) -> Ty {
             "get" => *elem.clone(),
             "filter" | "slice" => recv_ty.clone(),
             "add" => recv_ty.clone(), // array concatenation
-            "map" | "zip" => ret, // depends on callback, keep Unknown
+            "map" => {
+                // arr.map(f) → Array(f.ret)
+                match fn_return_type(arg_ty) {
+                    Some(r) => Ty::Array(Box::new(r)),
+                    None => Ty::Array(Box::new(Ty::Any)),
+                }
+            }
+            "fold" => {
+                // arr.fold(init, f) — arg is struct (init, f).
+                // Return type = init type (accumulator).
+                match arg_ty {
+                    Ty::Struct(fields) if !fields.is_empty() => fields[0].1.clone(),
+                    _ => ret,
+                }
+            }
+            "zip" => {
+                // arr.zip(other) → Array(Struct([(0, T1), (1, T2)]))
+                match arg_ty {
+                    Ty::Array(other_elem) => Ty::Array(Box::new(Ty::Struct(vec![
+                        ("0".into(), *elem.clone()),
+                        ("1".into(), *other_elem.clone()),
+                    ]))),
+                    _ => ret,
+                }
+            }
             _ => ret,
         },
         _ => ret,
+    }
+}
+
+/// Check that the user-supplied method arg matches what the method expects.
+/// The method's param type is in prepended form (prepend_arg(recv, user_arg)).
+/// We extract the expected user arg from the param type and unify against actual.
+fn check_method_arg(
+    _recv_ty: &Ty,
+    arg_ty: &Ty,
+    param: &Ty,
+    method: &str,
+) -> Result<(), std::string::String> {
+    // Unknown param = no checking
+    if *param == Ty::Any {
+        return Ok(());
+    }
+    // Extract expected user arg from the prepended param.
+    let expected_arg = match param {
+        // Struct param: field "0" is receiver, rest is user arg
+        Ty::Struct(fields) if !fields.is_empty() && fields[0].0 == "0" => {
+            let rest: Vec<_> = fields[1..].to_vec();
+            if rest.is_empty() {
+                // Unary with struct receiver — shouldn't happen for primitives
+                Ty::Unit
+            } else if rest.len() == 1 && rest[0].0.parse::<u64>().is_ok() {
+                // Single positional arg: Struct([("0", recv), ("1", T)]) → user arg is T
+                rest[0].1.clone()
+            } else {
+                // Multiple/named args: user passed a struct
+                Ty::Struct(rest)
+            }
+        }
+        // Non-struct param = unary (prepend_arg(recv, Unit) = recv)
+        _ => Ty::Unit,
+    };
+    unify(arg_ty, &expected_arg).map_err(|e| format!("type error in .{}(): {}", method, e))?;
+    Ok(())
+}
+
+/// Mirror of `prepend_arg` from eval.rs, but for types.
+/// `recv.method(arg)` at runtime calls `method_fn(prepend_arg(recv, arg))`.
+#[cfg(test)]
+fn prepend_arg_ty(recv_ty: &Ty, arg_ty: &Ty) -> Ty {
+    match arg_ty {
+        Ty::Unit => recv_ty.clone(),
+        Ty::Struct(fields) => {
+            let mut new_fields = vec![("0".into(), recv_ty.clone())];
+            for (label, ty) in fields {
+                if let Ok(n) = label.parse::<u64>() {
+                    new_fields.push(((n + 1).to_string(), ty.clone()));
+                } else {
+                    new_fields.push((label.clone(), ty.clone()));
+                }
+            }
+            Ty::Struct(new_fields)
+        }
+        _ => Ty::Struct(vec![
+            ("0".into(), recv_ty.clone()),
+            ("1".into(), arg_ty.clone()),
+        ]),
+    }
+}
+
+/// Extract the return type from a function type.
+fn fn_return_type(ty: &Ty) -> Option<Ty> {
+    match ty {
+        Ty::Fn { ret, .. } => Some(*ret.clone()),
+        _ => None,
     }
 }
 
@@ -180,11 +296,6 @@ fn specialize_method_return(recv_ty: &Ty, method: &str, ret: Ty) -> Ty {
 
 /// The type of `build_core_module()` from eval.rs.
 pub fn core_module_type() -> Ty {
-    let fn_ty = || Ty::Fn {
-        param: Box::new(Ty::Unknown),
-        ret: Box::new(Ty::Unknown),
-    };
-
     let mut fields: Vec<(std::string::String, Ty)> = Vec::new();
 
     // Type constructors (same order as build_core_module)
@@ -202,138 +313,254 @@ pub fn core_module_type() -> Ty {
         fields.push((name.to_string(), Ty::TagConstructor(*id)));
     }
 
-    // Builtins with precise return types.
-    // Params are Unknown (not checked yet); return types enable type propagation.
-    let f = |ret: Ty| Ty::Fn {
-        param: Box::new(Ty::Unknown),
+    // Helpers for building function types.
+    // fn(param) -> ret
+    let f = |param: Ty, ret: Ty| Ty::Fn {
+        param: Box::new(param),
         ret: Box::new(ret),
     };
+    // Binary method: prepend_arg(T, T) = Struct([("0", T), ("1", T)])
+    let binop = |t: Ty, ret: Ty| {
+        f(
+            Ty::Struct(vec![("0".into(), t.clone()), ("1".into(), t)]),
+            ret,
+        )
+    };
+    // Binary method with different arg types
+    let binop2 =
+        |t1: Ty, t2: Ty, ret: Ty| f(Ty::Struct(vec![("0".into(), t1), ("1".into(), t2)]), ret);
+    // Unary method: prepend_arg(T, Unit) = T
+    let unary = |t: Ty, ret: Ty| f(t, ret);
 
-    // Logical builtins
-    fields.push(("not".into(), f(Ty::Bool)));
-    fields.push(("and".into(), f(Ty::Bool)));
-    fields.push(("or".into(), f(Ty::Bool)));
+    // Logical builtins (standalone functions, not methods — no prepend)
+    fields.push(("not".into(), f(Ty::Bool, Ty::Bool)));
+    fields.push((
+        "and".into(),
+        f(
+            Ty::Struct(vec![("0".into(), Ty::Bool), ("1".into(), Ty::Bool)]),
+            Ty::Bool,
+        ),
+    ));
+    fields.push((
+        "or".into(),
+        f(
+            Ty::Struct(vec![("0".into(), Ty::Bool), ("1".into(), Ty::Bool)]),
+            Ty::Bool,
+        ),
+    ));
 
-    // Collection builtins
-    fields.push(("len".into(), f(Ty::Int)));
-    fields.push(("print".into(), f(Ty::Unit)));
-    fields.push(("map".into(), f(Ty::Array(Box::new(Ty::Unknown)))));
-    fields.push(("filter".into(), f(Ty::Array(Box::new(Ty::Unknown)))));
-    fields.push(("fold".into(), f(Ty::Unknown))); // return type depends on accumulator
-    fields.push(("zip".into(), f(Ty::Array(Box::new(Ty::Unknown)))));
+    // Standalone builtins
+    fields.push(("print".into(), f(Ty::String, Ty::Unit)));
 
-    // Conversion builtins
-    fields.push(("byte".into(), f(Ty::Byte)));
-    fields.push(("int".into(), f(Ty::Int)));
-    fields.push(("float".into(), f(Ty::Float)));
-    fields.push(("char".into(), f(Ty::Char)));
+    // Type constructors (literal → type only)
+    fields.push(("byte".into(), f(Ty::IntLiteral, Ty::Byte)));
+    fields.push(("int".into(), f(Ty::IntLiteral, Ty::Int)));
+    fields.push(("float".into(), f(Ty::FloatLiteral, Ty::Float)));
+    fields.push(("char".into(), f(Ty::IntLiteral, Ty::Char)));
 
-    // Equality builtins
-    fields.push(("ref_eq".into(), f(Ty::Bool)));
-    fields.push(("val_eq".into(), f(Ty::Bool)));
-    fields.push(("method_set".into(), fn_ty())); // generative, handled specially
+    // Equality builtins (standalone)
+    fields.push(("ref_eq".into(), f(Ty::Any, Ty::Bool)));
+    fields.push(("val_eq".into(), f(Ty::Any, Ty::Bool)));
+    fields.push(("method_set".into(), f(Ty::Any, Ty::Any))); // generative, handled specially
 
-    // Array methods
-    fields.push(("array_get".into(), f(Ty::Unknown))); // element type unknown
-    fields.push(("array_slice".into(), f(Ty::Array(Box::new(Ty::Unknown)))));
-    fields.push(("array_len".into(), f(Ty::Int)));
-    fields.push(("array_map".into(), f(Ty::Array(Box::new(Ty::Unknown)))));
-    fields.push(("array_filter".into(), f(Ty::Array(Box::new(Ty::Unknown)))));
-    fields.push(("array_fold".into(), f(Ty::Unknown)));
-    fields.push(("array_zip".into(), f(Ty::Array(Box::new(Ty::Unknown)))));
-    fields.push(("array_add".into(), f(Ty::Array(Box::new(Ty::Unknown)))));
-    fields.push(("array_eq".into(), f(Ty::Bool)));
-    fields.push(("array_not_eq".into(), f(Ty::Bool)));
+    // Array methods (receive prepended arg: Struct([("0", Array), ("1", arg)]))
+    let arr = Ty::Array(Box::new(Ty::Any));
+    fields.push(("array_get".into(), binop2(arr.clone(), Ty::Int, Ty::Any)));
+    let range_ty_arr = Ty::Struct(vec![("start".into(), Ty::Int), ("end".into(), Ty::Int)]);
+    fields.push((
+        "array_slice".into(),
+        binop2(arr.clone(), range_ty_arr, arr.clone()),
+    ));
+    fields.push(("array_len".into(), unary(arr.clone(), Ty::Int)));
+    fields.push((
+        "array_map".into(),
+        binop2(arr.clone(), Ty::Any, arr.clone()),
+    )); // cb param
+    fields.push((
+        "array_filter".into(),
+        binop2(arr.clone(), Ty::Any, arr.clone()),
+    ));
+    fields.push(("array_fold".into(), f(Ty::Any, Ty::Any))); // complex param
+    fields.push((
+        "array_zip".into(),
+        binop2(arr.clone(), arr.clone(), arr.clone()),
+    ));
+    fields.push(("array_add".into(), binop(arr.clone(), arr.clone())));
+    fields.push(("array_eq".into(), binop(arr.clone(), Ty::Bool)));
+    fields.push(("array_not_eq".into(), binop(arr.clone(), Ty::Bool)));
 
     // String methods
-    fields.push(("string_byte_len".into(), f(Ty::Int)));
-    fields.push(("string_char_len".into(), f(Ty::Int)));
-    fields.push(("string_byte_get".into(), f(Ty::Byte)));
-    fields.push(("string_char_get".into(), f(Ty::Char)));
-    fields.push(("string_as_bytes".into(), f(Ty::Array(Box::new(Ty::Byte)))));
-    fields.push(("string_chars".into(), f(Ty::Array(Box::new(Ty::Char)))));
-    fields.push(("string_split".into(), f(Ty::Array(Box::new(Ty::String)))));
-    fields.push(("string_trim".into(), f(Ty::String)));
-    fields.push(("string_contains".into(), f(Ty::Bool)));
-    fields.push(("string_slice".into(), f(Ty::String)));
-    fields.push(("string_starts_with".into(), f(Ty::Bool)));
-    fields.push(("string_ends_with".into(), f(Ty::Bool)));
-    fields.push(("string_replace".into(), f(Ty::String)));
-    fields.push(("string_add".into(), f(Ty::String)));
-    fields.push(("string_eq".into(), f(Ty::Bool)));
-    fields.push(("string_not_eq".into(), f(Ty::Bool)));
-    fields.push(("string_lt".into(), f(Ty::Bool)));
-    fields.push(("string_gt".into(), f(Ty::Bool)));
-    fields.push(("string_lt_eq".into(), f(Ty::Bool)));
-    fields.push(("string_gt_eq".into(), f(Ty::Bool)));
-    fields.push(("string_to_string".into(), f(Ty::String)));
+    fields.push(("string_byte_len".into(), unary(Ty::String, Ty::Int)));
+    fields.push(("string_char_len".into(), unary(Ty::String, Ty::Int)));
+    fields.push((
+        "string_byte_get".into(),
+        binop2(Ty::String, Ty::Int, Ty::Byte),
+    ));
+    fields.push((
+        "string_char_get".into(),
+        binop2(Ty::String, Ty::Int, Ty::Char),
+    ));
+    fields.push((
+        "string_as_bytes".into(),
+        unary(Ty::String, Ty::Array(Box::new(Ty::Byte))),
+    ));
+    fields.push((
+        "string_chars".into(),
+        unary(Ty::String, Ty::Array(Box::new(Ty::Char))),
+    ));
+    fields.push((
+        "string_split".into(),
+        binop2(Ty::String, Ty::String, Ty::Array(Box::new(Ty::String))),
+    ));
+    fields.push(("string_trim".into(), unary(Ty::String, Ty::String)));
+    fields.push((
+        "string_contains".into(),
+        binop2(Ty::String, Ty::String, Ty::Bool),
+    ));
+    fields.push((
+        "string_contains_char".into(),
+        binop2(Ty::String, Ty::Char, Ty::Bool),
+    ));
+    let range_ty = Ty::Struct(vec![("start".into(), Ty::Int), ("end".into(), Ty::Int)]);
+    fields.push((
+        "string_slice".into(),
+        binop2(Ty::String, range_ty.clone(), Ty::String),
+    ));
+    fields.push(("string_starts_with".into(), binop(Ty::String, Ty::Bool)));
+    fields.push(("string_ends_with".into(), binop(Ty::String, Ty::Bool)));
+    let replace_arg = Ty::Struct(vec![("0".into(), Ty::String), ("1".into(), Ty::String)]);
+    fields.push((
+        "string_replace".into(),
+        binop2(Ty::String, replace_arg, Ty::String),
+    ));
+    fields.push(("string_add".into(), binop(Ty::String, Ty::String)));
+    fields.push(("string_eq".into(), binop(Ty::String, Ty::Bool)));
+    fields.push(("string_not_eq".into(), binop(Ty::String, Ty::Bool)));
+    fields.push(("string_lt".into(), binop(Ty::String, Ty::Bool)));
+    fields.push(("string_gt".into(), binop(Ty::String, Ty::Bool)));
+    fields.push(("string_lt_eq".into(), binop(Ty::String, Ty::Bool)));
+    fields.push(("string_gt_eq".into(), binop(Ty::String, Ty::Bool)));
+    fields.push(("string_to_string".into(), unary(Ty::String, Ty::String)));
 
-    // Int methods
-    fields.push(("int_add".into(), f(Ty::Int)));
-    fields.push(("int_subtract".into(), f(Ty::Int)));
-    fields.push(("int_times".into(), f(Ty::Int)));
-    fields.push(("int_divided_by".into(), f(Ty::Int)));
-    fields.push(("int_negate".into(), f(Ty::Int)));
-    fields.push(("int_eq".into(), f(Ty::Bool)));
-    fields.push(("int_not_eq".into(), f(Ty::Bool)));
-    fields.push(("int_lt".into(), f(Ty::Bool)));
-    fields.push(("int_gt".into(), f(Ty::Bool)));
-    fields.push(("int_lt_eq".into(), f(Ty::Bool)));
-    fields.push(("int_gt_eq".into(), f(Ty::Bool)));
-    fields.push(("int_to_string".into(), f(Ty::String)));
+    // Int methods — arithmetic is Int × Int → Int (no cross-type promotion)
+    fields.push(("int_add".into(), binop(Ty::Int, Ty::Int)));
+    fields.push(("int_subtract".into(), binop(Ty::Int, Ty::Int)));
+    fields.push(("int_times".into(), binop(Ty::Int, Ty::Int)));
+    fields.push(("int_divided_by".into(), binop(Ty::Int, Ty::Int)));
+    fields.push(("int_negate".into(), unary(Ty::Int, Ty::Int)));
+    fields.push(("int_eq".into(), binop(Ty::Int, Ty::Bool)));
+    fields.push(("int_not_eq".into(), binop(Ty::Int, Ty::Bool)));
+    fields.push(("int_lt".into(), binop(Ty::Int, Ty::Bool)));
+    fields.push(("int_gt".into(), binop(Ty::Int, Ty::Bool)));
+    fields.push(("int_lt_eq".into(), binop(Ty::Int, Ty::Bool)));
+    fields.push(("int_gt_eq".into(), binop(Ty::Int, Ty::Bool)));
+    fields.push(("int_to_string".into(), unary(Ty::Int, Ty::String)));
+    fields.push(("int_to_float".into(), unary(Ty::Int, Ty::Float)));
+    fields.push(("int_to_byte".into(), unary(Ty::Int, Ty::Byte)));
+    fields.push(("int_to_char".into(), unary(Ty::Int, Ty::Char)));
 
-    // Float methods
-    fields.push(("float_add".into(), f(Ty::Float)));
-    fields.push(("float_subtract".into(), f(Ty::Float)));
-    fields.push(("float_times".into(), f(Ty::Float)));
-    fields.push(("float_divided_by".into(), f(Ty::Float)));
-    fields.push(("float_negate".into(), f(Ty::Float)));
-    fields.push(("float_eq".into(), f(Ty::Bool)));
-    fields.push(("float_not_eq".into(), f(Ty::Bool)));
-    fields.push(("float_lt".into(), f(Ty::Bool)));
-    fields.push(("float_gt".into(), f(Ty::Bool)));
-    fields.push(("float_lt_eq".into(), f(Ty::Bool)));
-    fields.push(("float_gt_eq".into(), f(Ty::Bool)));
-    fields.push(("float_to_string".into(), f(Ty::String)));
+    // Float methods — arithmetic is Float × Float → Float (no cross-type promotion)
+    fields.push(("float_add".into(), binop(Ty::Float, Ty::Float)));
+    fields.push(("float_subtract".into(), binop(Ty::Float, Ty::Float)));
+    fields.push(("float_times".into(), binop(Ty::Float, Ty::Float)));
+    fields.push(("float_divided_by".into(), binop(Ty::Float, Ty::Float)));
+    fields.push(("float_negate".into(), unary(Ty::Float, Ty::Float)));
+    fields.push(("float_eq".into(), binop(Ty::Float, Ty::Bool)));
+    fields.push(("float_not_eq".into(), binop(Ty::Float, Ty::Bool)));
+    fields.push(("float_lt".into(), binop(Ty::Float, Ty::Bool)));
+    fields.push(("float_gt".into(), binop(Ty::Float, Ty::Bool)));
+    fields.push(("float_lt_eq".into(), binop(Ty::Float, Ty::Bool)));
+    fields.push(("float_gt_eq".into(), binop(Ty::Float, Ty::Bool)));
+    fields.push(("float_to_string".into(), unary(Ty::Float, Ty::String)));
+    fields.push(("float_ceil".into(), unary(Ty::Float, Ty::Int)));
+    fields.push(("float_floor".into(), unary(Ty::Float, Ty::Int)));
+    fields.push(("float_round".into(), unary(Ty::Float, Ty::Int)));
+    fields.push(("float_trunc".into(), unary(Ty::Float, Ty::Int)));
 
     // Bool methods
-    fields.push(("bool_eq".into(), f(Ty::Bool)));
-    fields.push(("bool_not_eq".into(), f(Ty::Bool)));
-    fields.push(("bool_to_string".into(), f(Ty::String)));
+    fields.push(("bool_eq".into(), binop(Ty::Bool, Ty::Bool)));
+    fields.push(("bool_not_eq".into(), binop(Ty::Bool, Ty::Bool)));
+    fields.push(("bool_to_string".into(), unary(Ty::Bool, Ty::String)));
 
     // Char methods
-    fields.push(("char_eq".into(), f(Ty::Bool)));
-    fields.push(("char_not_eq".into(), f(Ty::Bool)));
-    fields.push(("char_lt".into(), f(Ty::Bool)));
-    fields.push(("char_gt".into(), f(Ty::Bool)));
-    fields.push(("char_lt_eq".into(), f(Ty::Bool)));
-    fields.push(("char_gt_eq".into(), f(Ty::Bool)));
-    fields.push(("char_to_string".into(), f(Ty::String)));
+    fields.push(("char_eq".into(), binop(Ty::Char, Ty::Bool)));
+    fields.push(("char_not_eq".into(), binop(Ty::Char, Ty::Bool)));
+    fields.push(("char_lt".into(), binop(Ty::Char, Ty::Bool)));
+    fields.push(("char_gt".into(), binop(Ty::Char, Ty::Bool)));
+    fields.push(("char_lt_eq".into(), binop(Ty::Char, Ty::Bool)));
+    fields.push(("char_gt_eq".into(), binop(Ty::Char, Ty::Bool)));
+    fields.push(("char_to_string".into(), unary(Ty::Char, Ty::String)));
+    fields.push(("char_to_int".into(), unary(Ty::Char, Ty::Int)));
 
     // Byte methods
-    fields.push(("byte_eq".into(), f(Ty::Bool)));
-    fields.push(("byte_not_eq".into(), f(Ty::Bool)));
-    fields.push(("byte_lt".into(), f(Ty::Bool)));
-    fields.push(("byte_gt".into(), f(Ty::Bool)));
-    fields.push(("byte_lt_eq".into(), f(Ty::Bool)));
-    fields.push(("byte_gt_eq".into(), f(Ty::Bool)));
-    fields.push(("byte_to_string".into(), f(Ty::String)));
+    fields.push(("byte_eq".into(), binop(Ty::Byte, Ty::Bool)));
+    fields.push(("byte_not_eq".into(), binop(Ty::Byte, Ty::Bool)));
+    fields.push(("byte_lt".into(), binop(Ty::Byte, Ty::Bool)));
+    fields.push(("byte_gt".into(), binop(Ty::Byte, Ty::Bool)));
+    fields.push(("byte_lt_eq".into(), binop(Ty::Byte, Ty::Bool)));
+    fields.push(("byte_gt_eq".into(), binop(Ty::Byte, Ty::Bool)));
+    fields.push(("byte_to_string".into(), unary(Ty::Byte, Ty::String)));
+    fields.push(("byte_to_int".into(), unary(Ty::Byte, Ty::Int)));
 
     // Unit methods
-    fields.push(("unit_eq".into(), f(Ty::Bool)));
-    fields.push(("unit_not_eq".into(), f(Ty::Bool)));
+    fields.push(("unit_eq".into(), binop(Ty::Unit, Ty::Bool)));
+    fields.push(("unit_not_eq".into(), binop(Ty::Unit, Ty::Bool)));
 
     Ty::Struct(fields)
 }
 
 // ── Unification ─────────────────────────────────────────────────
 
+/// Add a type to a union, merging same-tag variants. Returns the new union.
+fn union_add(mut variants: Vec<Ty>, ty: Ty) -> Result<Ty, std::string::String> {
+    // Flatten: if ty is itself a Union, merge all its variants
+    let to_add = match ty {
+        Ty::Union(inner) => inner,
+        other => vec![other],
+    };
+    for t in to_add {
+        // Check if this tag already exists in the union — unify payloads
+        let mut merged = false;
+        for existing in variants.iter_mut() {
+            if let (
+                Ty::Tagged {
+                    tag_id: id1,
+                    payload: p1,
+                },
+                Ty::Tagged {
+                    tag_id: id2,
+                    payload: p2,
+                },
+            ) = (existing, &t)
+            {
+                if id1 == id2 {
+                    let unified_payload = unify(p1, p2)?;
+                    *p1 = Box::new(unified_payload);
+                    merged = true;
+                    break;
+                }
+            }
+        }
+        if !merged {
+            // Check for structural duplicates
+            if !variants.contains(&t) {
+                variants.push(t);
+            }
+        }
+    }
+    if variants.len() == 1 {
+        Ok(variants.into_iter().next().unwrap())
+    } else {
+        Ok(Ty::Union(variants))
+    }
+}
+
 /// Check if two types are compatible and return the unified type.
 /// `Unknown` is compatible with any type (acts as a wildcard).
 pub fn unify(a: &Ty, b: &Ty) -> Result<Ty, std::string::String> {
     match (a, b) {
         // Unknown unifies with anything
-        (Ty::Unknown, other) | (other, Ty::Unknown) => Ok(other.clone()),
+        (Ty::Any, other) | (other, Ty::Any) => Ok(other.clone()),
 
         // Primitives: must match exactly
         (Ty::Int, Ty::Int) => Ok(Ty::Int),
@@ -390,37 +617,97 @@ pub fn unify(a: &Ty, b: &Ty) -> Result<Ty, std::string::String> {
             }
         }
 
-        // Tagged: same tag ID → unify payloads; different tags → Unknown (sum type)
-        (Ty::Tagged { tag_id: id1, payload: p1 }, Ty::Tagged { tag_id: id2, payload: p2 }) => {
+        // Tagged: same tag ID → unify payloads; different tags → union
+        (
+            Ty::Tagged {
+                tag_id: id1,
+                payload: p1,
+            },
+            Ty::Tagged {
+                tag_id: id2,
+                payload: p2,
+            },
+        ) => {
             if id1 == id2 {
                 let payload = unify(p1, p2)?;
-                Ok(Ty::Tagged { tag_id: *id1, payload: Box::new(payload) })
+                Ok(Ty::Tagged {
+                    tag_id: *id1,
+                    payload: Box::new(payload),
+                })
             } else {
-                // Different tags in a branch — this is a sum type (Ok | Err, etc.)
-                // We don't have union types yet, so fall back to Unknown.
-                Ok(Ty::Unknown)
+                Ok(Ty::Union(vec![a.clone(), b.clone()]))
             }
         }
 
-        // Tagged with non-tagged — can't unify structurally, but in branches
-        // a tagged and non-tagged arm indicate a heterogeneous result.
-        // Fall back to Unknown rather than erroring.
-        (Ty::Tagged { .. }, _) | (_, Ty::Tagged { .. }) => Ok(Ty::Unknown),
+        // Union with anything → merge into the union
+        (Ty::Union(variants), other) | (other, Ty::Union(variants)) => {
+            union_add(variants.clone(), other.clone())
+        }
+
+        // Tagged with non-tagged → union
+        (Ty::Tagged { .. }, _) | (_, Ty::Tagged { .. }) => {
+            Ok(Ty::Union(vec![a.clone(), b.clone()]))
+        }
 
         // MethodSet: must have same generative ID (same lexical site)
-        (Ty::MethodSet { id: id1, tag_id: t1 }, Ty::MethodSet { id: id2, tag_id: t2 }) => {
+        (
+            Ty::MethodSet {
+                id: id1,
+                tag_id: t1,
+            },
+            Ty::MethodSet {
+                id: id2,
+                tag_id: t2,
+            },
+        ) => {
             if id1 == id2 && t1 == t2 {
-                Ok(Ty::MethodSet { id: *id1, tag_id: *t1 })
+                Ok(Ty::MethodSet {
+                    id: *id1,
+                    tag_id: *t1,
+                })
             } else {
                 Err("type error: cannot unify different method set types".to_string())
             }
         }
 
+        // IntLiteral coerces to Int or Byte (not Float — int and float are distinct)
+        (Ty::IntLiteral, Ty::IntLiteral) => Ok(Ty::IntLiteral),
+        (Ty::IntLiteral, Ty::Int) | (Ty::Int, Ty::IntLiteral) => Ok(Ty::Int),
+        (Ty::IntLiteral, Ty::Byte) | (Ty::Byte, Ty::IntLiteral) => Ok(Ty::Byte),
+
+        // FloatLiteral coerces to Float
+        (Ty::FloatLiteral, Ty::FloatLiteral) => Ok(Ty::FloatLiteral),
+        (Ty::FloatLiteral, Ty::Float) | (Ty::Float, Ty::FloatLiteral) => Ok(Ty::Float),
+
         // Everything else: mismatch
-        _ => Err(format!(
-            "type error: cannot unify {:?} with {:?}",
-            a, b
-        )),
+        _ => Err(format!("type error: cannot unify {:?} with {:?}", a, b)),
+    }
+}
+
+/// Default unresolved literal types to their concrete forms.
+/// `IntLiteral` → `Int`, `FloatLiteral` → `Float`.
+/// Applied recursively through compound types.
+fn default_literals(ty: Ty) -> Ty {
+    match ty {
+        Ty::IntLiteral => Ty::Int,
+        Ty::FloatLiteral => Ty::Float,
+        Ty::Array(elem) => Ty::Array(Box::new(default_literals(*elem))),
+        Ty::Struct(fields) => Ty::Struct(
+            fields
+                .into_iter()
+                .map(|(n, t)| (n, default_literals(t)))
+                .collect(),
+        ),
+        Ty::Fn { param, ret } => Ty::Fn {
+            param: Box::new(default_literals(*param)),
+            ret: Box::new(default_literals(*ret)),
+        },
+        Ty::Tagged { tag_id, payload } => Ty::Tagged {
+            tag_id,
+            payload: Box::new(default_literals(*payload)),
+        },
+        Ty::Union(variants) => Ty::Union(variants.into_iter().map(default_literals).collect()),
+        other => other,
     }
 }
 
@@ -429,8 +716,8 @@ pub fn unify(a: &Ty, b: &Ty) -> Result<Ty, std::string::String> {
 pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
     match mir.as_ref() {
         // ── Literals ──
-        MirKind::Int(_) => Ok(Ty::Int),
-        MirKind::Float(_) => Ok(Ty::Float),
+        MirKind::Int(_) => Ok(Ty::IntLiteral),
+        MirKind::Float(_) => Ok(Ty::FloatLiteral),
         MirKind::Bool(_) => Ok(Ty::Bool),
         MirKind::Str(_) => Ok(Ty::String),
         MirKind::Char(_) => Ok(Ty::Char),
@@ -438,32 +725,28 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
         MirKind::Unit => Ok(Ty::Unit),
 
         // ── Ident ──
-        MirKind::Ident(name) => {
-            env.get(name)
-                .cloned()
-                .ok_or_else(|| format!("type error: undefined variable: {}", name))
-        }
+        MirKind::Ident(name) => env
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("type error: undefined variable: {}", name)),
 
         // ── Import ──
-        MirKind::Import(name) => {
-            env.modules
-                .get(name)
-                .cloned()
-                .ok_or_else(|| format!("type error: module not provided: {}", name))
-        }
+        MirKind::Import(name) => env
+            .modules
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("type error: module not provided: {}", name)),
 
         // ── FieldAccess ──
         MirKind::FieldAccess(expr, field) => {
             let ty = check(expr, env)?;
             match ty {
-                Ty::Struct(fields) => {
-                    fields
-                        .iter()
-                        .find(|(name, _)| name == field)
-                        .map(|(_, ty)| ty.clone())
-                        .ok_or_else(|| format!("type error: field '{}' not found in struct", field))
-                }
-                Ty::Unknown => Ok(Ty::Unknown),
+                Ty::Struct(fields) => fields
+                    .iter()
+                    .find(|(name, _)| name == field)
+                    .map(|(_, ty)| ty.clone())
+                    .ok_or_else(|| format!("type error: field '{}' not found in struct", field)),
+                Ty::Any => Ok(Ty::Any),
                 _ => Err(format!("type error: field access on non-struct value")),
             }
         }
@@ -512,7 +795,17 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
 
         // ── Bind ──
         MirKind::Bind { name, value, body } => {
-            let val_ty = check(value, env)?;
+            // Store block/branch bodies for deferred re-checking at call sites.
+            // Remove stale entries when a name is rebound to a non-block value.
+            match value.as_ref() {
+                MirKind::Block(_) | MirKind::BranchBlock(_) => {
+                    env.block_bodies.insert(name.clone(), value.clone());
+                }
+                _ => {
+                    env.block_bodies.remove(name);
+                }
+            }
+            let val_ty = default_literals(check(value, env)?);
             env.bind(name.clone(), val_ty);
             let body_ty = check(body, env)?;
             env.pop_binding();
@@ -520,19 +813,13 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
         }
 
         // ── Pipe (for let/letarray/apply that weren't desugared) ──
-        MirKind::Pipe(lhs, rhs) => {
-            check_pipe(lhs, rhs, env)
-        }
+        MirKind::Pipe(lhs, rhs) => check_pipe(lhs, rhs, env),
 
         // ── Let (pattern destructuring — standalone, not via pipe) ──
-        MirKind::Let { pattern, body } => {
-            check_let(pattern, body, &Ty::Unknown, env)
-        }
+        MirKind::Let { pattern, body } => check_let(pattern, body, &Ty::Any, env),
 
         // ── Call ──
-        MirKind::Call(func, arg) => {
-            check_call(func, arg, env)
-        }
+        MirKind::Call(func, arg) => check_call(func, arg, env),
 
         // ── Apply (method set scope) ──
         MirKind::Apply { expr, body } => {
@@ -544,7 +831,7 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                     env.pop_binding();
                     result
                 }
-                Ty::Unknown => check(body, env),
+                Ty::Any => check(body, env),
                 _ => Err("type error: apply expects a method set".to_string()),
             }
         }
@@ -554,11 +841,11 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
 
         // ── Block (lambda) ──
         MirKind::Block(body) => {
-            env.bind("in".to_string(), Ty::Unknown);
+            env.bind("in".to_string(), Ty::Any);
             let body_ty = check(body, env)?;
             env.pop_binding();
             Ok(Ty::Fn {
-                param: Box::new(Ty::Unknown),
+                param: Box::new(Ty::Any),
                 ret: Box::new(body_ty),
             })
         }
@@ -566,7 +853,7 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
         // ── BranchBlock (pattern-matching lambda) ──
         // When not called via check_call, input type is Unknown.
         MirKind::BranchBlock(arms) => {
-            let input_ty = Ty::Unknown;
+            let input_ty = Ty::Any;
             env.bind("in".to_string(), input_ty.clone());
             let mut result_ty: Option<Ty> = None;
             for arm in arms {
@@ -584,16 +871,16 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                 });
             }
             env.pop_binding(); // pop "in"
-            let ret = result_ty.unwrap_or(Ty::Unknown);
+            let ret = result_ty.unwrap_or(Ty::Any);
             Ok(Ty::Fn {
-                param: Box::new(Ty::Unknown),
+                param: Box::new(Ty::Any),
                 ret: Box::new(ret),
             })
         }
 
         // ── Array ──
         MirKind::Array(elems) => {
-            let mut elem_ty = Ty::Unknown;
+            let mut elem_ty = Ty::Any;
             for elem in elems {
                 let ty = check(elem, env)?;
                 elem_ty = unify(&elem_ty, &ty)?;
@@ -602,22 +889,27 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
         }
 
         // ── LetArray (standalone, not via pipe) ──
-        MirKind::LetArray { patterns, body } => {
-            check_let_array(patterns, body, &Ty::Unknown, env)
-        }
+        MirKind::LetArray { patterns, body } => check_let_array(patterns, body, &Ty::Any, env),
 
         // ── MethodCall ──
-        MirKind::MethodCall { receiver, method, arg } => {
+        MirKind::MethodCall {
+            receiver,
+            method,
+            arg,
+        } => {
             let recv_ty = check(receiver, env)?;
-            let _arg_ty = check(arg, env)?;
+            let arg_ty = check(arg, env)?;
 
             // Stage 1: struct field access (method stored as field)
             if let Ty::Struct(fields) = &recv_ty {
                 if let Some((_, field_ty)) = fields.iter().find(|(n, _)| n == method) {
                     return match field_ty {
-                        Ty::Fn { ret, .. } => Ok(*ret.clone()),
-                        Ty::Unknown => Ok(Ty::Unknown),
-                        _ => Ok(Ty::Unknown),
+                        Ty::Fn { param, ret } => {
+                            unify(&arg_ty, param)?;
+                            Ok(*ret.clone())
+                        }
+                        Ty::Any => Ok(Ty::Any),
+                        _ => Ok(Ty::Any),
                     };
                 }
             }
@@ -625,18 +917,31 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
             // Stage 2: method set lookup
             if let Some(tag_id) = ty_to_tag_id(&recv_ty) {
                 if let Some(method_ty) = env.find_method_type(tag_id, method) {
-                    let ret = match method_ty {
-                        Ty::Fn { ret, .. } => *ret,
-                        _ => Ty::Unknown,
+                    let ret = match &method_ty {
+                        Ty::Fn { param, ret } => {
+                            // Check the user arg against the method's expected arg type.
+                            // The param type represents what the method expects AFTER
+                            // prepend_arg(recv, user_arg). We extract the expected user
+                            // arg by checking against the param with recv already known.
+                            check_method_arg(&recv_ty, &arg_ty, param, method)?;
+                            *ret.clone()
+                        }
+                        _ => Ty::Any,
                     };
-                    // Specialize generic return types based on receiver
-                    let ret = specialize_method_return(&recv_ty, method, ret);
+                    // Specialize generic return types based on receiver and arg
+                    let ret = specialize_method_return(&recv_ty, method, &arg_ty, ret);
                     return Ok(ret);
                 }
             }
 
-            // Stage 3: fallback methods for types without explicit method sets
-            if matches!(method.as_str(), "eq" | "not_eq" | "lt" | "gt" | "lt_eq" | "gt_eq") {
+            // Stage 3: fallback methods for types without explicit method sets.
+            // TODO: These fallbacks won't be needed once all types have method sets
+            // in scope. They exist because the type checker may encounter method calls
+            // before method sets are applied (e.g. in std.nana itself).
+            if matches!(
+                method.as_str(),
+                "eq" | "not_eq" | "lt" | "gt" | "lt_eq" | "gt_eq"
+            ) {
                 return Ok(Ty::Bool);
             }
             if method == "to_string" {
@@ -644,20 +949,18 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
             }
 
             // Unknown receiver or method not found — don't error, return Unknown
-            Ok(Ty::Unknown)
+            Ok(Ty::Any)
         }
     }
 }
 
 fn check_pipe(lhs: &Mir, rhs: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
-    let lhs_ty = check(lhs, env)?;
+    let lhs_ty = default_literals(check(lhs, env)?);
     match rhs.as_ref() {
         // Pipe into let: `expr >> let(pattern); body`
         // The lhs value is bound to the pattern.
         // Also bind \0 (passthrough variable) like eval_pipe does.
-        MirKind::Let { pattern, body } => {
-            check_let_with_passthrough(pattern, body, &lhs_ty, env)
-        }
+        MirKind::Let { pattern, body } => check_let_with_passthrough(pattern, body, &lhs_ty, env),
         // Pipe into let array: `expr >> let[a, b, c]; body`
         MirKind::LetArray { patterns, body } => {
             check_let_array_with_passthrough(patterns, body, &lhs_ty, env)
@@ -672,13 +975,13 @@ fn check_pipe(lhs: &Mir, rhs: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::
                     env.pop_binding();
                     result
                 }
-                Ty::Unknown => check(body, env),
+                Ty::Any => check(body, env),
                 _ => Err("type error: apply expects a method set".to_string()),
             }
         }
         // All other pipe RHS patterns are lowered to Call/MethodCall by MIR.
         // This branch should be unreachable.
-        _ => Ok(Ty::Unknown),
+        _ => Ok(Ty::Any),
     }
 }
 
@@ -716,7 +1019,9 @@ fn check_let(
                                 let mut consumed = Vec::new();
                                 let mut pos = 0u64;
                                 for f in fields {
-                                    if f.is_rest { continue; }
+                                    if f.is_rest {
+                                        continue;
+                                    }
                                     match &f.label {
                                         Some(label) => consumed.push(label.clone()),
                                         None => {
@@ -735,19 +1040,22 @@ fn check_let(
                                 } else {
                                     // Re-index positional fields starting from 0
                                     let mut re_pos = 0u64;
-                                    let remaining = remaining.into_iter().map(|(n, ty)| {
-                                        if n.parse::<u64>().is_ok() {
-                                            let new_n = re_pos.to_string();
-                                            re_pos += 1;
-                                            (new_n, ty)
-                                        } else {
-                                            (n, ty)
-                                        }
-                                    }).collect();
+                                    let remaining = remaining
+                                        .into_iter()
+                                        .map(|(n, ty)| {
+                                            if n.parse::<u64>().is_ok() {
+                                                let new_n = re_pos.to_string();
+                                                re_pos += 1;
+                                                (new_n, ty)
+                                            } else {
+                                                (n, ty)
+                                            }
+                                        })
+                                        .collect();
                                     Ty::Struct(remaining)
                                 }
                             }
-                            _ => Ty::Unknown,
+                            _ => Ty::Any,
                         };
                         env.bind(field.binding.clone(), rest_ty);
                         bindings_added += 1;
@@ -769,13 +1077,13 @@ fn check_let(
                             .iter()
                             .find(|(n, _)| *n == lookup_key)
                             .map(|(_, ty)| ty.clone())
-                            .unwrap_or(Ty::Unknown)
+                            .unwrap_or(Ty::Any)
                     }
                     _ => {
                         if field.label.is_none() {
                             positional_idx += 1;
                         }
-                        Ty::Unknown
+                        Ty::Any
                     }
                 };
                 env.bind(field.binding.clone(), field_ty);
@@ -799,7 +1107,7 @@ fn check_let_array(
     // Extract element type from Array input
     let elem_ty = match input_ty {
         Ty::Array(elem) => elem.as_ref().clone(),
-        _ => Ty::Unknown,
+        _ => Ty::Any,
     };
     let mut bindings_added = 0usize;
     for pat in patterns {
@@ -893,16 +1201,35 @@ fn check_call(func: &Mir, arg: &Mir, env: &mut TyEnv) -> Result<Ty, std::string:
             let arg_ty = check(arg, env)?;
             check_branch_block_with_input(arms, &arg_ty, env)
         }
+        // Ident referring to a stored block/branch — re-check with known arg type
+        MirKind::Ident(name) if env.block_bodies.contains_key(name) => {
+            let stored_body = env.block_bodies.get(name).unwrap().clone();
+            let arg_ty = check(arg, env)?;
+            match stored_body.as_ref() {
+                MirKind::Block(body) => {
+                    env.bind("in".to_string(), arg_ty);
+                    let body_ty = check(body, env)?;
+                    env.pop_binding();
+                    Ok(body_ty)
+                }
+                MirKind::BranchBlock(arms) => check_branch_block_with_input(arms, &arg_ty, env),
+                _ => unreachable!("block_bodies only stores Block/BranchBlock"),
+            }
+        }
         _ => {
             let func_ty = check(func, env)?;
             let arg_ty = check(arg, env)?;
             match func_ty {
-                Ty::Fn { ret, .. } => Ok(*ret),
+                Ty::Fn { param, ret } => {
+                    // Check that arg type is compatible with param type
+                    unify(&arg_ty, &param)?;
+                    Ok(*ret)
+                }
                 Ty::TagConstructor(tag_id) => Ok(Ty::Tagged {
                     tag_id,
                     payload: Box::new(arg_ty),
                 }),
-                Ty::Unknown => Ok(Ty::Unknown),
+                Ty::Any => Ok(Ty::Any),
                 _ => Err(format!("type error: cannot call non-function")),
             }
         }
@@ -933,18 +1260,17 @@ fn check_branch_block_with_input(
         });
     }
     env.pop_binding(); // pop "in"
-    Ok(result_ty.unwrap_or(Ty::Unknown))
+    Ok(result_ty.unwrap_or(Ty::Any))
 }
 
 /// Bind variables introduced by a branch pattern. Returns the number of bindings added.
 fn bind_branch_pattern(pattern: &MirBranchPattern, input_ty: &Ty, env: &mut TyEnv) -> usize {
     match pattern {
         MirBranchPattern::Literal(_) => 0,
-        MirBranchPattern::Tag(_, binding) => match binding {
+        MirBranchPattern::Tag(tag_name, binding) => match binding {
             Some(BranchBinding::Name(n)) => {
-                // Tag payload type is Unknown — the input is a sum type and we
-                // can't resolve tag names to IDs to extract the right payload.
-                env.bind(n.clone(), Ty::Unknown);
+                let payload_ty = resolve_tag_payload(tag_name, input_ty, env);
+                env.bind(n.clone(), payload_ty);
                 1
             }
             _ => 0,
@@ -955,6 +1281,43 @@ fn bind_branch_pattern(pattern: &MirBranchPattern, input_ty: &Ty, env: &mut TyEn
             1
         }
         MirBranchPattern::Discard => 0,
+    }
+}
+
+/// Resolve the payload type for a tag pattern by looking up the tag name
+/// in the environment and matching against the input type (Tagged or Union).
+fn resolve_tag_payload(tag_name: &str, input_ty: &Ty, env: &TyEnv) -> Ty {
+    // Step 1: resolve tag name → tag ID via the type environment
+    let tag_id = match env.get(tag_name) {
+        Some(Ty::TagConstructor(id)) => *id,
+        _ => return Ty::Any, // tag name not in scope or not a tag constructor
+    };
+    // Step 2: extract payload from input type
+    extract_payload_for_tag(tag_id, input_ty)
+}
+
+/// Extract the payload type for a specific tag ID from a type.
+fn extract_payload_for_tag(tag_id: TagId, ty: &Ty) -> Ty {
+    match ty {
+        Ty::Tagged {
+            tag_id: id,
+            payload,
+        } if *id == tag_id => *payload.clone(),
+        Ty::Union(variants) => {
+            for v in variants {
+                if let Ty::Tagged {
+                    tag_id: id,
+                    payload,
+                } = v
+                {
+                    if *id == tag_id {
+                        return *payload.clone();
+                    }
+                }
+            }
+            Ty::Any
+        }
+        _ => Ty::Any,
     }
 }
 
@@ -973,7 +1336,7 @@ fn check_method_set_call(arg: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::
                     return Err(
                         "type error: method_set first argument must be a type constructor"
                             .to_string(),
-                    )
+                    );
                 }
             };
 
@@ -983,7 +1346,7 @@ fn check_method_set_call(arg: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::
                     return Err(
                         "type error: method_set second argument must be a struct of functions"
                             .to_string(),
-                    )
+                    );
                 }
             }
 
@@ -1009,9 +1372,18 @@ mod tests {
     #[test]
     fn literal_types() {
         let mut env = TyEnv::new();
-        assert_eq!(check(&mir(MirKind::Int(42)), &mut env).unwrap(), Ty::Int);
-        assert_eq!(check(&mir(MirKind::Float(1.0)), &mut env).unwrap(), Ty::Float);
-        assert_eq!(check(&mir(MirKind::Bool(true)), &mut env).unwrap(), Ty::Bool);
+        assert_eq!(
+            check(&mir(MirKind::Int(42)), &mut env).unwrap(),
+            Ty::IntLiteral
+        );
+        assert_eq!(
+            check(&mir(MirKind::Float(1.0)), &mut env).unwrap(),
+            Ty::FloatLiteral
+        );
+        assert_eq!(
+            check(&mir(MirKind::Bool(true)), &mut env).unwrap(),
+            Ty::Bool
+        );
         assert_eq!(
             check(&mir(MirKind::Str("hi".into())), &mut env).unwrap(),
             Ty::String
@@ -1025,7 +1397,10 @@ mod tests {
     fn ident_lookup() {
         let mut env = TyEnv::new();
         env.bind("x".into(), Ty::Int);
-        assert_eq!(check(&mir(MirKind::Ident("x".into())), &mut env).unwrap(), Ty::Int);
+        assert_eq!(
+            check(&mir(MirKind::Ident("x".into())), &mut env).unwrap(),
+            Ty::Int
+        );
     }
 
     #[test]
@@ -1071,13 +1446,21 @@ mod tests {
     fn struct_literal() {
         let mut env = TyEnv::new();
         let expr = mir(MirKind::Struct(vec![
-            MirField { label: Some("a".into()), value: mir(MirKind::Int(1)), is_spread: false },
-            MirField { label: None, value: mir(MirKind::Bool(true)), is_spread: false },
+            MirField {
+                label: Some("a".into()),
+                value: mir(MirKind::Int(1)),
+                is_spread: false,
+            },
+            MirField {
+                label: None,
+                value: mir(MirKind::Bool(true)),
+                is_spread: false,
+            },
         ]));
         let ty = check(&expr, &mut env).unwrap();
         assert_eq!(
             ty,
-            Ty::Struct(vec![("a".into(), Ty::Int), ("0".into(), Ty::Bool)])
+            Ty::Struct(vec![("a".into(), Ty::IntLiteral), ("0".into(), Ty::Bool)])
         );
     }
 
@@ -1089,6 +1472,7 @@ mod tests {
             value: mir(MirKind::Int(42)),
             body: mir(MirKind::Ident("x".into())),
         });
+        // IntLiteral defaults to Int when bound via let
         assert_eq!(check(&expr, &mut env).unwrap(), Ty::Int);
     }
 
@@ -1111,15 +1495,15 @@ mod tests {
         let mut env = TyEnv::new();
         env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
         let fn_ty = Ty::Fn {
-            param: Box::new(Ty::Unknown),
-            ret: Box::new(Ty::Unknown),
+            param: Box::new(Ty::Any),
+            ret: Box::new(Ty::Any),
         };
         env.bind("int_add".into(), fn_ty);
         env.bind(
             "method_set".into(),
             Ty::Fn {
-                param: Box::new(Ty::Unknown),
-                ret: Box::new(Ty::Unknown),
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::Any),
             },
         );
 
@@ -1154,8 +1538,8 @@ mod tests {
         env.bind(
             "method_set".into(),
             Ty::Fn {
-                param: Box::new(Ty::Unknown),
-                ret: Box::new(Ty::Unknown),
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::Any),
             },
         );
 
@@ -1185,8 +1569,8 @@ mod tests {
         env.bind(
             "method_set".into(),
             Ty::Fn {
-                param: Box::new(Ty::Unknown),
-                ret: Box::new(Ty::Unknown),
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::Any),
             },
         );
 
@@ -1228,9 +1612,9 @@ mod tests {
 
     #[test]
     fn unify_unknown_with_anything() {
-        assert_eq!(unify(&Ty::Unknown, &Ty::Int).unwrap(), Ty::Int);
-        assert_eq!(unify(&Ty::Float, &Ty::Unknown).unwrap(), Ty::Float);
-        assert_eq!(unify(&Ty::Unknown, &Ty::Unknown).unwrap(), Ty::Unknown);
+        assert_eq!(unify(&Ty::Any, &Ty::Int).unwrap(), Ty::Int);
+        assert_eq!(unify(&Ty::Float, &Ty::Any).unwrap(), Ty::Float);
+        assert_eq!(unify(&Ty::Any, &Ty::Any).unwrap(), Ty::Any);
     }
 
     #[test]
@@ -1263,30 +1647,217 @@ mod tests {
 
     #[test]
     fn unify_method_sets_same_id() {
-        let a = Ty::MethodSet { id: 0, tag_id: TAG_ID_INT };
-        let b = Ty::MethodSet { id: 0, tag_id: TAG_ID_INT };
+        let a = Ty::MethodSet {
+            id: 0,
+            tag_id: TAG_ID_INT,
+        };
+        let b = Ty::MethodSet {
+            id: 0,
+            tag_id: TAG_ID_INT,
+        };
         assert_eq!(unify(&a, &b).unwrap(), a);
     }
 
     #[test]
     fn unify_method_sets_different_id() {
-        let a = Ty::MethodSet { id: 0, tag_id: TAG_ID_INT };
-        let b = Ty::MethodSet { id: 1, tag_id: TAG_ID_INT };
+        let a = Ty::MethodSet {
+            id: 0,
+            tag_id: TAG_ID_INT,
+        };
+        let b = Ty::MethodSet {
+            id: 1,
+            tag_id: TAG_ID_INT,
+        };
         assert!(unify(&a, &b).is_err());
     }
 
     #[test]
     fn unify_functions() {
-        let a = Ty::Fn { param: Box::new(Ty::Int), ret: Box::new(Ty::Bool) };
-        let b = Ty::Fn { param: Box::new(Ty::Int), ret: Box::new(Ty::Bool) };
+        let a = Ty::Fn {
+            param: Box::new(Ty::Int),
+            ret: Box::new(Ty::Bool),
+        };
+        let b = Ty::Fn {
+            param: Box::new(Ty::Int),
+            ret: Box::new(Ty::Bool),
+        };
         assert_eq!(unify(&a, &b).unwrap(), a);
     }
 
     #[test]
     fn unify_functions_unknown_fills() {
-        let a = Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Unknown) };
-        let b = Ty::Fn { param: Box::new(Ty::Int), ret: Box::new(Ty::Bool) };
+        let a = Ty::Fn {
+            param: Box::new(Ty::Any),
+            ret: Box::new(Ty::Any),
+        };
+        let b = Ty::Fn {
+            param: Box::new(Ty::Int),
+            ret: Box::new(Ty::Bool),
+        };
         assert_eq!(unify(&a, &b).unwrap(), b);
+    }
+
+    #[test]
+    fn unify_int_literal_coercion() {
+        // IntLiteral + Int = Int
+        assert_eq!(unify(&Ty::IntLiteral, &Ty::Int).unwrap(), Ty::Int);
+        assert_eq!(unify(&Ty::Int, &Ty::IntLiteral).unwrap(), Ty::Int);
+        // IntLiteral + Byte = Byte
+        assert_eq!(unify(&Ty::IntLiteral, &Ty::Byte).unwrap(), Ty::Byte);
+        assert_eq!(unify(&Ty::Byte, &Ty::IntLiteral).unwrap(), Ty::Byte);
+        // IntLiteral + IntLiteral = IntLiteral
+        assert_eq!(
+            unify(&Ty::IntLiteral, &Ty::IntLiteral).unwrap(),
+            Ty::IntLiteral
+        );
+        // IntLiteral + Float = error (int and float are distinct)
+        assert!(unify(&Ty::IntLiteral, &Ty::Float).is_err());
+        // IntLiteral + FloatLiteral = error
+        assert!(unify(&Ty::IntLiteral, &Ty::FloatLiteral).is_err());
+        // IntLiteral + String = error
+        assert!(unify(&Ty::IntLiteral, &Ty::String).is_err());
+    }
+
+    #[test]
+    fn unify_float_literal_coercion() {
+        // FloatLiteral + Float = Float
+        assert_eq!(unify(&Ty::FloatLiteral, &Ty::Float).unwrap(), Ty::Float);
+        // FloatLiteral + FloatLiteral = FloatLiteral
+        assert_eq!(
+            unify(&Ty::FloatLiteral, &Ty::FloatLiteral).unwrap(),
+            Ty::FloatLiteral
+        );
+        // FloatLiteral + Int = error (can't coerce float to int)
+        assert!(unify(&Ty::FloatLiteral, &Ty::Int).is_err());
+        // FloatLiteral + Byte = error
+        assert!(unify(&Ty::FloatLiteral, &Ty::Byte).is_err());
+    }
+
+    #[test]
+    fn branch_int_literal_coerces_to_byte() {
+        use crate::mir::{MirBranchArm, MirBranchPattern};
+        let mut env = TyEnv::new();
+        // { true -> b'A', false -> 4 }
+        // Arm 1: Byte, Arm 2: IntLiteral → coerces to Byte
+        let expr = mir(MirKind::BranchBlock(vec![
+            MirBranchArm {
+                pattern: MirBranchPattern::Literal(mir(MirKind::Bool(true))),
+                guard: None,
+                body: mir(MirKind::Byte(b'A')),
+            },
+            MirBranchArm {
+                pattern: MirBranchPattern::Literal(mir(MirKind::Bool(false))),
+                guard: None,
+                body: mir(MirKind::Int(4)),
+            },
+        ]));
+        let ty = check(&expr, &mut env).unwrap();
+        assert_eq!(
+            ty,
+            Ty::Fn {
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::Byte)
+            }
+        );
+    }
+
+    #[test]
+    fn array_int_literal_coerces_to_byte() {
+        let mut env = TyEnv::new();
+        // [b'A', 4, 5] — element 0 is Byte, elements 1-2 are IntLiteral → Array(Byte)
+        let expr = mir(MirKind::Array(vec![
+            mir(MirKind::Byte(b'A')),
+            mir(MirKind::Int(4)),
+            mir(MirKind::Int(5)),
+        ]));
+        let ty = check(&expr, &mut env).unwrap();
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Byte)));
+    }
+
+    #[test]
+    fn unify_tagged_different_ids_produces_union() {
+        let ok = Ty::Tagged {
+            tag_id: 100,
+            payload: Box::new(Ty::Int),
+        };
+        let err = Ty::Tagged {
+            tag_id: 101,
+            payload: Box::new(Ty::String),
+        };
+        let result = unify(&ok, &err).unwrap();
+        assert_eq!(result, Ty::Union(vec![ok, err]));
+    }
+
+    #[test]
+    fn unify_tagged_same_id_unifies_payload() {
+        let a = Ty::Tagged {
+            tag_id: 100,
+            payload: Box::new(Ty::Any),
+        };
+        let b = Ty::Tagged {
+            tag_id: 100,
+            payload: Box::new(Ty::Int),
+        };
+        let result = unify(&a, &b).unwrap();
+        assert_eq!(
+            result,
+            Ty::Tagged {
+                tag_id: 100,
+                payload: Box::new(Ty::Int)
+            }
+        );
+    }
+
+    #[test]
+    fn unify_union_with_new_tag() {
+        let ok = Ty::Tagged {
+            tag_id: 100,
+            payload: Box::new(Ty::Int),
+        };
+        let err = Ty::Tagged {
+            tag_id: 101,
+            payload: Box::new(Ty::String),
+        };
+        let union = Ty::Union(vec![ok.clone(), err.clone()]);
+        let none = Ty::Tagged {
+            tag_id: 102,
+            payload: Box::new(Ty::Unit),
+        };
+        let result = unify(&union, &none).unwrap();
+        assert_eq!(result, Ty::Union(vec![ok, err, none]));
+    }
+
+    #[test]
+    fn unify_union_with_existing_tag_merges() {
+        let ok = Ty::Tagged {
+            tag_id: 100,
+            payload: Box::new(Ty::Any),
+        };
+        let err = Ty::Tagged {
+            tag_id: 101,
+            payload: Box::new(Ty::String),
+        };
+        let union = Ty::Union(vec![ok, err.clone()]);
+        let ok2 = Ty::Tagged {
+            tag_id: 100,
+            payload: Box::new(Ty::Int),
+        };
+        let result = unify(&union, &ok2).unwrap();
+        let expected_ok = Ty::Tagged {
+            tag_id: 100,
+            payload: Box::new(Ty::Int),
+        };
+        assert_eq!(result, Ty::Union(vec![expected_ok, err]));
+    }
+
+    #[test]
+    fn unify_tagged_with_non_tagged_produces_union() {
+        let ok = Ty::Tagged {
+            tag_id: 100,
+            payload: Box::new(Ty::Int),
+        };
+        let result = unify(&ok, &Ty::Int).unwrap();
+        assert_eq!(result, Ty::Union(vec![ok, Ty::Int]));
     }
 
     // ── Block and branch tests ──
@@ -1294,12 +1865,15 @@ mod tests {
     #[test]
     fn block_types_as_fn() {
         let mut env = TyEnv::new();
-        // { 42 } is a lambda that returns Int
+        // { 42 } is a lambda that returns IntLiteral
         let expr = mir(MirKind::Block(mir(MirKind::Int(42))));
         let ty = check(&expr, &mut env).unwrap();
         assert_eq!(
             ty,
-            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Int) }
+            Ty::Fn {
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::IntLiteral)
+            }
         );
     }
 
@@ -1307,7 +1881,7 @@ mod tests {
     fn branch_same_type_arms() {
         use crate::mir::{MirBranchArm, MirBranchPattern};
         let mut env = TyEnv::new();
-        // { true -> 1, false -> 2 }
+        // { true -> 1, false -> 2 } — both arms are IntLiteral, unifies to IntLiteral
         let expr = mir(MirKind::BranchBlock(vec![
             MirBranchArm {
                 pattern: MirBranchPattern::Literal(mir(MirKind::Bool(true))),
@@ -1323,7 +1897,10 @@ mod tests {
         let ty = check(&expr, &mut env).unwrap();
         assert_eq!(
             ty,
-            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Int) }
+            Ty::Fn {
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::IntLiteral)
+            }
         );
     }
 
@@ -1352,17 +1929,117 @@ mod tests {
         use crate::mir::{MirBranchArm, MirBranchPattern};
         let mut env = TyEnv::new();
         // { x -> x } — catch-all returns Unknown (input type unknown)
-        let expr = mir(MirKind::BranchBlock(vec![
-            MirBranchArm {
-                pattern: MirBranchPattern::Binding("x".into()),
-                guard: None,
-                body: mir(MirKind::Ident("x".into())),
-            },
-        ]));
+        let expr = mir(MirKind::BranchBlock(vec![MirBranchArm {
+            pattern: MirBranchPattern::Binding("x".into()),
+            guard: None,
+            body: mir(MirKind::Ident("x".into())),
+        }]));
         let ty = check(&expr, &mut env).unwrap();
         assert_eq!(
             ty,
-            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Unknown) }
+            Ty::Fn {
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::Any)
+            }
+        );
+    }
+
+    #[test]
+    fn branch_tag_payload_resolution() {
+        use crate::mir::MirBranchPattern;
+        let mut env = TyEnv::new();
+        // Simulate: tag(Ok); tag(Err);
+        // Ok and Err are tag constructors with IDs 100 and 101
+        env.bind("Ok".into(), Ty::TagConstructor(100));
+        env.bind("Err".into(), Ty::TagConstructor(101));
+
+        // Input type: Union(Tagged{Ok, Int}, Tagged{Err, String})
+        let input_ty = Ty::Union(vec![
+            Ty::Tagged {
+                tag_id: 100,
+                payload: Box::new(Ty::Int),
+            },
+            Ty::Tagged {
+                tag_id: 101,
+                payload: Box::new(Ty::String),
+            },
+        ]);
+
+        // Test check_branch_block_with_input directly with the union input.
+        // Ok(x) should bind x to Int; Err(e) should bind e to String.
+        // Arm bodies: x (Int), 0 (IntLiteral) → unifies to Int.
+        let ret = check_branch_block_with_input(
+            &[
+                crate::mir::MirBranchArm {
+                    pattern: MirBranchPattern::Tag(
+                        "Ok".into(),
+                        Some(BranchBinding::Name("x".into())),
+                    ),
+                    guard: None,
+                    body: mir(MirKind::Ident("x".into())),
+                },
+                crate::mir::MirBranchArm {
+                    pattern: MirBranchPattern::Tag(
+                        "Err".into(),
+                        Some(BranchBinding::Name("e".into())),
+                    ),
+                    guard: None,
+                    body: mir(MirKind::Int(0)),
+                },
+            ],
+            &input_ty,
+            &mut env,
+        )
+        .unwrap();
+        // x has type Int (from Ok payload), 0 is Int → unifies to Int
+        assert_eq!(ret, Ty::Int);
+    }
+
+    #[test]
+    fn branch_tag_payload_err_arm_types() {
+        use crate::mir::MirBranchPattern;
+        let mut env = TyEnv::new();
+        env.bind("Ok".into(), Ty::TagConstructor(100));
+        env.bind("Err".into(), Ty::TagConstructor(101));
+
+        let input_ty = Ty::Union(vec![
+            Ty::Tagged {
+                tag_id: 100,
+                payload: Box::new(Ty::Int),
+            },
+            Ty::Tagged {
+                tag_id: 101,
+                payload: Box::new(Ty::String),
+            },
+        ]);
+
+        // { Ok(x) -> x, Err(e) -> e }
+        // Ok(x) → x is Int, Err(e) → e is String → unification error!
+        let result = check_branch_block_with_input(
+            &[
+                crate::mir::MirBranchArm {
+                    pattern: MirBranchPattern::Tag(
+                        "Ok".into(),
+                        Some(BranchBinding::Name("x".into())),
+                    ),
+                    guard: None,
+                    body: mir(MirKind::Ident("x".into())),
+                },
+                crate::mir::MirBranchArm {
+                    pattern: MirBranchPattern::Tag(
+                        "Err".into(),
+                        Some(BranchBinding::Name("e".into())),
+                    ),
+                    guard: None,
+                    body: mir(MirKind::Ident("e".into())),
+                },
+            ],
+            &input_ty,
+            &mut env,
+        );
+        assert!(
+            result.is_err(),
+            "Ok(Int) and Err(String) arm bodies don't unify"
         );
     }
 
@@ -1374,14 +2051,17 @@ mod tests {
         let mut env = TyEnv::new();
         env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
         let fn_ty = Ty::Fn {
-            param: Box::new(Ty::Unknown),
-            ret: Box::new(Ty::Unknown),
+            param: Box::new(Ty::Any),
+            ret: Box::new(Ty::Any),
         };
         env.bind("int_to_string".into(), fn_ty.clone());
         env.bind("int_to_string_other".into(), fn_ty);
         env.bind(
             "method_set".into(),
-            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Unknown) },
+            Ty::Fn {
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::Any),
+            },
         );
 
         // Helper to build method_set(Int, (to_string = f))
@@ -1389,7 +2069,11 @@ mod tests {
             mir(MirKind::Call(
                 mir(MirKind::Ident("method_set".into())),
                 mir(MirKind::Struct(vec![
-                    MirField { label: None, value: mir(MirKind::Ident("Int".into())), is_spread: false },
+                    MirField {
+                        label: None,
+                        value: mir(MirKind::Ident("Int".into())),
+                        is_spread: false,
+                    },
                     MirField {
                         label: None,
                         value: mir(MirKind::Struct(vec![MirField {
@@ -1419,7 +2103,10 @@ mod tests {
 
         // The two method_set calls produce different generative IDs → unification fails
         let result = check(&branch, &mut env);
-        assert!(result.is_err(), "expected error from two different method_set types in branch");
+        assert!(
+            result.is_err(),
+            "expected error from two different method_set types in branch"
+        );
     }
 
     // ── Q4: One method_set with varying struct arg → OK ──
@@ -1427,13 +2114,19 @@ mod tests {
     #[test]
     fn q4_one_method_set_with_varying_struct_ok() {
         let mut env = TyEnv::new();
-        let fn_ty = Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Unknown) };
+        let fn_ty = Ty::Fn {
+            param: Box::new(Ty::Any),
+            ret: Box::new(Ty::Any),
+        };
         env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
         env.bind("int_to_string".into(), fn_ty.clone());
         env.bind("int_to_string_other".into(), fn_ty.clone());
         env.bind(
             "method_set".into(),
-            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Unknown) },
+            Ty::Fn {
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::Any),
+            },
         );
 
         // let int_ms1 = (to_string = int_to_string)
@@ -1485,20 +2178,27 @@ mod tests {
         // Set up: method_set(Int, (add = fn(Unknown->Int)))
         env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
         let int_add_ty = Ty::Fn {
-            param: Box::new(Ty::Unknown),
+            param: Box::new(Ty::Any),
             ret: Box::new(Ty::Int),
         };
         env.bind("int_add".into(), int_add_ty);
         env.bind(
             "method_set".into(),
-            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Unknown) },
+            Ty::Fn {
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::Any),
+            },
         );
 
         // Create the method set: method_set(Int, (add = int_add))
         let ms_call = mir(MirKind::Call(
             mir(MirKind::Ident("method_set".into())),
             mir(MirKind::Struct(vec![
-                MirField { label: None, value: mir(MirKind::Ident("Int".into())), is_spread: false },
+                MirField {
+                    label: None,
+                    value: mir(MirKind::Ident("Int".into())),
+                    is_spread: false,
+                },
                 MirField {
                     label: None,
                     value: mir(MirKind::Struct(vec![MirField {
@@ -1526,13 +2226,19 @@ mod tests {
         // but the Apply handler binds it. We need a fresh env for this test.
         let mut env2 = TyEnv::new();
         env2.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
-        env2.bind("int_add".into(), Ty::Fn {
-            param: Box::new(Ty::Unknown),
-            ret: Box::new(Ty::Int),
-        });
+        env2.bind(
+            "int_add".into(),
+            Ty::Fn {
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::Int),
+            },
+        );
         env2.bind(
             "method_set".into(),
-            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Unknown) },
+            Ty::Fn {
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::Any),
+            },
         );
         let ty = check(&expr, &mut env2).unwrap();
         assert_eq!(ty, Ty::Int);
@@ -1544,7 +2250,10 @@ mod tests {
         // A struct with a method-like field: (add = fn(Unknown->Int))
         let struct_ty = Ty::Struct(vec![(
             "add".into(),
-            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Int) },
+            Ty::Fn {
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::Int),
+            },
         )]);
         env.bind("s".into(), struct_ty);
         // s.add(1)
@@ -1555,6 +2264,45 @@ mod tests {
         });
         let ty = check(&expr, &mut env).unwrap();
         assert_eq!(ty, Ty::Int);
+    }
+
+    #[test]
+    fn call_param_type_mismatch_error() {
+        let mut env = TyEnv::new();
+        // f: Fn(Int -> Bool)
+        env.bind(
+            "f".into(),
+            Ty::Fn {
+                param: Box::new(Ty::Int),
+                ret: Box::new(Ty::Bool),
+            },
+        );
+        // f("hello") — String arg doesn't match Int param
+        let expr = mir(MirKind::Call(
+            mir(MirKind::Ident("f".into())),
+            mir(MirKind::Str("hello".into())),
+        ));
+        assert!(check(&expr, &mut env).is_err());
+    }
+
+    #[test]
+    fn call_param_type_ok() {
+        let mut env = TyEnv::new();
+        // f: Fn(Int -> Bool)
+        env.bind(
+            "f".into(),
+            Ty::Fn {
+                param: Box::new(Ty::Int),
+                ret: Box::new(Ty::Bool),
+            },
+        );
+        // f(42) — IntLiteral coerces to Int
+        let expr = mir(MirKind::Call(
+            mir(MirKind::Ident("f".into())),
+            mir(MirKind::Int(42)),
+        ));
+        let ty = check(&expr, &mut env).unwrap();
+        assert_eq!(ty, Ty::Bool);
     }
 
     #[test]
@@ -1569,8 +2317,16 @@ mod tests {
             ("z".into(), Ty::Bool),
         ]);
         let pattern = Pattern::Fields(vec![
-            PatField { label: Some("x".into()), binding: "x".into(), is_rest: false },
-            PatField { label: None, binding: "rest".into(), is_rest: true },
+            PatField {
+                label: Some("x".into()),
+                binding: "x".into(),
+                is_rest: false,
+            },
+            PatField {
+                label: None,
+                binding: "rest".into(),
+                is_rest: true,
+            },
         ]);
         let body = mir(MirKind::Ident("rest".into()));
         let ty = check_let(&pattern, &body, &input, &mut env).unwrap();
@@ -1595,17 +2351,20 @@ mod tests {
 
     #[test]
     fn array_get_returns_element_type() {
-        // [1, 2, 3].get(0) should return Int, not Unknown
+        // [1, 2].get(0) should return IntLiteral (element type), not Unknown
         let mut env = TyEnv::new();
         // Set up array method set
         env.bind("Array".into(), Ty::TagConstructor(TAG_ID_ARRAY));
         let get_ty = Ty::Fn {
-            param: Box::new(Ty::Unknown),
-            ret: Box::new(Ty::Unknown), // generic return
+            param: Box::new(Ty::Any),
+            ret: Box::new(Ty::Any), // generic return
         };
         env.bind(
             "method_set".into(),
-            Ty::Fn { param: Box::new(Ty::Unknown), ret: Box::new(Ty::Unknown) },
+            Ty::Fn {
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::Any),
+            },
         );
         // Register a method set for Array with get method
         let ms_id = env.fresh_method_set_id();
@@ -1614,7 +2373,13 @@ mod tests {
             TAG_ID_ARRAY,
             Ty::Struct(vec![("get".into(), get_ty)]),
         );
-        env.bind("\0ms".to_string(), Ty::MethodSet { id: ms_id, tag_id: TAG_ID_ARRAY });
+        env.bind(
+            "\0ms".to_string(),
+            Ty::MethodSet {
+                id: ms_id,
+                tag_id: TAG_ID_ARRAY,
+            },
+        );
 
         let expr = mir(MirKind::MethodCall {
             receiver: mir(MirKind::Array(vec![
@@ -1625,7 +2390,363 @@ mod tests {
             arg: mir(MirKind::Int(0)),
         });
         let ty = check(&expr, &mut env).unwrap();
+        assert_eq!(ty, Ty::IntLiteral);
+    }
+
+    #[test]
+    fn array_map_returns_mapped_type() {
+        let mut env = TyEnv::new();
+        // Set up array method set with map
+        let map_ty = Ty::Fn {
+            param: Box::new(Ty::Any),
+            ret: Box::new(Ty::Any), // generic
+        };
+        let ms_id = env.fresh_method_set_id();
+        env.register_method_set(
+            ms_id,
+            TAG_ID_ARRAY,
+            Ty::Struct(vec![("map".into(), map_ty)]),
+        );
+        env.bind(
+            "\0ms".to_string(),
+            Ty::MethodSet {
+                id: ms_id,
+                tag_id: TAG_ID_ARRAY,
+            },
+        );
+
+        // [1, 2].map({ ... }) where callback returns String
+        let callback = Ty::Fn {
+            param: Box::new(Ty::Any),
+            ret: Box::new(Ty::String),
+        };
+        env.bind("f".into(), callback);
+
+        let expr = mir(MirKind::MethodCall {
+            receiver: mir(MirKind::Array(vec![
+                mir(MirKind::Int(1)),
+                mir(MirKind::Int(2)),
+            ])),
+            method: "map".into(),
+            arg: mir(MirKind::Ident("f".into())),
+        });
+        let ty = check(&expr, &mut env).unwrap();
+        assert_eq!(ty, Ty::Array(Box::new(Ty::String)));
+    }
+
+    #[test]
+    fn array_zip_returns_pair_array() {
+        let mut env = TyEnv::new();
+        let zip_ty = Ty::Fn {
+            param: Box::new(Ty::Any),
+            ret: Box::new(Ty::Any),
+        };
+        let ms_id = env.fresh_method_set_id();
+        env.register_method_set(
+            ms_id,
+            TAG_ID_ARRAY,
+            Ty::Struct(vec![("zip".into(), zip_ty)]),
+        );
+        env.bind(
+            "\0ms".to_string(),
+            Ty::MethodSet {
+                id: ms_id,
+                tag_id: TAG_ID_ARRAY,
+            },
+        );
+
+        // [1, 2].zip(["a", "b"]) → Array(Struct([(0, IntLiteral), (1, String)]))
+        let expr = mir(MirKind::MethodCall {
+            receiver: mir(MirKind::Array(vec![
+                mir(MirKind::Int(1)),
+                mir(MirKind::Int(2)),
+            ])),
+            method: "zip".into(),
+            arg: mir(MirKind::Array(vec![
+                mir(MirKind::Str("a".into())),
+                mir(MirKind::Str("b".into())),
+            ])),
+        });
+        let ty = check(&expr, &mut env).unwrap();
+        assert_eq!(
+            ty,
+            Ty::Array(Box::new(Ty::Struct(vec![
+                ("0".into(), Ty::IntLiteral),
+                ("1".into(), Ty::String),
+            ])))
+        );
+    }
+
+    // ── Literal defaulting tests ──
+
+    #[test]
+    fn bind_defaults_literal_in_struct() {
+        let mut env = TyEnv::new();
+        // let s = (x=1, y=2.0); s
+        let expr = mir(MirKind::Bind {
+            name: "s".into(),
+            value: mir(MirKind::Struct(vec![
+                MirField {
+                    label: Some("x".into()),
+                    value: mir(MirKind::Int(1)),
+                    is_spread: false,
+                },
+                MirField {
+                    label: Some("y".into()),
+                    value: mir(MirKind::Float(2.0)),
+                    is_spread: false,
+                },
+            ])),
+            body: mir(MirKind::Ident("s".into())),
+        });
+        let ty = check(&expr, &mut env).unwrap();
+        // IntLiteral and FloatLiteral should default to Int and Float in bindings
+        assert_eq!(
+            ty,
+            Ty::Struct(vec![("x".into(), Ty::Int), ("y".into(), Ty::Float)])
+        );
+    }
+
+    #[test]
+    fn bind_defaults_literal_in_array() {
+        let mut env = TyEnv::new();
+        // let a = [1, 2, 3]; a
+        let expr = mir(MirKind::Bind {
+            name: "a".into(),
+            value: mir(MirKind::Array(vec![
+                mir(MirKind::Int(1)),
+                mir(MirKind::Int(2)),
+                mir(MirKind::Int(3)),
+            ])),
+            body: mir(MirKind::Ident("a".into())),
+        });
+        let ty = check(&expr, &mut env).unwrap();
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Int)));
+    }
+
+    #[test]
+    fn bind_defaults_literal_in_fn() {
+        let mut env = TyEnv::new();
+        // let f = { 42 }; f
+        let expr = mir(MirKind::Bind {
+            name: "f".into(),
+            value: mir(MirKind::Block(mir(MirKind::Int(42)))),
+            body: mir(MirKind::Ident("f".into())),
+        });
+        let ty = check(&expr, &mut env).unwrap();
+        assert_eq!(
+            ty,
+            Ty::Fn {
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::Int)
+            }
+        );
+    }
+
+    // ── Deferred block re-checking tests ──
+
+    #[test]
+    fn stored_block_rechecked_on_call() {
+        let mut env = TyEnv::new();
+        // let f = { in }; f(42)
+        // Without re-checking, f(42) returns Unknown (from initial block check).
+        // With re-checking, f(42) should return Int (from re-checking with in=IntLiteral).
+        // But since it goes through default_literals in Bind... the block is stored before defaulting.
+        let expr = mir(MirKind::Bind {
+            name: "f".into(),
+            value: mir(MirKind::Block(mir(MirKind::Ident("in".into())))),
+            body: mir(MirKind::Call(
+                mir(MirKind::Ident("f".into())),
+                mir(MirKind::Int(42)),
+            )),
+        });
+        let ty = check(&expr, &mut env).unwrap();
+        assert_eq!(ty, Ty::IntLiteral);
+    }
+
+    #[test]
+    fn stored_block_with_body_expr() {
+        let mut env = TyEnv::new();
+        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        // let f = { Int(in) }; f(42) should return Tagged{Int, IntLiteral}
+        let expr = mir(MirKind::Bind {
+            name: "f".into(),
+            value: mir(MirKind::Block(mir(MirKind::Call(
+                mir(MirKind::Ident("Int".into())),
+                mir(MirKind::Ident("in".into())),
+            )))),
+            body: mir(MirKind::Call(
+                mir(MirKind::Ident("f".into())),
+                mir(MirKind::Int(42)),
+            )),
+        });
+        let ty = check(&expr, &mut env).unwrap();
+        assert_eq!(
+            ty,
+            Ty::Tagged {
+                tag_id: TAG_ID_INT,
+                payload: Box::new(Ty::IntLiteral)
+            }
+        );
+    }
+
+    #[test]
+    fn stored_block_cleared_on_rebind() {
+        let mut env = TyEnv::new();
+        // let f = { in }; let f = 42; f
+        // After rebinding f to 42, f should be Int, not a block.
+        // And calling f should fail because Int is not callable.
+        let expr = mir(MirKind::Bind {
+            name: "f".into(),
+            value: mir(MirKind::Block(mir(MirKind::Ident("in".into())))),
+            body: mir(MirKind::Bind {
+                name: "f".into(),
+                value: mir(MirKind::Int(42)),
+                body: mir(MirKind::Ident("f".into())),
+            }),
+        });
+        let ty = check(&expr, &mut env).unwrap();
         assert_eq!(ty, Ty::Int);
+    }
+
+    // ── prepend_arg_ty tests ──
+
+    #[test]
+    fn prepend_arg_ty_unit() {
+        // recv.method() — arg is unit, prepend = recv
+        assert_eq!(prepend_arg_ty(&Ty::Int, &Ty::Unit), Ty::Int);
+    }
+
+    #[test]
+    fn prepend_arg_ty_single() {
+        // recv.method(x) — arg is single value, prepend = (recv, x)
+        assert_eq!(
+            prepend_arg_ty(&Ty::Int, &Ty::String),
+            Ty::Struct(vec![("0".into(), Ty::Int), ("1".into(), Ty::String)])
+        );
+    }
+
+    #[test]
+    fn prepend_arg_ty_struct() {
+        // recv.method(a, b) — arg is struct (0=a, 1=b), prepend = (0=recv, 1=a, 2=b)
+        let arg = Ty::Struct(vec![("0".into(), Ty::String), ("1".into(), Ty::Bool)]);
+        assert_eq!(
+            prepend_arg_ty(&Ty::Int, &arg),
+            Ty::Struct(vec![
+                ("0".into(), Ty::Int),
+                ("1".into(), Ty::String),
+                ("2".into(), Ty::Bool),
+            ])
+        );
+    }
+
+    #[test]
+    fn prepend_arg_ty_named_struct() {
+        // recv.fold(init=0, f=cb) — named fields stay named, recv is prepended as 0
+        let arg = Ty::Struct(vec![("init".into(), Ty::Int), ("f".into(), Ty::Any)]);
+        assert_eq!(
+            prepend_arg_ty(&Ty::Array(Box::new(Ty::Int)), &arg),
+            Ty::Struct(vec![
+                ("0".into(), Ty::Array(Box::new(Ty::Int))),
+                ("init".into(), Ty::Int),
+                ("f".into(), Ty::Any),
+            ])
+        );
+    }
+
+    // ── Tag constructor call with literal ──
+
+    #[test]
+    fn tag_constructor_wraps_literal() {
+        let mut env = TyEnv::new();
+        env.bind("Ok".into(), Ty::TagConstructor(100));
+        // Ok(42) should return Tagged{100, IntLiteral}
+        let expr = mir(MirKind::Call(
+            mir(MirKind::Ident("Ok".into())),
+            mir(MirKind::Int(42)),
+        ));
+        let ty = check(&expr, &mut env).unwrap();
+        assert_eq!(
+            ty,
+            Ty::Tagged {
+                tag_id: 100,
+                payload: Box::new(Ty::IntLiteral)
+            }
+        );
+    }
+
+    // ── default_literals function ──
+
+    #[test]
+    fn default_literals_recursive() {
+        let ty = Ty::Struct(vec![
+            ("a".into(), Ty::IntLiteral),
+            ("b".into(), Ty::Array(Box::new(Ty::FloatLiteral))),
+            (
+                "c".into(),
+                Ty::Fn {
+                    param: Box::new(Ty::IntLiteral),
+                    ret: Box::new(Ty::FloatLiteral),
+                },
+            ),
+        ]);
+        let defaulted = default_literals(ty);
+        assert_eq!(
+            defaulted,
+            Ty::Struct(vec![
+                ("a".into(), Ty::Int),
+                ("b".into(), Ty::Array(Box::new(Ty::Float))),
+                (
+                    "c".into(),
+                    Ty::Fn {
+                        param: Box::new(Ty::Int),
+                        ret: Box::new(Ty::Float),
+                    }
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn default_literals_in_tagged() {
+        let ty = Ty::Tagged {
+            tag_id: 100,
+            payload: Box::new(Ty::IntLiteral),
+        };
+        assert_eq!(
+            default_literals(ty),
+            Ty::Tagged {
+                tag_id: 100,
+                payload: Box::new(Ty::Int)
+            }
+        );
+    }
+
+    #[test]
+    fn default_literals_in_union() {
+        let ty = Ty::Union(vec![
+            Ty::Tagged {
+                tag_id: 100,
+                payload: Box::new(Ty::IntLiteral),
+            },
+            Ty::Tagged {
+                tag_id: 101,
+                payload: Box::new(Ty::FloatLiteral),
+            },
+        ]);
+        assert_eq!(
+            default_literals(ty),
+            Ty::Union(vec![
+                Ty::Tagged {
+                    tag_id: 100,
+                    payload: Box::new(Ty::Int)
+                },
+                Ty::Tagged {
+                    tag_id: 101,
+                    payload: Box::new(Ty::Float)
+                },
+            ])
+        );
     }
 
     #[test]
@@ -1634,14 +2755,13 @@ mod tests {
         let ast = crate::parse(source).expect("parse failed");
         let mir = crate::mir::lower(&ast);
 
-        let mut env = TyEnv::new()
-            .with_module("core", core_module_type());
+        let mut env = TyEnv::new().with_module("core", core_module_type());
         // std.nana needs method_set as a bare binding
         env.bind(
             "method_set".into(),
             Ty::Fn {
-                param: Box::new(Ty::Unknown),
-                ret: Box::new(Ty::Unknown),
+                param: Box::new(Ty::Any),
+                ret: Box::new(Ty::Any),
             },
         );
 

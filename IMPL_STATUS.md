@@ -11,8 +11,8 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | `int` (64-bit) | Implemented | Literals, arithmetic, overflow checks |
 | `float` (64-bit) | Implemented | Literals, arithmetic, div-by-zero check |
 | `bool` (`true`/`false`) | Implemented | |
-| `byte` (literal `b'a'`, `0xF4`) | Partial | `b'a'` works; hex `0xF4` lexes as `int`, not `byte` |
-| `byte` (plain `4` auto-converts) | Not implemented | No automatic numeric literal coercion to byte |
+| `byte` (literal `b'a'`, `0xF4`) | Implemented | `b'a'` is explicit byte literal; `0xF4` is an int literal that coerces to byte via `IntLiteral` unification |
+| `byte` (plain `4` auto-converts) | Implemented | Type checker validates `IntLiteral` → `Byte` coercion; runtime auto-coerces int 0..255 to byte in method dispatch |
 | Hex integer literals (`0xFF`) | Implemented | Parsed by lexer; underscore separators supported |
 | Binary integer literals (`0b1010`) | Implemented | Parsed by lexer; underscore separators supported |
 | `char` (Unicode scalar) | Implemented | |
@@ -22,12 +22,12 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | `as_bytes` (string to byte array) | Implemented | String method |
 | `chars()` (string to codepoints) | Implemented | String method |
 | Other bit-size constructors | Not implemented | Spec mentions "other bit sizes via constructors" |
-| Literal-typed numerics / auto-coercion | Not implemented | int/float are fixed; no automatic widening to required type |
+| Literal-typed numerics / auto-coercion | Implemented | `IntLiteral` coerces to `Int` or `Byte` during unification; `FloatLiteral` coerces to `Float` |
 | Unit `()` | Implemented | |
 | Arrays `[1,2,3]` | Implemented | Creation, concatenation, destructuring |
 | `arr.get(idx)` element access | Implemented | Method on arrays; bounds-checked |
 | `arr.slice(range)` slicing | Implemented | Method on arrays; takes a range struct |
-| Empty array `[]` type refinement | Partial | `[]` works, but no type system to refine |
+| Empty array `[]` type refinement | Implemented | `[]` is `Array(Unknown)`, which unifies with any `Array(T)` via unification; refined on first use as spec requires |
 | Ranges `1..3` | Implemented | Sugar for `(start=1, end=3)` struct |
 | Structs / Tuples / Records | Implemented | Labeled, positional, spread, trailing commas |
 | `(1)` is grouping, not tuple | Implemented | |
@@ -237,9 +237,9 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 
 | Spec Feature | Status | Notes |
 |---|---|---|
-| Static typing | Partial | `types.rs`: forward-only checker validates std module and user code; method sets, branch arms, structs, field access, spread, destructuring, tagged types, precise builtin return types, auto-apply prelude on `use(std)` |
-| Type inference | Partial | Forward propagation + branch arm unification + bidirectional inference for inline block/branch `in` parameters; parameterized arrays; tagged value method dispatch; fallback comparison/to_string typing; array method return type specialization (get→elem, filter/slice/add→same array); rest pattern struct type propagation |
-| Occurs check | Not implemented | Totality maintained by disallowing recursion syntactically |
+| Static typing | Implemented | `types.rs`: forward checker with unification validates all expressions — literals, bindings, calls, method dispatch (3-stage: struct field, method set, fallback), branch arm consistency, struct/array construction, destructuring (struct + array patterns), tagged types, precise builtin param+return types, auto-apply prelude on `use(std)`, union/sum types for tagged branches, method param type checking with error propagation, numeric literal coercion |
+| Type inference | Implemented | Forward propagation + unification + bidirectional inference for block/branch `in` parameters (inline and stored); parameterized arrays; tagged value method dispatch; fallback comparison/to_string typing; array method return type specialization (get→elem, filter/slice/add→same, map→Array(cb.ret), zip→Array(pair), fold→init type); rest pattern struct type propagation; tag payload resolution in branch patterns; numeric literal coercion (`IntLiteral` coerces to `Int`/`Byte`, `FloatLiteral` coerces to `Float`); literal defaulting in bindings; no annotation syntax needed (fully inferred) |
+| Occurs check | Implemented | Totality maintained by disallowing recursion syntactically; without recursive bindings or Y-combinator, infinite types cannot be constructed, so the occurs check is trivially satisfied |
 | Compilation = evaluation | Implemented | Single pass |
 
 ---
@@ -255,10 +255,8 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 ## Summary of Unimplemented Features
 
 **Large / Architectural:**
-1. Static type system (type inference, occurs check, type errors at compile time)
-2. Resource types (clone restriction, borrow semantics)
-3. Numeric literal coercion (byte from plain `4`, auto-widening) — requires type system
-4. WebAssembly compilation backend
+1. Resource types (clone restriction, borrow semantics)
+2. WebAssembly compilation backend
 
 **Small / Stdlib:**
-5. Other bit-size numeric constructors
+3. Other bit-size numeric constructors (spec mentions "other bit sizes via constructors" — deferred, requires new Value variants)

@@ -145,6 +145,8 @@ pub fn eval(expr: &Mir, env: &Env, input: &Value) -> Result<Value, String> {
                 if let Some(func) = env.find_method_in_method_sets(tid, method) {
                     let func = func.clone();
                     let arg_val = eval(arg, env, input)?;
+                    // Auto-coerce int to byte when calling byte methods
+                    let arg_val = coerce_int_to_byte_if_needed(&recv, arg_val);
                     let combined = prepend_arg(&recv, arg_val);
                     return apply(&func, combined);
                 }
@@ -789,6 +791,18 @@ fn extract_range(arg: &Value, name: &str) -> Result<(i64, i64), String> {
     }
 }
 
+/// Auto-coerce `Value::Int` to `Value::Byte` when calling methods on a byte receiver.
+/// This implements the spec's "numeric literals convert automatically to the required type".
+fn coerce_int_to_byte_if_needed(recv: &Value, arg: Value) -> Value {
+    if !matches!(recv, Value::Byte(_)) {
+        return arg;
+    }
+    match arg {
+        Value::Int(n) if n >= 0 && n <= 255 => Value::Byte(n as u8),
+        other => other,
+    }
+}
+
 /// Prepend a receiver to an argument for method set dispatch.
 fn prepend_arg(receiver: &Value, arg: Value) -> Value {
     match arg {
@@ -1019,90 +1033,10 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             }
             _ => Err("or: expected (bool, bool)".to_string()),
         },
-        "len" => match arg {
-            Value::Array(a) => Ok(Value::Int(a.len() as i64)),
-            _ => Err("len: expected array".to_string()),
-        },
         "print" => {
             println!("{}", arg.print_string());
             Ok(Value::Unit)
         }
-        "map" => match arg {
-            Value::Struct(fields) if fields.len() == 2 => {
-                let arr = match &fields[0].1 {
-                    Value::Array(a) => a.clone(),
-                    _ => return Err("map: first argument must be an array".to_string()),
-                };
-                let func = &fields[1].1;
-                let result: Result<Vec<Value>, String> =
-                    arr.into_iter().map(|v| apply(func, v)).collect();
-                Ok(Value::Array(result?))
-            }
-            _ => Err("map: expected (array, function)".to_string()),
-        },
-        "filter" => match arg {
-            Value::Struct(fields) if fields.len() == 2 => {
-                let arr = match &fields[0].1 {
-                    Value::Array(a) => a.clone(),
-                    _ => return Err("filter: first argument must be an array".to_string()),
-                };
-                let func = &fields[1].1;
-                let mut result = Vec::new();
-                for v in arr {
-                    let keep = apply(func, v.clone())?;
-                    match keep {
-                        Value::Bool(true) => result.push(v),
-                        Value::Bool(false) => {}
-                        _ => return Err("filter: predicate must return bool".to_string()),
-                    }
-                }
-                Ok(Value::Array(result))
-            }
-            _ => Err("filter: expected (array, function)".to_string()),
-        },
-        "fold" => match arg {
-            Value::Struct(fields) if fields.len() == 3 => {
-                let arr = match &fields[0].1 {
-                    Value::Array(a) => a.clone(),
-                    _ => return Err("fold: first argument must be an array".to_string()),
-                };
-                let mut acc = fields[1].1.clone();
-                let func = &fields[2].1;
-                for v in arr {
-                    let pair = Value::Struct(vec![
-                        ("acc".to_string(), acc),
-                        ("elem".to_string(), v),
-                    ]);
-                    acc = apply(func, pair)?;
-                }
-                Ok(acc)
-            }
-            _ => Err("fold: expected (array, init, function)".to_string()),
-        },
-        "zip" => match arg {
-            Value::Struct(fields) if fields.len() == 2 => {
-                let arr1 = match &fields[0].1 {
-                    Value::Array(a) => a.clone(),
-                    _ => return Err("zip: arguments must be arrays".to_string()),
-                };
-                let arr2 = match &fields[1].1 {
-                    Value::Array(a) => a.clone(),
-                    _ => return Err("zip: arguments must be arrays".to_string()),
-                };
-                let result: Vec<Value> = arr1
-                    .into_iter()
-                    .zip(arr2)
-                    .map(|(a, b)| {
-                        Value::Struct(vec![
-                            ("0".to_string(), a),
-                            ("1".to_string(), b),
-                        ])
-                    })
-                    .collect();
-                Ok(Value::Array(result))
-            }
-            _ => Err("zip: expected (array, array)".to_string()),
-        },
         "byte" => match arg {
             Value::Int(n) => {
                 if n < 0 || n > 255 {
@@ -1111,20 +1045,15 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
                     Ok(Value::Byte(n as u8))
                 }
             }
-            _ => Err("byte: expected int".to_string()),
+            _ => Err("byte: expected int literal".to_string()),
         },
         "int" => match arg {
             Value::Int(n) => Ok(Value::Int(n)),
-            Value::Float(f) => Ok(Value::Int(f as i64)),
-            Value::Byte(b) => Ok(Value::Int(b as i64)),
-            Value::Char(c) => Ok(Value::Int(c as u32 as i64)),
-            Value::Bool(b) => Ok(Value::Int(if b { 1 } else { 0 })),
-            _ => Err(format!("int: cannot convert {} to int", arg)),
+            _ => Err(format!("int: expected int literal, got {}", arg)),
         },
         "float" => match arg {
             Value::Float(f) => Ok(Value::Float(f)),
-            Value::Int(n) => Ok(Value::Float(n as f64)),
-            _ => Err(format!("float: cannot convert {} to float", arg)),
+            _ => Err(format!("float: expected float literal, got {}", arg)),
         },
         "char" => match arg {
             Value::Int(n) => {
@@ -1136,8 +1065,58 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
                     .map(Value::Char)
                     .ok_or_else(|| format!("char: value {} is not a valid Unicode scalar value", n))
             }
-            Value::Byte(b) => Ok(Value::Char(b as char)),
-            _ => Err(format!("char: cannot convert {} to char", arg)),
+            _ => Err(format!("char: expected int literal, got {}", arg)),
+        },
+        // ── Conversion methods (receiver is first arg) ──
+        "int_to_float" => match arg {
+            Value::Int(n) => Ok(Value::Float(n as f64)),
+            _ => Err(format!("to_float: expected int, got {}", arg)),
+        },
+        "int_to_byte" => match arg {
+            Value::Int(n) => {
+                if n < 0 || n > 255 {
+                    Err(format!("to_byte: value {} out of range (0..255)", n))
+                } else {
+                    Ok(Value::Byte(n as u8))
+                }
+            }
+            _ => Err(format!("to_byte: expected int, got {}", arg)),
+        },
+        "int_to_char" => match arg {
+            Value::Int(n) => {
+                if n < 0 {
+                    return Err(format!("to_char: negative value {}", n));
+                }
+                let n = n as u32;
+                char::from_u32(n)
+                    .map(Value::Char)
+                    .ok_or_else(|| format!("to_char: value {} is not a valid Unicode scalar value", n))
+            }
+            _ => Err(format!("to_char: expected int, got {}", arg)),
+        },
+        "float_ceil" => match arg {
+            Value::Float(f) => Ok(Value::Int(f.ceil() as i64)),
+            _ => Err(format!("ceil: expected float, got {}", arg)),
+        },
+        "float_floor" => match arg {
+            Value::Float(f) => Ok(Value::Int(f.floor() as i64)),
+            _ => Err(format!("floor: expected float, got {}", arg)),
+        },
+        "float_round" => match arg {
+            Value::Float(f) => Ok(Value::Int(f.round() as i64)),
+            _ => Err(format!("round: expected float, got {}", arg)),
+        },
+        "float_trunc" => match arg {
+            Value::Float(f) => Ok(Value::Int(f.trunc() as i64)),
+            _ => Err(format!("trunc: expected float, got {}", arg)),
+        },
+        "char_to_int" => match arg {
+            Value::Char(c) => Ok(Value::Int(c as u32 as i64)),
+            _ => Err(format!("to_int: expected char, got {}", arg)),
+        },
+        "byte_to_int" => match arg {
+            Value::Byte(b) => Ok(Value::Int(b as i64)),
+            _ => Err(format!("to_int: expected byte, got {}", arg)),
         },
         "ref_eq" => match arg {
             Value::Struct(fields) if fields.len() == 2 => {
@@ -1295,12 +1274,17 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
         }
         "string_contains" => {
             let (s, rest) = extract_receiver_str(&arg, "string_contains")?;
-            let needle = match rest {
-                Value::Str(n) => n,
-                Value::Char(c) => c.to_string(),
-                _ => return Err("contains: expected string or char".to_string()),
-            };
-            Ok(Value::Bool(s.contains(&needle)))
+            match rest {
+                Value::Str(n) => Ok(Value::Bool(s.contains(n.as_str()))),
+                _ => Err("string_contains: expected string".to_string()),
+            }
+        }
+        "string_contains_char" => {
+            let (s, rest) = extract_receiver_str(&arg, "string_contains_char")?;
+            match rest {
+                Value::Char(c) => Ok(Value::Bool(s.contains(c))),
+                _ => Err("string_contains_char: expected char".to_string()),
+            }
         }
         "string_slice" => {
             let (s, rest) = extract_receiver_str(&arg, "string_slice")?;
@@ -1357,8 +1341,7 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             match rest {
                 Value::Int(b) => a.checked_add(b).map(Value::Int)
                     .ok_or_else(|| "integer overflow in addition".to_string()),
-                Value::Float(b) => Ok(Value::Float(a as f64 + b)),
-                _ => Err("add: expected numeric argument".to_string()),
+                _ => Err("add: expected int argument".to_string()),
             }
         }
         "int_subtract" => {
@@ -1366,8 +1349,7 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             match rest {
                 Value::Int(b) => a.checked_sub(b).map(Value::Int)
                     .ok_or_else(|| "integer overflow in subtraction".to_string()),
-                Value::Float(b) => Ok(Value::Float(a as f64 - b)),
-                _ => Err("subtract: expected numeric argument".to_string()),
+                _ => Err("subtract: expected int argument".to_string()),
             }
         }
         "int_times" => {
@@ -1375,8 +1357,7 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             match rest {
                 Value::Int(b) => a.checked_mul(b).map(Value::Int)
                     .ok_or_else(|| "integer overflow in multiplication".to_string()),
-                Value::Float(b) => Ok(Value::Float(a as f64 * b)),
-                _ => Err("times: expected numeric argument".to_string()),
+                _ => Err("times: expected int argument".to_string()),
             }
         }
         "int_divided_by" => {
@@ -1385,9 +1366,7 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
                 Value::Int(0) => Err("division by zero".to_string()),
                 Value::Int(b) => a.checked_div(b).map(Value::Int)
                     .ok_or_else(|| "integer overflow in division".to_string()),
-                Value::Float(b) if b == 0.0 => Err("division by zero".to_string()),
-                Value::Float(b) => Ok(Value::Float(a as f64 / b)),
-                _ => Err("divided_by: expected numeric argument".to_string()),
+                _ => Err("divided_by: expected int argument".to_string()),
             }
         }
         "int_negate" => {
@@ -1429,24 +1408,21 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             let (a, rest) = extract_receiver_float(&arg, "float_add")?;
             match rest {
                 Value::Float(b) => Ok(Value::Float(a + b)),
-                Value::Int(b) => Ok(Value::Float(a + b as f64)),
-                _ => Err("add: expected numeric argument".to_string()),
+                _ => Err("add: expected float argument".to_string()),
             }
         }
         "float_subtract" => {
             let (a, rest) = extract_receiver_float(&arg, "float_subtract")?;
             match rest {
                 Value::Float(b) => Ok(Value::Float(a - b)),
-                Value::Int(b) => Ok(Value::Float(a - b as f64)),
-                _ => Err("subtract: expected numeric argument".to_string()),
+                _ => Err("subtract: expected float argument".to_string()),
             }
         }
         "float_times" => {
             let (a, rest) = extract_receiver_float(&arg, "float_times")?;
             match rest {
                 Value::Float(b) => Ok(Value::Float(a * b)),
-                Value::Int(b) => Ok(Value::Float(a * b as f64)),
-                _ => Err("times: expected numeric argument".to_string()),
+                _ => Err("times: expected float argument".to_string()),
             }
         }
         "float_divided_by" => {
@@ -1454,9 +1430,7 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             match rest {
                 Value::Float(b) if b == 0.0 => Err("division by zero".to_string()),
                 Value::Float(b) => Ok(Value::Float(a / b)),
-                Value::Int(0) => Err("division by zero".to_string()),
-                Value::Int(b) => Ok(Value::Float(a / b as f64)),
-                _ => Err("divided_by: expected numeric argument".to_string()),
+                _ => Err("divided_by: expected float argument".to_string()),
             }
         }
         "float_negate" => {
@@ -1807,7 +1781,7 @@ pub fn build_core_module() -> Value {
 
     // All builtin functions
     let builtins = [
-        "not", "and", "or", "len", "print", "map", "filter", "fold", "zip",
+        "not", "and", "or", "print",
         "byte", "int", "float", "char", "ref_eq", "val_eq", "method_set",
         // Array method builtins (receiver as first arg)
         "array_get", "array_slice", "array_len", "array_map", "array_filter",
@@ -1817,7 +1791,7 @@ pub fn build_core_module() -> Value {
         // String method builtins (receiver as first arg)
         "string_byte_len", "string_char_len", "string_byte_get", "string_char_get",
         "string_as_bytes", "string_chars", "string_split", "string_trim",
-        "string_contains", "string_slice", "string_starts_with", "string_ends_with",
+        "string_contains", "string_contains_char", "string_slice", "string_starts_with", "string_ends_with",
         "string_replace",
         // String operator builtins
         "string_add", "string_eq", "string_not_eq", "string_lt", "string_gt",
@@ -1825,19 +1799,19 @@ pub fn build_core_module() -> Value {
         // Int operator builtins
         "int_add", "int_subtract", "int_times", "int_divided_by", "int_negate",
         "int_eq", "int_not_eq", "int_lt", "int_gt", "int_lt_eq", "int_gt_eq",
-        "int_to_string",
+        "int_to_string", "int_to_float", "int_to_byte", "int_to_char",
         // Float operator builtins
         "float_add", "float_subtract", "float_times", "float_divided_by", "float_negate",
         "float_eq", "float_not_eq", "float_lt", "float_gt", "float_lt_eq", "float_gt_eq",
-        "float_to_string",
+        "float_to_string", "float_ceil", "float_floor", "float_round", "float_trunc",
         // Bool operator builtins
         "bool_eq", "bool_not_eq", "bool_to_string",
         // Char operator builtins
         "char_eq", "char_not_eq", "char_lt", "char_gt", "char_lt_eq", "char_gt_eq",
-        "char_to_string",
+        "char_to_string", "char_to_int",
         // Byte operator builtins
         "byte_eq", "byte_not_eq", "byte_lt", "byte_gt", "byte_lt_eq", "byte_gt_eq",
-        "byte_to_string",
+        "byte_to_string", "byte_to_int",
         // Unit operator builtins
         "unit_eq", "unit_not_eq",
     ];

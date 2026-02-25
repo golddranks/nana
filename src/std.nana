@@ -15,6 +15,9 @@ let _int_methods = method_set(core.Int, (
     lt_eq = core.int_lt_eq,
     gt_eq = core.int_gt_eq,
     to_string = core.int_to_string,
+    to_float = core.int_to_float,
+    to_byte = core.int_to_byte,
+    to_char = core.int_to_char,
 ));
 
 let _float_methods = method_set(core.Float, (
@@ -30,6 +33,10 @@ let _float_methods = method_set(core.Float, (
     lt_eq = core.float_lt_eq,
     gt_eq = core.float_gt_eq,
     to_string = core.float_to_string,
+    ceil = core.float_ceil,
+    floor = core.float_floor,
+    round = core.float_round,
+    trunc = core.float_trunc,
 ));
 
 let _bool_methods = method_set(core.Bool, (
@@ -46,6 +53,7 @@ let _char_methods = method_set(core.Char, (
     lt_eq = core.char_lt_eq,
     gt_eq = core.char_gt_eq,
     to_string = core.char_to_string,
+    to_int = core.char_to_int,
 ));
 
 let _byte_methods = method_set(core.Byte, (
@@ -56,6 +64,7 @@ let _byte_methods = method_set(core.Byte, (
     lt_eq = core.byte_lt_eq,
     gt_eq = core.byte_gt_eq,
     to_string = core.byte_to_string,
+    to_int = core.byte_to_int,
 ));
 
 let _unit_methods = method_set(core.Unit, (
@@ -86,6 +95,7 @@ let _string_methods = method_set(core.String, (
     split = core.string_split,
     trim = core.string_trim,
     contains = core.string_contains,
+    contains_char = core.string_contains_char,
     slice = core.string_slice,
     starts_with = core.string_starts_with,
     ends_with = core.string_ends_with,
@@ -133,12 +143,7 @@ let _string_methods = method_set(core.String, (
     not = core.not,
     and = core.and,
     or = core.or,
-    len = core.len,
     print = core.print,
-    map = core.map,
-    filter = core.filter,
-    fold = core.fold,
-    zip = core.zip,
     byte = core.byte,
     int = core.int,
     float = core.float,

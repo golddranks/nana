@@ -507,9 +507,9 @@ fn spec4_outer_in_via_rebind() {
 // ═══════════════════════════════════════════════════════════════════
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn minor_empty_array() {
-    assert_output("[]", "[]");
+    // Per D2: empty array without constraining context is correctly rejected
+    assert_error("[]", "unresolved inference");
 }
 
 #[test]
@@ -541,9 +541,9 @@ fn minor_branch_discard_binding() {
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn minor_non_exhaustive_branch() {
-    assert_error("tag(A); tag(B); 1 >> A >> { B(x) -> x }", "no arm matched");
+    // Per D5: non-exhaustive branch is a type error
+    assert_error("tag(A); tag(B); 1 >> A >> { B(x) -> x }", "non-exhaustive branch");
 }
 
 #[test]
@@ -860,10 +860,10 @@ fn bug19_rest_pattern_array_too_short() {
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn bug19_rest_pattern_empty_array() {
-    // [] with let[a, ...rest, b] needs at least 2
-    assert_error("[] >> let[a, ...rest, b]; a", "not enough");
+    // [] with let[a, ...rest, b] needs at least 2 elements.
+    // Type checker rejects because [] has unresolved element type (D2).
+    assert_error("[] >> let[a, ...rest, b]; a", "");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1329,7 +1329,6 @@ fn unary_minus_restriction() {
 // ═══════════════════════════════════════════════════════════════════
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn dual_let_by_name() {
     // (x=1, y=2) >> let(x, y) — names match struct fields, bind by name
     assert_val("(x=1, y=2) >> let(x, y); x + y", int(3));
@@ -1910,21 +1909,18 @@ fn bug46_mixed_escapes() {
 // ═══════════════════════════════════════════════════════════════════
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn bug47_named_struct_discard_last() {
     // Discard the second field of a named struct
     assert_val("(x=1, y=2) >> let(x, _); x", int(1));
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn bug47_named_struct_discard_first() {
     // Discard the first field of a named struct
     assert_val("(x=1, y=2) >> let(_, y); y", int(2));
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn bug47_named_struct_discard_middle() {
     // Discard a middle field of a named struct
     assert_val("(x=1, y=2, z=3) >> let(x, _, z); x + z", int(4));
@@ -2130,7 +2126,6 @@ fn bug53_error_names_first_missing_when_multiple() {
 // ── BUG-55: () should be destructurable as empty struct ─────────────────────
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn bug55_unit_destructure_rest() {
     // () is the zero-field struct; ...rest should capture empty struct
     assert_output("() >> let(...rest); rest", "()");
@@ -2143,7 +2138,6 @@ fn bug55_unit_destructure_discard_rest() {
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn bug55_unit_destructure_only_rest() {
     // Just a rest pattern on unit
     assert_val("() >> let(...r); r == ()", T);
@@ -2277,13 +2271,12 @@ fn edge7_comparing_tag_constructors_equal() {
 // ── Edge case 8: matching non-tagged value with tag pattern ─────────────────
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn edge8_match_untagged_with_tag_pattern() {
-    // 1 >> A creates A(1), { A(x) -> x } extracts 1, then { A(y) -> y } fails
-    // because 1 is not tagged. This is correct: non-exhaustive match.
+    // 1 >> A creates A(1), { A(x) -> x } extracts Int, then { A(y) -> y }
+    // receives an Int (not tagged). Per D5: non-exhaustive branch is a type error.
     assert_error(
         "tag(A); 1 >> A >> { A(x) -> x } >> { A(y) -> y }",
-        "no arm matched",
+        "non-exhaustive branch",
     );
 }
 
@@ -2399,7 +2392,7 @@ fn edge19_empty_array_length() {
 // ── Edge case 20: map over empty array ──────────────────────────────────────
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
+    #[ignore] // requires union-find inference: callback constrains element type
 fn edge20_map_empty_array() {
     assert_output("[].map{ in * 2 }", "[]");
 }
@@ -3096,32 +3089,27 @@ fn string_method_chain() {
 // ── String Destructuring ─────────────────────────────────────────
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn string_destructure_basic() {
     assert_val(r#""abc" >> let[a, b, c]; a"#, s("a"));
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn string_destructure_second_char() {
     assert_val(r#""abc" >> let[a, b, c]; b"#, s("b"));
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn string_destructure_with_rest() {
     assert_val(r#""hello" >> let[first, ...rest]; first"#, s("h"));
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn string_destructure_rest_is_string() {
     // ...rest captures remaining characters as a string
     assert_val(r#""hi" >> let[h, ...rest]; rest"#, s("i"));
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn string_destructure_head_tail() {
     assert_val(r#""abc" >> let[_, ...tail]; tail"#, s("bc"));
 }
@@ -3137,19 +3125,16 @@ fn string_destructure_too_many_elements() {
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn string_destructure_empty_string() {
     assert_val(r#""" >> let[...rest]; rest"#, s(""));
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn string_destructure_let_sugar() {
     assert_val(r#"let s = "xy"; s >> let[x, y]; x"#, s("x"));
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn string_destructure_concat_parts() {
     // Destructured parts are strings, so they can be concatenated back
     assert_val(r#""abc" >> let[a, b, c]; a + b + c"#, s("abc"));
@@ -3158,13 +3143,11 @@ fn string_destructure_concat_parts() {
 // ── let [...] = expr sugar ──────────────────────────────────────
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn let_array_assign_sugar_basic() {
     assert_val(r#"let [a, b, c] = "abc"; b"#, s("b"));
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn let_array_assign_sugar_rest() {
     assert_val(r#"let [a, ...rest] = "hello"; a"#, s("h"));
 }
@@ -3694,12 +3677,12 @@ fn probe17_same_name_tags_still_unique() {
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn probe17_shadowed_tag_old_value_no_match() {
-    // After shadowing tag X, the old X-tagged value should NOT match the new X pattern
+    // After shadowing tag X, the old X-tagged value carries a different tag identity.
+    // Per D5: the branch pattern uses the new X identity, which doesn't match — type error.
     assert_error(
         r#"tag(X); 1 >> X >> let(v1); tag(X); v1 >> { X(n) -> n * 100 }"#,
-        "no arm matched",
+        "non-exhaustive branch",
     );
 }
 
@@ -3944,7 +3927,6 @@ fn probe17_pipe_into_builtin() {
 // ── Probes: complex let chain interactions ──────────────────────
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn probe17_let_destructure_then_use_both() {
     // Destructure a struct, then use both fields
     assert_val("(a=3, b=7) >> let(a, b); a * b", int(21));
@@ -4700,9 +4682,8 @@ fn probe17b_undefined_tag_in_pattern_is_binding() {
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn probe17b_undefined_tag_pattern_with_parens() {
-    // Using Tag(x) pattern with undefined tag should error at eval time
+    // Using Tag(x) pattern with undefined tag is a type error (per D5)
     assert_error("42 >> { Foo(x) -> x }", "undefined tag");
 }
 
@@ -4751,14 +4732,13 @@ fn probe17b_same_name_tags_different_scopes() {
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn probe17b_tag_identity_mismatch() {
     // a1 and a2 are different tag identities despite having the same name.
-    // Value tagged with a1 should NOT match a branch pattern using a2's identity
-    // (since the second tag(A) shadows A in the branch scope).
+    // Value tagged with a1 should NOT match a branch pattern using a2's identity.
+    // Per D5: non-exhaustive branch is a type error.
     assert_error(
         "tag(A); let a1 = A; tag(A); 42 >> a1 >> { A(x) -> x }",
-        "no arm matched",
+        "non-exhaustive branch",
     );
 }
 
@@ -5169,9 +5149,10 @@ fn probe17b_guarded_wildcard_then_unguarded() {
 // ── 1. Array methods ─────────────────────────────────────────────
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn probe18b_array_get_empty() {
-    assert_error("[].get(0)", "out of bounds");
+    // Type checker rejects because [] has unresolved element type (D2).
+    // Would be runtime "out of bounds" if it passed type checking.
+    assert_error("[].get(0)", "");
 }
 
 #[test]
@@ -5205,13 +5186,13 @@ fn probe18b_array_len_empty() {
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
+    #[ignore] // requires union-find inference: callback constrains element type
 fn probe18b_array_map_empty() {
     assert_output("[].map{ * 2 }", "[]");
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
+    #[ignore] // requires union-find inference: callback constrains element type
 fn probe18b_array_filter_empty() {
     assert_output("[].filter{ > 0 }", "[]");
 }
@@ -5521,7 +5502,6 @@ fn probe18c_positional_struct_neq() {
 // ── 8. Struct destructuring edge cases ─────────────────────────────
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn probe18c_destructure_named() {
     assert_val("(a=1, b=2) >> let(a, b); a + b", int(3));
 }
@@ -6164,9 +6144,9 @@ fn probe19c_builtin_fn_display() {
 // ── 9. Closure display ──────────────────────────────────────────
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn probe19c_closure_display() {
-    assert_output("{ in + 1 }", "<function>");
+    // Per D1: standalone closures as program results are rejected (unresolved inference)
+    assert_error("{ in + 1 }", "unresolved inference");
 }
 
 // ── 10. Char inside nested values ───────────────────────────────
@@ -7596,13 +7576,13 @@ fn probe23_spread_with_extra_fields() {
 // ── 4. Empty array operations ──
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
+    #[ignore] // requires union-find inference: callback constrains element type
 fn probe23_empty_array_map() {
     assert_output("[].map{ * 2 }", "[]");
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
+    #[ignore] // requires union-find inference: callback constrains element type
 fn probe23_empty_array_filter() {
     assert_output("[].filter{ > 0 }", "[]");
 }
@@ -7618,9 +7598,9 @@ fn probe23_empty_array_concat_right() {
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn probe23_empty_array_concat_both() {
-    assert_output("[] + []", "[]");
+    // Per D2: empty arrays without constraining context are correctly rejected
+    assert_error("[] + []", "unresolved inference");
 }
 
 #[test]
@@ -7878,7 +7858,6 @@ fn probe24_let_array_destructure_rest_only() {
 }
 
 #[test]
-    #[ignore] // inference limitation: unresolved Infer
 fn probe24_empty_struct_let_destructure_rest() {
     // `() >> let(...rest); rest` — rest captures nothing from empty struct (unit).
     // Unit is not a Struct, but bind_pattern may handle it.

@@ -952,7 +952,7 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
             env.bind("in".to_string(), input_ty.clone());
             let mut result_ty: Option<Ty> = None;
             for arm in arms {
-                let bindings_added = bind_branch_pattern(&arm.pattern, &input_ty, env);
+                let bindings_added = bind_branch_pattern(&arm.pattern, &input_ty, env)?;
                 if let Some(guard) = &arm.guard {
                     let _ = check(guard, env)?;
                 }
@@ -1330,13 +1330,47 @@ fn check_let(
         }
         Pattern::Discard => check(body, env),
         Pattern::Fields(fields) => {
+            // Determine bind_by_name vs positional, mirroring eval::bind_pattern
+            let struct_fields = match input_ty {
+                Ty::Struct(f) => f.as_slice(),
+                Ty::Unit => &[][..],
+                _ => &[][..],
+            };
+            let has_explicit_labels = fields.iter().any(|f| f.label.is_some());
+            let unlabeled_fields: Vec<&crate::ast::PatField> = fields
+                .iter()
+                .filter(|f| !f.is_rest && f.label.is_none() && f.binding != "_")
+                .collect();
+            let bind_by_name = if has_explicit_labels {
+                true
+            } else if unlabeled_fields.is_empty() {
+                struct_fields.iter().any(|(l, _)| l.parse::<u64>().is_err())
+            } else {
+                let all_match = unlabeled_fields.iter().all(|pf| {
+                    struct_fields.iter().any(|(l, _)| l == &pf.binding)
+                });
+                if all_match {
+                    true
+                } else {
+                    // No name match — bind positionally
+                    false
+                }
+            };
+
             let mut bindings_added = 0usize;
             let mut positional_idx = 0u64;
+            let mut used_keys = Vec::new();
             for field in fields {
                 if field.binding == "_" && !field.is_rest {
                     // Discard — don't bind, but consume positional index
                     if field.label.is_none() {
-                        positional_idx += 1;
+                        if bind_by_name {
+                            // consume any unused field
+                        } else {
+                            let key = positional_idx.to_string();
+                            used_keys.push(key);
+                            positional_idx += 1;
+                        }
                     }
                     continue;
                 }
@@ -1344,25 +1378,10 @@ fn check_let(
                     // Rest pattern — compute remaining fields from the input struct
                     if field.binding != "_" && !field.binding.is_empty() {
                         let rest_ty = match input_ty {
-                            Ty::Struct(struct_fields) => {
-                                // Collect field keys consumed by non-rest patterns
-                                let mut consumed = Vec::new();
-                                let mut pos = 0u64;
-                                for f in fields {
-                                    if f.is_rest {
-                                        continue;
-                                    }
-                                    match &f.label {
-                                        Some(label) => consumed.push(label.clone()),
-                                        None => {
-                                            consumed.push(pos.to_string());
-                                            pos += 1;
-                                        }
-                                    }
-                                }
-                                let remaining: Vec<(std::string::String, Ty)> = struct_fields
+                            Ty::Struct(sf) => {
+                                let remaining: Vec<(std::string::String, Ty)> = sf
                                     .iter()
-                                    .filter(|(n, _)| !consumed.contains(n))
+                                    .filter(|(n, _)| !used_keys.contains(n))
                                     .cloned()
                                     .collect();
                                 if remaining.is_empty() {
@@ -1385,6 +1404,7 @@ fn check_let(
                                     Ty::Struct(remaining)
                                 }
                             }
+                            Ty::Unit => Ty::Unit,
                             _ => env.fresh_infer(),
                         };
                         env.bind(field.binding.clone(), rest_ty);
@@ -1392,25 +1412,26 @@ fn check_let(
                     }
                     continue;
                 }
-                // Look up field type from input struct if known
+                // Look up field type from input struct/unit
                 let field_ty = match input_ty {
-                    Ty::Struct(struct_fields) => {
-                        let lookup_key = match &field.label {
-                            Some(label) => label.clone(),
-                            None => {
-                                let key = positional_idx.to_string();
-                                positional_idx += 1;
-                                key
-                            }
+                    Ty::Struct(sf) => {
+                        let lookup_key = if let Some(label) = &field.label {
+                            label.clone()
+                        } else if bind_by_name {
+                            field.binding.clone()
+                        } else {
+                            let key = positional_idx.to_string();
+                            positional_idx += 1;
+                            key
                         };
-                        struct_fields
-                            .iter()
+                        used_keys.push(lookup_key.clone());
+                        sf.iter()
                             .find(|(n, _)| *n == lookup_key)
                             .map(|(_, ty)| ty.clone())
                             .unwrap_or_else(|| env.fresh_infer())
                     }
                     _ => {
-                        if field.label.is_none() {
+                        if field.label.is_none() && !bind_by_name {
                             positional_idx += 1;
                         }
                         env.fresh_infer()
@@ -1434,10 +1455,14 @@ fn check_let_array(
     input_ty: &Ty,
     env: &mut TyEnv,
 ) -> Result<Ty, std::string::String> {
-    // Extract element type from Array input
-    let elem_ty = match input_ty {
-        Ty::Array(elem) => elem.as_ref().clone(),
-        _ => env.fresh_infer(),
+    // Extract element type and rest type from input
+    let (elem_ty, rest_ty) = match input_ty {
+        Ty::Array(elem) => (elem.as_ref().clone(), Ty::Array(elem.clone())),
+        Ty::String => (Ty::String, Ty::String),
+        _ => {
+            let e = env.fresh_infer();
+            (e.clone(), Ty::Array(Box::new(e)))
+        }
     };
     let mut bindings_added = 0usize;
     for pat in patterns {
@@ -1448,7 +1473,7 @@ fn check_let_array(
             }
             ArrayPat::Discard => {}
             ArrayPat::Rest(Some(name)) => {
-                env.bind(name.clone(), Ty::Array(Box::new(elem_ty.clone())));
+                env.bind(name.clone(), rest_ty.clone());
                 bindings_added += 1;
             }
             ArrayPat::Rest(None) => {}
@@ -1567,10 +1592,41 @@ fn check_branch_block_with_input(
     input_ty: &Ty,
     env: &mut TyEnv,
 ) -> Result<Ty, std::string::String> {
+    // Per D5: when the input type is known (non-Infer), check for undefined tags
+    // and exhaustiveness.
+    if !matches!(input_ty, Ty::Infer(_)) {
+        // First: check for undefined tag names in patterns
+        for arm in arms {
+            if let crate::mir::MirBranchPattern::Tag(tag_name, _) = &arm.pattern {
+                if !matches!(env.get(tag_name), Some(Ty::TagConstructor(_))) {
+                    return Err(format!(
+                        "type error: undefined tag '{}' in branch pattern",
+                        tag_name
+                    ));
+                }
+            }
+        }
+        // Second: check exhaustiveness — at least one arm must be able to match
+        let any_can_match = arms.iter().any(|arm| arm_pattern_can_match(&arm.pattern, input_ty, env));
+        if !any_can_match {
+            let tag_name = arms.iter().find_map(|arm| {
+                if let crate::mir::MirBranchPattern::Tag(name, _) = &arm.pattern {
+                    Some(name.as_str())
+                } else {
+                    None
+                }
+            }).unwrap_or("?");
+            return Err(format!(
+                "type error: non-exhaustive branch — no arm matches input type (first tag: '{}')",
+                tag_name
+            ));
+        }
+    }
+
     env.bind("in".to_string(), input_ty.clone());
     let mut result_ty: Option<Ty> = None;
     for arm in arms {
-        let bindings_added = bind_branch_pattern(&arm.pattern, input_ty, env);
+        let bindings_added = bind_branch_pattern(&arm.pattern, input_ty, env)?;
         if let Some(guard) = &arm.guard {
             let _ = check(guard, env)?;
         }
@@ -1587,25 +1643,61 @@ fn check_branch_block_with_input(
     Ok(result_ty.unwrap_or_else(|| env.fresh_infer()))
 }
 
-/// Bind variables introduced by a branch pattern. Returns the number of bindings added.
-fn bind_branch_pattern(pattern: &MirBranchPattern, input_ty: &Ty, env: &mut TyEnv) -> usize {
+/// Returns true if a branch pattern can potentially match the given input type.
+fn arm_pattern_can_match(pattern: &crate::mir::MirBranchPattern, input_ty: &Ty, env: &TyEnv) -> bool {
     match pattern {
-        MirBranchPattern::Literal(_) => 0,
-        MirBranchPattern::Tag(tag_name, binding) => match binding {
-            Some(BranchBinding::Name(n)) => {
-                let payload_ty = resolve_tag_payload(tag_name, input_ty, env)
-                    .unwrap_or_else(|| env.fresh_infer());
-                env.bind(n.clone(), payload_ty);
-                1
+        crate::mir::MirBranchPattern::Binding(_) => true,
+        crate::mir::MirBranchPattern::Discard => true,
+        crate::mir::MirBranchPattern::Literal(_) => true,
+        crate::mir::MirBranchPattern::Tag(tag_name, _) => {
+            let tag_id = match env.get(tag_name) {
+                Some(Ty::TagConstructor(id)) => *id,
+                _ => return false,
+            };
+            extract_payload_for_tag(tag_id, input_ty).is_some()
+        }
+    }
+}
+
+/// Bind variables introduced by a branch pattern. Returns the number of bindings added.
+/// When input_ty is known (non-Infer), errors on undefined tags or tag/type mismatches.
+fn bind_branch_pattern(
+    pattern: &MirBranchPattern,
+    input_ty: &Ty,
+    env: &mut TyEnv,
+) -> Result<usize, String> {
+    match pattern {
+        MirBranchPattern::Literal(_) => Ok(0),
+        MirBranchPattern::Tag(tag_name, binding) => {
+            let input_is_infer = matches!(input_ty, Ty::Infer(_));
+            if !input_is_infer {
+                // Check that the tag name is defined in scope
+                match env.get(tag_name) {
+                    Some(Ty::TagConstructor(_)) => {}
+                    _ => {
+                        return Err(format!(
+                            "type error: undefined tag '{}' in branch pattern",
+                            tag_name
+                        ))
+                    }
+                }
             }
-            _ => 0,
-        },
+            match binding {
+                Some(BranchBinding::Name(n)) => {
+                    let payload_ty = resolve_tag_payload(tag_name, input_ty, env)
+                        .unwrap_or_else(|| env.fresh_infer());
+                    env.bind(n.clone(), payload_ty);
+                    Ok(1)
+                }
+                _ => Ok(0),
+            }
+        }
         MirBranchPattern::Binding(n) => {
             // Catch-all binding gets the input type
             env.bind(n.clone(), input_ty.clone());
-            1
+            Ok(1)
         }
-        MirBranchPattern::Discard => 0,
+        MirBranchPattern::Discard => Ok(0),
     }
 }
 

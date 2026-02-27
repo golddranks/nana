@@ -8954,3 +8954,62 @@ fn float_to_string_whole_number() {
     assert_val(r#""value: {1.0}""#, s("value: 1.0"));
     assert_val(r#""value: {3.14}""#, s("value: 3.14"));
 }
+
+// ── Generic array method type checking ──
+
+#[test]
+fn generic_map_preserves_type() {
+    // [1,2,3].map{+1} should produce Array(Int), not lose type info
+    assert_val("[1, 2, 3].map{ + 1 }", Value::Array(vec![int(2), int(3), int(4)]));
+}
+
+#[test]
+fn generic_map_type_transform() {
+    // map with a type-changing function: Int → Bool
+    assert_val(
+        "[1, 2, 3].map{ > 1 }",
+        Value::Array(vec![Value::Bool(false), Value::Bool(true), Value::Bool(true)]),
+    );
+}
+
+#[test]
+fn generic_filter_preserves_type() {
+    assert_val("[1, 2, 3, 4].filter{ > 2 }", Value::Array(vec![int(3), int(4)]));
+}
+
+#[test]
+fn generic_fold_returns_init_type() {
+    // fold with int init — result should be int
+    assert_val(
+        "[1, 2, 3].fold(0, { >> let(acc, elem); acc + elem })",
+        int(6),
+    );
+}
+
+#[test]
+fn generic_zip_returns_pair_array() {
+    assert_val(
+        r#"[1, 2].zip(["a", "b"]).get(0)"#,
+        Value::Struct(vec![("0".into(), int(1)), ("1".into(), s("a"))]),
+    );
+}
+
+#[test]
+fn generic_get_returns_element() {
+    assert_val("[10, 20, 30].get(1)", int(20));
+}
+
+#[test]
+fn generic_chained_map_filter() {
+    // Chaining should preserve type through operations
+    assert_val(
+        "[1, 2, 3, 4].map{ * 2 }.filter{ > 4 }",
+        Value::Array(vec![int(6), int(8)]),
+    );
+}
+
+#[test]
+fn type_error_non_function_struct_field_call() {
+    // Calling a non-function struct field should be a type error
+    assert_error("(len=42).len()", "cannot call");
+}

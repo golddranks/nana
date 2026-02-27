@@ -50,11 +50,15 @@ pub enum Ty {
     /// When no context forces coercion, they default to `Int` / `Float`.
     IntLiteral,
     FloatLiteral,
-    /// Polymorphic type: unifies with any type. Used for genuinely generic
-    /// function parameters (e.g. `print` accepts any type), unresolved block
+    /// Polymorphic type: unifies with any type. Used for genuinely polymorphic
+    /// function parameters (e.g. `ref_eq` accepts any type), unresolved block
     /// params before a call site is known, and empty array element types
     /// before refinement.
     Any,
+    /// Generic type variable, instantiated per method call site.
+    /// Used in parametric method signatures (e.g. array methods).
+    /// `Generic(0)` = element type T, `Generic(1)` = second type variable U.
+    Generic(u64),
 }
 
 // ── Type environment ────────────────────────────────────────────
@@ -178,91 +182,8 @@ fn ty_to_tag_id(ty: &Ty) -> Option<TagId> {
     }
 }
 
-/// Specialize a generic (Unknown) method return type based on the receiver type
-/// and the argument type. For example, `Array(Int).get(i)` returns `Int` (not `Unknown`).
-///
-/// Note: `arg_ty` is the type of the *original* method arg (before receiver prepend).
-/// At runtime, `prepend_arg(&recv, arg)` creates `(recv, arg)` — but the type checker
-/// sees the arg as-is from the MIR.
-fn specialize_method_return(recv_ty: &Ty, method: &str, arg_ty: &Ty, ret: Ty) -> Ty {
-    if ret != Ty::Any {
-        return ret; // already specific, no need to specialize
-    }
-    match recv_ty {
-        Ty::Array(elem) => match method {
-            "get" => *elem.clone(),
-            "filter" | "slice" => recv_ty.clone(),
-            "add" => recv_ty.clone(), // array concatenation
-            "map" => {
-                // arr.map(f) → Array(f.ret)
-                match fn_return_type(arg_ty) {
-                    Some(r) => Ty::Array(Box::new(r)),
-                    None => Ty::Array(Box::new(Ty::Any)),
-                }
-            }
-            "fold" => {
-                // arr.fold(init, f) — arg is struct (init, f).
-                // Return type = init type (accumulator).
-                match arg_ty {
-                    Ty::Struct(fields) if !fields.is_empty() => fields[0].1.clone(),
-                    _ => ret,
-                }
-            }
-            "zip" => {
-                // arr.zip(other) → Array(Struct([(0, T1), (1, T2)]))
-                match arg_ty {
-                    Ty::Array(other_elem) => Ty::Array(Box::new(Ty::Struct(vec![
-                        ("0".into(), *elem.clone()),
-                        ("1".into(), *other_elem.clone()),
-                    ]))),
-                    _ => ret,
-                }
-            }
-            _ => ret,
-        },
-        _ => ret,
-    }
-}
-
-/// Check that the user-supplied method arg matches what the method expects.
-/// The method's param type is in prepended form (prepend_arg(recv, user_arg)).
-/// We extract the expected user arg from the param type and unify against actual.
-fn check_method_arg(
-    _recv_ty: &Ty,
-    arg_ty: &Ty,
-    param: &Ty,
-    method: &str,
-) -> Result<(), std::string::String> {
-    // Unknown param = no checking
-    if *param == Ty::Any {
-        return Ok(());
-    }
-    // Extract expected user arg from the prepended param.
-    let expected_arg = match param {
-        // Struct param: field "0" is receiver, rest is user arg
-        Ty::Struct(fields) if !fields.is_empty() && fields[0].0 == "0" => {
-            let rest: Vec<_> = fields[1..].to_vec();
-            if rest.is_empty() {
-                // Unary with struct receiver — shouldn't happen for primitives
-                Ty::Unit
-            } else if rest.len() == 1 && rest[0].0.parse::<u64>().is_ok() {
-                // Single positional arg: Struct([("0", recv), ("1", T)]) → user arg is T
-                rest[0].1.clone()
-            } else {
-                // Multiple/named args: user passed a struct
-                Ty::Struct(rest)
-            }
-        }
-        // Non-struct param = unary (prepend_arg(recv, Unit) = recv)
-        _ => Ty::Unit,
-    };
-    unify(arg_ty, &expected_arg).map_err(|e| format!("type error in .{}(): {}", method, e))?;
-    Ok(())
-}
-
 /// Mirror of `prepend_arg` from eval.rs, but for types.
 /// `recv.method(arg)` at runtime calls `method_fn(prepend_arg(recv, arg))`.
-#[cfg(test)]
 fn prepend_arg_ty(recv_ty: &Ty, arg_ty: &Ty) -> Ty {
     match arg_ty {
         Ty::Unit => recv_ty.clone(),
@@ -281,14 +202,6 @@ fn prepend_arg_ty(recv_ty: &Ty, arg_ty: &Ty) -> Ty {
             ("0".into(), recv_ty.clone()),
             ("1".into(), arg_ty.clone()),
         ]),
-    }
-}
-
-/// Extract the return type from a function type.
-fn fn_return_type(ty: &Ty) -> Option<Ty> {
-    match ty {
-        Ty::Fn { ret, .. } => Some(*ret.clone()),
-        _ => None,
     }
 }
 
@@ -363,31 +276,76 @@ pub fn core_module_type() -> Ty {
     fields.push(("val_eq".into(), f(Ty::Any, Ty::Bool)));
     fields.push(("method_set".into(), f(Ty::Any, Ty::Any))); // generative, handled specially
 
-    // Array methods (receive prepended arg: Struct([("0", Array), ("1", arg)]))
-    let arr = Ty::Array(Box::new(Ty::Any));
-    fields.push(("array_get".into(), binop2(arr.clone(), Ty::Int, Ty::Any)));
-    let range_ty_arr = Ty::Struct(vec![("start".into(), Ty::Int), ("end".into(), Ty::Int)]);
+    // Array methods — parametric with Generic type variables.
+    // G0 = element type T, G1 = second type variable U.
+    // Signatures use prepended receiver: Struct([("0", Array(G0)), ("1", user_arg)]).
+    let g0 = Ty::Generic(0);
+    let g1 = Ty::Generic(1);
+    let arr_g0 = Ty::Array(Box::new(g0.clone()));
+    let arr_g1 = Ty::Array(Box::new(g1.clone()));
+    // array_get: Array(G0) × Int → G0
     fields.push((
-        "array_slice".into(),
-        binop2(arr.clone(), range_ty_arr, arr.clone()),
+        "array_get".into(),
+        binop2(arr_g0.clone(), Ty::Int, g0.clone()),
     ));
-    fields.push(("array_len".into(), unary(arr.clone(), Ty::Int)));
+    // array_slice: Array(G0) × Range → Array(G0)
+    // After prepend: (0=Array(G0), start=Int, end=Int)
+    let slice_param = Ty::Struct(vec![
+        ("0".into(), arr_g0.clone()),
+        ("start".into(), Ty::Int),
+        ("end".into(), Ty::Int),
+    ]);
+    fields.push(("array_slice".into(), f(slice_param, arr_g0.clone())));
+    // array_len: Array(G0) → Int
+    fields.push(("array_len".into(), unary(arr_g0.clone(), Ty::Int)));
+    // array_map: Array(G0) × (G0 → G1) → Array(G1)
+    let map_cb = Ty::Fn {
+        param: Box::new(g0.clone()),
+        ret: Box::new(g1.clone()),
+    };
     fields.push((
         "array_map".into(),
-        binop2(arr.clone(), Ty::Any, arr.clone()),
-    )); // cb param
+        binop2(arr_g0.clone(), map_cb, arr_g1.clone()),
+    ));
+    // array_filter: Array(G0) × (G0 → Bool) → Array(G0)
+    let filter_cb = Ty::Fn {
+        param: Box::new(g0.clone()),
+        ret: Box::new(Ty::Bool),
+    };
     fields.push((
         "array_filter".into(),
-        binop2(arr.clone(), Ty::Any, arr.clone()),
+        binop2(arr_g0.clone(), filter_cb, arr_g0.clone()),
     ));
-    fields.push(("array_fold".into(), f(Ty::Any, Ty::Any))); // complex param
+    // array_fold: Array(G0) × (init: G1, f: (acc: G1, elem: G0) → G1) → G1
+    // After prepend: (0=Array(G0), 1=G1, 2=Fn((acc: G1, elem: G0) → G1))
+    let fold_f = Ty::Fn {
+        param: Box::new(Ty::Struct(vec![
+            ("acc".into(), g1.clone()),
+            ("elem".into(), g0.clone()),
+        ])),
+        ret: Box::new(g1.clone()),
+    };
+    let fold_param = Ty::Struct(vec![
+        ("0".into(), arr_g0.clone()),
+        ("1".into(), g1.clone()),
+        ("2".into(), fold_f),
+    ]);
+    fields.push(("array_fold".into(), f(fold_param, g1.clone())));
+    // array_zip: Array(G0) × Array(G1) → Array((G0, G1))
+    let zip_elem = Ty::Struct(vec![("0".into(), g0.clone()), ("1".into(), g1.clone())]);
     fields.push((
         "array_zip".into(),
-        binop2(arr.clone(), arr.clone(), arr.clone()),
+        binop2(
+            arr_g0.clone(),
+            arr_g1.clone(),
+            Ty::Array(Box::new(zip_elem)),
+        ),
     ));
-    fields.push(("array_add".into(), binop(arr.clone(), arr.clone())));
-    fields.push(("array_eq".into(), binop(arr.clone(), Ty::Bool)));
-    fields.push(("array_not_eq".into(), binop(arr.clone(), Ty::Bool)));
+    // array_add: Array(G0) × Array(G0) → Array(G0)
+    fields.push(("array_add".into(), binop(arr_g0.clone(), arr_g0.clone())));
+    // array_eq / array_not_eq: Array(G0) × Array(G0) → Bool
+    fields.push(("array_eq".into(), binop(arr_g0.clone(), Ty::Bool)));
+    fields.push(("array_not_eq".into(), binop(arr_g0.clone(), Ty::Bool)));
 
     // String methods
     fields.push(("string_byte_len".into(), unary(Ty::String, Ty::Int)));
@@ -421,18 +379,24 @@ pub fn core_module_type() -> Ty {
         "string_contains_char".into(),
         binop2(Ty::String, Ty::Char, Ty::Bool),
     ));
-    let range_ty = Ty::Struct(vec![("start".into(), Ty::Int), ("end".into(), Ty::Int)]);
-    fields.push((
-        "string_slice".into(),
-        binop2(Ty::String, range_ty.clone(), Ty::String),
-    ));
+    // string_slice: String × Range → String
+    // After prepend: (0=String, start=Int, end=Int)
+    let string_slice_param = Ty::Struct(vec![
+        ("0".into(), Ty::String),
+        ("start".into(), Ty::Int),
+        ("end".into(), Ty::Int),
+    ]);
+    fields.push(("string_slice".into(), f(string_slice_param, Ty::String)));
     fields.push(("string_starts_with".into(), binop(Ty::String, Ty::Bool)));
     fields.push(("string_ends_with".into(), binop(Ty::String, Ty::Bool)));
-    let replace_arg = Ty::Struct(vec![("0".into(), Ty::String), ("1".into(), Ty::String)]);
-    fields.push((
-        "string_replace".into(),
-        binop2(Ty::String, replace_arg, Ty::String),
-    ));
+    // string_replace: String × (pattern, replacement) → String
+    // After prepend: (0=String, 1=String, 2=String)
+    let replace_param = Ty::Struct(vec![
+        ("0".into(), Ty::String),
+        ("1".into(), Ty::String),
+        ("2".into(), Ty::String),
+    ]);
+    fields.push(("string_replace".into(), f(replace_param, Ty::String)));
     fields.push(("string_add".into(), binop(Ty::String, Ty::String)));
     fields.push(("string_eq".into(), binop(Ty::String, Ty::Bool)));
     fields.push(("string_not_eq".into(), binop(Ty::String, Ty::Bool)));
@@ -502,9 +466,9 @@ pub fn core_module_type() -> Ty {
     fields.push(("byte_to_string".into(), unary(Ty::Byte, Ty::String)));
     fields.push(("byte_to_int".into(), unary(Ty::Byte, Ty::Int)));
 
-    // Unit methods
-    fields.push(("unit_eq".into(), binop(Ty::Unit, Ty::Bool)));
-    fields.push(("unit_not_eq".into(), binop(Ty::Unit, Ty::Bool)));
+    // Unit methods — after prepend_arg(Unit, Unit) = Unit, so param is just Unit
+    fields.push(("unit_eq".into(), unary(Ty::Unit, Ty::Bool)));
+    fields.push(("unit_not_eq".into(), unary(Ty::Unit, Ty::Bool)));
 
     Ty::Struct(fields)
 }
@@ -559,8 +523,9 @@ fn union_add(mut variants: Vec<Ty>, ty: Ty) -> Result<Ty, std::string::String> {
 /// `Unknown` is compatible with any type (acts as a wildcard).
 pub fn unify(a: &Ty, b: &Ty) -> Result<Ty, std::string::String> {
     match (a, b) {
-        // Unknown unifies with anything
+        // Any/Generic unify with anything (wildcards)
         (Ty::Any, other) | (other, Ty::Any) => Ok(other.clone()),
+        (Ty::Generic(_), other) | (other, Ty::Generic(_)) => Ok(other.clone()),
 
         // Primitives: must match exactly
         (Ty::Int, Ty::Int) => Ok(Ty::Int),
@@ -684,6 +649,96 @@ pub fn unify(a: &Ty, b: &Ty) -> Result<Ty, std::string::String> {
     }
 }
 
+/// Unify two types while collecting Generic substitutions.
+/// When a Generic(id) meets a concrete type, record the mapping.
+/// If Generic(id) is already mapped, unify the existing mapping with the new type.
+fn unify_with_generics(
+    a: &Ty,
+    b: &Ty,
+    subst: &mut HashMap<u64, Ty>,
+) -> Result<Ty, std::string::String> {
+    match (a, b) {
+        (Ty::Generic(id), Ty::Generic(id2)) if id == id2 => Ok(Ty::Generic(*id)),
+        (Ty::Generic(id), other) | (other, Ty::Generic(id)) => {
+            if let Some(existing) = subst.get(id).cloned() {
+                let unified = unify_with_generics(&existing, other, subst)?;
+                subst.insert(*id, unified.clone());
+                Ok(unified)
+            } else {
+                subst.insert(*id, other.clone());
+                Ok(other.clone())
+            }
+        }
+        // Any still acts as wildcard (for non-parametric polymorphism)
+        (Ty::Any, other) | (other, Ty::Any) => Ok(other.clone()),
+        // Recurse into compound types
+        (Ty::Array(e1), Ty::Array(e2)) => {
+            let elem = unify_with_generics(e1, e2, subst)?;
+            Ok(Ty::Array(Box::new(elem)))
+        }
+        (Ty::Fn { param: p1, ret: r1 }, Ty::Fn { param: p2, ret: r2 }) => {
+            let param = unify_with_generics(p1, p2, subst)?;
+            let ret = unify_with_generics(r1, r2, subst)?;
+            Ok(Ty::Fn {
+                param: Box::new(param),
+                ret: Box::new(ret),
+            })
+        }
+        (Ty::Struct(f1), Ty::Struct(f2)) => {
+            if f1.len() != f2.len() {
+                return Err(format!(
+                    "type error: cannot unify structs with {} and {} fields",
+                    f1.len(),
+                    f2.len()
+                ));
+            }
+            let mut unified = Vec::with_capacity(f1.len());
+            for ((n1, t1), (n2, t2)) in f1.iter().zip(f2.iter()) {
+                if n1 != n2 {
+                    return Err(format!(
+                        "type error: cannot unify struct fields '{}' and '{}'",
+                        n1, n2
+                    ));
+                }
+                let t = unify_with_generics(t1, t2, subst)?;
+                unified.push((n1.clone(), t));
+            }
+            Ok(Ty::Struct(unified))
+        }
+        // Delegate all other cases to regular unify
+        _ => unify(a, b),
+    }
+}
+
+/// Apply a substitution map, replacing Generic(id) with its concrete type.
+fn substitute_generics(ty: &Ty, subst: &HashMap<u64, Ty>) -> Ty {
+    match ty {
+        Ty::Generic(id) => subst.get(id).cloned().unwrap_or_else(|| ty.clone()),
+        Ty::Array(elem) => Ty::Array(Box::new(substitute_generics(elem, subst))),
+        Ty::Fn { param, ret } => Ty::Fn {
+            param: Box::new(substitute_generics(param, subst)),
+            ret: Box::new(substitute_generics(ret, subst)),
+        },
+        Ty::Struct(fields) => Ty::Struct(
+            fields
+                .iter()
+                .map(|(n, t)| (n.clone(), substitute_generics(t, subst)))
+                .collect(),
+        ),
+        Ty::Tagged { tag_id, payload } => Ty::Tagged {
+            tag_id: *tag_id,
+            payload: Box::new(substitute_generics(payload, subst)),
+        },
+        Ty::Union(variants) => Ty::Union(
+            variants
+                .iter()
+                .map(|v| substitute_generics(v, subst))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 /// Default unresolved literal types to their concrete forms.
 /// `IntLiteral` → `Int`, `FloatLiteral` → `Float`.
 /// Applied recursively through compound types.
@@ -746,7 +801,10 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                     .find(|(name, _)| name == field)
                     .map(|(_, ty)| ty.clone())
                     .ok_or_else(|| format!("type error: field '{}' not found in struct", field)),
-                Ty::Any => Ok(Ty::Any),
+                Ty::Any => Err(format!(
+                    "type error: field access '{}' on value of unknown type",
+                    field
+                )),
                 _ => Err(format!("type error: field access on non-struct value")),
             }
         }
@@ -898,18 +956,21 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
             arg,
         } => {
             let recv_ty = check(receiver, env)?;
-            let arg_ty = check(arg, env)?;
 
             // Stage 1: struct field access (method stored as field)
             if let Ty::Struct(fields) = &recv_ty {
                 if let Some((_, field_ty)) = fields.iter().find(|(n, _)| n == method) {
+                    let arg_ty = check(arg, env)?;
                     return match field_ty {
                         Ty::Fn { param, ret } => {
                             unify(&arg_ty, param)?;
                             Ok(*ret.clone())
                         }
                         Ty::Any => Ok(Ty::Any),
-                        _ => Ok(Ty::Any),
+                        _ => Err(format!(
+                            "type error: cannot call non-function field '{}'",
+                            method
+                        )),
                     };
                 }
             }
@@ -919,20 +980,37 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                 if let Some(method_ty) = env.find_method_type(tag_id, method) {
                     let ret = match &method_ty {
                         Ty::Fn { param, ret } => {
-                            // Check the user arg against the method's expected arg type.
-                            // The param type represents what the method expects AFTER
-                            // prepend_arg(recv, user_arg). We extract the expected user
-                            // arg by checking against the param with recv already known.
-                            check_method_arg(&recv_ty, &arg_ty, param, method)?;
-                            *ret.clone()
+                            // Phase 1: Check arg with blocks deferred (placeholder types).
+                            let arg_ty = check_arg_defer_blocks(arg, env)?;
+                            let actual_prepended = prepend_arg_ty(&recv_ty, &arg_ty);
+                            let mut subst = HashMap::new();
+                            unify_with_generics(&actual_prepended, param, &mut subst)
+                                .map_err(|e| format!("type error in .{}(): {}", method, e))?;
+
+                            // Phase 2: Re-check deferred blocks with resolved param types.
+                            let refined = recheck_callback_args(arg, param, &subst, env)?;
+                            if let Some(refined_arg_ty) = refined {
+                                let refined_prepended = prepend_arg_ty(&recv_ty, &refined_arg_ty);
+                                subst.clear();
+                                unify_with_generics(&refined_prepended, param, &mut subst)
+                                    .map_err(|e| format!("type error in .{}(): {}", method, e))?;
+                            }
+
+                            substitute_generics(ret, &subst)
                         }
-                        _ => Ty::Any,
+                        _ => {
+                            return Err(format!(
+                                "type error: method '{}' is not a function",
+                                method
+                            ));
+                        }
                     };
-                    // Specialize generic return types based on receiver and arg
-                    let ret = specialize_method_return(&recv_ty, method, &arg_ty, ret);
                     return Ok(ret);
                 }
             }
+
+            // For stages 1 and 3, check arg normally (no method signature to infer from)
+            let _arg_ty = check(arg, env)?;
 
             // Stage 3: fallback methods for types without explicit method sets.
             // TODO: These fallbacks won't be needed once all types have method sets
@@ -948,9 +1026,199 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                 return Ok(Ty::String);
             }
 
-            // Unknown receiver or method not found — don't error, return Unknown
+            // Method not found — can't error because method sets may be applied
+            // dynamically (e.g. user-defined method_set via std.method_set).
+            // TODO: error once method_set calls through field access are tracked.
             Ok(Ty::Any)
         }
+    }
+}
+
+/// Check a method arg, but give Block/BranchBlock nodes placeholder types.
+/// This avoids checking block bodies before we know their input type.
+fn check_arg_defer_blocks(arg: &Mir, env: &mut TyEnv) -> Result<Ty, String> {
+    match arg.as_ref() {
+        MirKind::Block(_) => Ok(Ty::Fn {
+            param: Box::new(Ty::Any),
+            ret: Box::new(Ty::Any),
+        }),
+        MirKind::BranchBlock(_) => Ok(Ty::Fn {
+            param: Box::new(Ty::Any),
+            ret: Box::new(Ty::Any),
+        }),
+        MirKind::Struct(fields) => {
+            let mut typed_fields = Vec::new();
+            let mut positional_idx = 0u64;
+            for field in fields {
+                let ty = check_arg_defer_blocks(&field.value, env)?;
+                if field.is_spread {
+                    match &ty {
+                        Ty::Struct(spread_fields) => {
+                            for (name, fty) in spread_fields {
+                                if name.parse::<u64>().is_ok() {
+                                    typed_fields.push((positional_idx.to_string(), fty.clone()));
+                                    positional_idx += 1;
+                                } else {
+                                    typed_fields.push((name.clone(), fty.clone()));
+                                }
+                            }
+                        }
+                        Ty::Unit => {}
+                        _ => {
+                            typed_fields.push((positional_idx.to_string(), ty));
+                            positional_idx += 1;
+                        }
+                    }
+                } else {
+                    let label = match &field.label {
+                        Some(name) => name.clone(),
+                        None => {
+                            let label = positional_idx.to_string();
+                            positional_idx += 1;
+                            label
+                        }
+                    };
+                    typed_fields.push((label, ty));
+                }
+            }
+            Ok(Ty::Struct(typed_fields))
+        }
+        // For non-block, non-struct args, check normally
+        _ => check(arg, env),
+    }
+}
+
+/// Bidirectional inference for method call callbacks.
+/// After generic substitution resolves the expected param types for callback arguments,
+/// re-check any Block/BranchBlock args with the resolved param type bound to `in`.
+/// Returns Some(refined_arg_ty) if any callbacks were re-checked, None otherwise.
+fn recheck_callback_args(
+    arg_mir: &Mir,
+    method_param: &Ty,
+    subst: &HashMap<u64, Ty>,
+    env: &mut TyEnv,
+) -> Result<Option<Ty>, String> {
+    // The method_param (after prepend) is either:
+    // - A primitive type (unary method like len) → no callbacks
+    // - Struct([("0", recv), ("1", arg1), ...]) → callbacks are Fn-typed fields at index > 0
+
+    let param_fields = match method_param {
+        Ty::Struct(fields) => fields,
+        _ => return Ok(None),
+    };
+
+    // Find Fn-typed fields in the param (skip "0" which is the receiver)
+    let mut callback_positions: Vec<(String, Ty)> = Vec::new();
+    for (label, ty) in param_fields {
+        if label == "0" {
+            continue; // skip receiver
+        }
+        let resolved = substitute_generics(ty, subst);
+        if matches!(resolved, Ty::Fn { .. }) {
+            callback_positions.push((label.clone(), resolved));
+        }
+    }
+
+    if callback_positions.is_empty() {
+        return Ok(None);
+    }
+
+    // Map param field labels back to MIR arg positions.
+    // Prepend shifts positional indices by 1: param "1" → MIR field 0, param "2" → MIR field 1, etc.
+    // Named fields keep their labels.
+    let mut any_refined = false;
+    let mut refined_field_types: Vec<(String, Ty)> = Vec::new();
+
+    // Build refined types for all arg fields
+    match arg_mir.as_ref() {
+        MirKind::Struct(fields) => {
+            let mut pos_idx = 0u64;
+            for field in fields {
+                let label = match &field.label {
+                    Some(l) => l.clone(),
+                    None => {
+                        let l = pos_idx.to_string();
+                        pos_idx += 1;
+                        l
+                    }
+                };
+                // The param label for this field: positional fields are shifted by 1
+                let param_label = if let Ok(n) = label.parse::<u64>() {
+                    (n + 1).to_string()
+                } else {
+                    label.clone()
+                };
+
+                if let Some((
+                    _,
+                    Ty::Fn {
+                        param: cb_param, ..
+                    },
+                )) = callback_positions.iter().find(|(l, _)| *l == param_label)
+                {
+                    // This field is a callback — try bidirectional re-check
+                    if let Some(refined_ty) = recheck_single_callback(&field.value, cb_param, env)?
+                    {
+                        refined_field_types.push((label, refined_ty));
+                        any_refined = true;
+                        continue;
+                    }
+                }
+                // Not a callback or couldn't re-check — use original type
+                let ty = check(&field.value, env)?;
+                refined_field_types.push((label, ty));
+            }
+        }
+        _ => {
+            // Single arg (not a struct) — check if it's a callback
+            // param label would be "1" (prepend shifts single arg to position 1)
+            if let Some((
+                _,
+                Ty::Fn {
+                    param: cb_param, ..
+                },
+            )) = callback_positions.iter().find(|(l, _)| l == "1")
+            {
+                if let Some(refined_ty) = recheck_single_callback(arg_mir, cb_param, env)? {
+                    return Ok(Some(refined_ty));
+                }
+            }
+            return Ok(None);
+        }
+    }
+
+    if any_refined {
+        Ok(Some(Ty::Struct(refined_field_types)))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Re-check a single Block or BranchBlock with a known input type.
+/// Returns Some(Fn { param, ret }) with the refined return type, or None if not a block.
+fn recheck_single_callback(
+    mir: &Mir,
+    expected_param: &Ty,
+    env: &mut TyEnv,
+) -> Result<Option<Ty>, String> {
+    match mir.as_ref() {
+        MirKind::Block(body) => {
+            env.bind("in".to_string(), expected_param.clone());
+            let body_ty = check(body, env)?;
+            env.pop_binding();
+            Ok(Some(Ty::Fn {
+                param: expected_param.clone().into(),
+                ret: Box::new(body_ty),
+            }))
+        }
+        MirKind::BranchBlock(arms) => {
+            let ret_ty = check_branch_block_with_input(arms, expected_param, env)?;
+            Ok(Some(Ty::Fn {
+                param: expected_param.clone().into(),
+                ret: Box::new(ret_ty),
+            }))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -980,8 +1248,7 @@ fn check_pipe(lhs: &Mir, rhs: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::
             }
         }
         // All other pipe RHS patterns are lowered to Call/MethodCall by MIR.
-        // This branch should be unreachable.
-        _ => Ok(Ty::Any),
+        _ => unreachable!("pipe RHS should be lowered to Call/MethodCall by MIR"),
     }
 }
 
@@ -1229,7 +1496,7 @@ fn check_call(func: &Mir, arg: &Mir, env: &mut TyEnv) -> Result<Ty, std::string:
                     tag_id,
                     payload: Box::new(arg_ty),
                 }),
-                Ty::Any => Ok(Ty::Any),
+                Ty::Any => Ok(Ty::Any), // genuinely polymorphic (e.g. method_set result)
                 _ => Err(format!("type error: cannot call non-function")),
             }
         }
@@ -1860,6 +2127,117 @@ mod tests {
         assert_eq!(result, Ty::Union(vec![ok, Ty::Int]));
     }
 
+    // ── Generic type variable tests ──
+
+    #[test]
+    fn unify_with_generics_binds_variable() {
+        let mut subst = HashMap::new();
+        let result = unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst).unwrap();
+        assert_eq!(result, Ty::Int);
+        assert_eq!(subst.get(&0), Some(&Ty::Int));
+    }
+
+    #[test]
+    fn unify_with_generics_consistent_binding() {
+        let mut subst = HashMap::new();
+        // First bind G0 = Int
+        unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst).unwrap();
+        // Second use of G0 must also be Int
+        let result = unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst).unwrap();
+        assert_eq!(result, Ty::Int);
+    }
+
+    #[test]
+    fn unify_with_generics_inconsistent_binding_error() {
+        let mut subst = HashMap::new();
+        unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst).unwrap();
+        // G0 is already Int, unifying with Float should error
+        assert!(unify_with_generics(&Ty::Generic(0), &Ty::Float, &mut subst).is_err());
+    }
+
+    #[test]
+    fn unify_with_generics_two_variables() {
+        let mut subst = HashMap::new();
+        // G0 = Int, G1 = String
+        unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst).unwrap();
+        unify_with_generics(&Ty::Generic(1), &Ty::String, &mut subst).unwrap();
+        assert_eq!(subst.get(&0), Some(&Ty::Int));
+        assert_eq!(subst.get(&1), Some(&Ty::String));
+    }
+
+    #[test]
+    fn unify_with_generics_in_array() {
+        let mut subst = HashMap::new();
+        // Array(G0) vs Array(Int) -> G0 = Int
+        let a = Ty::Array(Box::new(Ty::Generic(0)));
+        let b = Ty::Array(Box::new(Ty::Int));
+        let result = unify_with_generics(&a, &b, &mut subst).unwrap();
+        assert_eq!(result, Ty::Array(Box::new(Ty::Int)));
+        assert_eq!(subst.get(&0), Some(&Ty::Int));
+    }
+
+    #[test]
+    fn unify_with_generics_in_fn() {
+        let mut subst = HashMap::new();
+        // Fn(G0 -> G1) vs Fn(Int -> String) -> G0=Int, G1=String
+        let a = Ty::Fn {
+            param: Box::new(Ty::Generic(0)),
+            ret: Box::new(Ty::Generic(1)),
+        };
+        let b = Ty::Fn {
+            param: Box::new(Ty::Int),
+            ret: Box::new(Ty::String),
+        };
+        let result = unify_with_generics(&a, &b, &mut subst).unwrap();
+        assert_eq!(
+            result,
+            Ty::Fn {
+                param: Box::new(Ty::Int),
+                ret: Box::new(Ty::String),
+            }
+        );
+        assert_eq!(subst.get(&0), Some(&Ty::Int));
+        assert_eq!(subst.get(&1), Some(&Ty::String));
+    }
+
+    #[test]
+    fn substitute_generics_replaces() {
+        let mut subst = HashMap::new();
+        subst.insert(0, Ty::Int);
+        subst.insert(1, Ty::String);
+        // Array(G1) with {1: String} -> Array(String)
+        let ty = Ty::Array(Box::new(Ty::Generic(1)));
+        assert_eq!(
+            substitute_generics(&ty, &subst),
+            Ty::Array(Box::new(Ty::String))
+        );
+    }
+
+    #[test]
+    fn substitute_generics_in_fn() {
+        let mut subst = HashMap::new();
+        subst.insert(0, Ty::Int);
+        subst.insert(1, Ty::Bool);
+        let ty = Ty::Fn {
+            param: Box::new(Ty::Generic(0)),
+            ret: Box::new(Ty::Generic(1)),
+        };
+        assert_eq!(
+            substitute_generics(&ty, &subst),
+            Ty::Fn {
+                param: Box::new(Ty::Int),
+                ret: Box::new(Ty::Bool),
+            }
+        );
+    }
+
+    #[test]
+    fn substitute_generics_unbound_stays() {
+        let subst = HashMap::new();
+        let ty = Ty::Generic(99);
+        assert_eq!(substitute_generics(&ty, &subst), Ty::Generic(99));
+    }
+
     // ── Block and branch tests ──
 
     #[test]
@@ -2353,20 +2731,15 @@ mod tests {
     fn array_get_returns_element_type() {
         // [1, 2].get(0) should return IntLiteral (element type), not Unknown
         let mut env = TyEnv::new();
-        // Set up array method set
-        env.bind("Array".into(), Ty::TagConstructor(TAG_ID_ARRAY));
+        // array_get: Array(G0) × Int → G0
+        let g0 = Ty::Generic(0);
         let get_ty = Ty::Fn {
-            param: Box::new(Ty::Any),
-            ret: Box::new(Ty::Any), // generic return
+            param: Box::new(Ty::Struct(vec![
+                ("0".into(), Ty::Array(Box::new(g0.clone()))),
+                ("1".into(), Ty::Int),
+            ])),
+            ret: Box::new(g0),
         };
-        env.bind(
-            "method_set".into(),
-            Ty::Fn {
-                param: Box::new(Ty::Any),
-                ret: Box::new(Ty::Any),
-            },
-        );
-        // Register a method set for Array with get method
         let ms_id = env.fresh_method_set_id();
         env.register_method_set(
             ms_id,
@@ -2396,10 +2769,19 @@ mod tests {
     #[test]
     fn array_map_returns_mapped_type() {
         let mut env = TyEnv::new();
-        // Set up array method set with map
+        // array_map: Array(G0) × (G0 → G1) → Array(G1)
+        let g0 = Ty::Generic(0);
+        let g1 = Ty::Generic(1);
+        let map_cb = Ty::Fn {
+            param: Box::new(g0.clone()),
+            ret: Box::new(g1.clone()),
+        };
         let map_ty = Ty::Fn {
-            param: Box::new(Ty::Any),
-            ret: Box::new(Ty::Any), // generic
+            param: Box::new(Ty::Struct(vec![
+                ("0".into(), Ty::Array(Box::new(g0))),
+                ("1".into(), map_cb),
+            ])),
+            ret: Box::new(Ty::Array(Box::new(g1))),
         };
         let ms_id = env.fresh_method_set_id();
         env.register_method_set(
@@ -2415,7 +2797,7 @@ mod tests {
             },
         );
 
-        // [1, 2].map({ ... }) where callback returns String
+        // [1, 2].map(f) where f: Any → String
         let callback = Ty::Fn {
             param: Box::new(Ty::Any),
             ret: Box::new(Ty::String),
@@ -2437,9 +2819,18 @@ mod tests {
     #[test]
     fn array_zip_returns_pair_array() {
         let mut env = TyEnv::new();
+        // array_zip: Array(G0) × Array(G1) → Array((G0, G1))
+        let g0 = Ty::Generic(0);
+        let g1 = Ty::Generic(1);
         let zip_ty = Ty::Fn {
-            param: Box::new(Ty::Any),
-            ret: Box::new(Ty::Any),
+            param: Box::new(Ty::Struct(vec![
+                ("0".into(), Ty::Array(Box::new(g0.clone()))),
+                ("1".into(), Ty::Array(Box::new(g1.clone()))),
+            ])),
+            ret: Box::new(Ty::Array(Box::new(Ty::Struct(vec![
+                ("0".into(), g0),
+                ("1".into(), g1),
+            ])))),
         };
         let ms_id = env.fresh_method_set_id();
         env.register_method_set(

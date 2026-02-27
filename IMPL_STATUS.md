@@ -238,7 +238,8 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | Spec Feature | Status | Notes |
 |---|---|---|
 | Static typing | Implemented | `types.rs`: forward checker with unification validates all expressions — literals, bindings, calls, method dispatch (3-stage: struct field, method set, fallback), branch arm consistency, struct/array construction, destructuring (struct + array patterns), tagged types, precise builtin param+return types, auto-apply prelude on `use(std)`, union/sum types for tagged branches, method param type checking with error propagation, numeric literal coercion |
-| Type inference | Implemented | Forward propagation + unification + bidirectional inference for block/branch `in` parameters (inline and stored); parameterized arrays; tagged value method dispatch; fallback comparison/to_string typing; array method return type specialization (get→elem, filter/slice/add→same, map→Array(cb.ret), zip→Array(pair), fold→init type); rest pattern struct type propagation; tag payload resolution in branch patterns; numeric literal coercion (`IntLiteral` coerces to `Int`/`Byte`, `FloatLiteral` coerces to `Float`); literal defaulting in bindings; no annotation syntax needed (fully inferred) |
+| Type inference | Implemented | Forward propagation + unification + bidirectional inference for block/branch `in` parameters (inline and stored); generic type variables (`Ty::Generic(id)`) for parametric array methods — type information flows through `map`, `filter`, `fold`, `zip`, `get`, `slice`, etc. via `unify_with_generics` + `substitute_generics`; tagged value method dispatch; fallback comparison/to_string typing; rest pattern struct type propagation; tag payload resolution in branch patterns; numeric literal coercion (`IntLiteral` coerces to `Int`/`Byte`, `FloatLiteral` coerces to `Float`); literal defaulting in bindings; no annotation syntax needed (fully inferred) |
+| Generic array methods | Implemented | Array method signatures use `Generic(0)`/`Generic(1)` type variables: `get: Array(T)→T`, `map: Array(T)×(T→U)→Array(U)`, `filter: Array(T)×(T→Bool)→Array(T)`, `fold: Array(T)×(U, (acc:U,elem:T)→U)→U`, `zip: Array(T)×Array(U)→Array((T,U))`, etc. |
 | Occurs check | Implemented | Totality maintained by disallowing recursion syntactically; without recursive bindings or Y-combinator, infinite types cannot be constructed, so the occurs check is trivially satisfied |
 | Compilation = evaluation | Implemented | Single pass |
 
@@ -258,5 +259,11 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 1. Resource types (clone restriction, borrow semantics)
 2. WebAssembly compilation backend
 
+**Type System Limitations:**
+3. `ref_eq`, `val_eq`, `method_set` use `Ty::Any` (genuinely polymorphic — future: method-based dispatch on functions)
+4. User-defined method sets via `std.method_set()` are not tracked by the type checker (method_set calls through field access return `Any`)
+5. Method-not-found on known types is not reported as error (blocked by limitation 4)
+6. Standalone blocks/branch-blocks have `in` typed as `Any` (no way to infer without call context)
+
 **Small / Stdlib:**
-3. Other bit-size numeric constructors (spec mentions "other bit sizes via constructors" — deferred, requires new Value variants)
+7. Other bit-size numeric constructors (spec mentions "other bit sizes via constructors" — deferred, requires new Value variants)

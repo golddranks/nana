@@ -41,6 +41,10 @@ pub enum Ty {
         id: u64,
         tag_id: TagId,
     },
+    /// The builtin `method_set` constructor function. Tracked as a distinct
+    /// type so it can be intercepted at call sites regardless of the name
+    /// it's bound to (e.g. `let ms = std.method_set; ms(Int, ...)`).
+    MethodSetConstructor,
     /// Sum type: one of several possible types (e.g. `Ok(Int) | Err(String)`).
     /// Variants are always flattened (no nested unions).
     Union(Vec<Ty>),
@@ -50,15 +54,32 @@ pub enum Ty {
     /// When no context forces coercion, they default to `Int` / `Float`.
     IntLiteral,
     FloatLiteral,
-    /// Polymorphic type: unifies with any type. Used for genuinely polymorphic
-    /// function parameters (e.g. `ref_eq` accepts any type), unresolved block
-    /// params before a call site is known, and empty array element types
-    /// before refinement.
-    Any,
-    /// Generic type variable, instantiated per method call site.
-    /// Used in parametric method signatures (e.g. array methods).
-    /// `Generic(0)` = element type T, `Generic(1)` = second type variable U.
+    /// Inference variable: type not yet determined. Each use site gets a
+    /// unique ID via `TyEnv::fresh_infer()`. Unifies with any concrete type,
+    /// resolving to that type. Not a type in the language — only exists
+    /// during type checking for deferred inference (standalone blocks,
+    /// empty arrays, pattern fallbacks).
+    Infer(u64),
+    /// Generic type variable, instantiated per call site.
+    /// Used in parametric signatures (e.g. array methods, ref_eq/val_eq).
+    /// `Generic(0)` = first type variable T, `Generic(1)` = second U.
     Generic(u64),
+}
+
+impl Ty {
+    /// Returns true if this type contains any unresolved inference variables.
+    /// An inference variable in the final result type indicates an inference failure.
+    pub fn contains_infer(&self) -> bool {
+        match self {
+            Ty::Infer(_) => true,
+            Ty::Array(elem) => elem.contains_infer(),
+            Ty::Fn { param, ret } => param.contains_infer() || ret.contains_infer(),
+            Ty::Struct(fields) => fields.iter().any(|(_, ty)| ty.contains_infer()),
+            Ty::Tagged { payload, .. } => payload.contains_infer(),
+            Ty::Union(variants) => variants.iter().any(|ty| ty.contains_infer()),
+            _ => false,
+        }
+    }
 }
 
 // ── Type environment ────────────────────────────────────────────
@@ -74,6 +95,7 @@ pub struct TyEnv {
     bindings: Vec<(std::string::String, Ty)>,
     modules: HashMap<std::string::String, Ty>,
     next_ms_id: u64,
+    next_infer_id: u64,
     /// Global registry: method set id → info (tag_id + methods struct).
     method_sets: HashMap<u64, MethodSetInfo>,
     /// Block bodies stored for deferred re-checking on call.
@@ -88,6 +110,7 @@ impl TyEnv {
             bindings: Vec::new(),
             modules: HashMap::new(),
             next_ms_id: 0,
+            next_infer_id: 0,
             method_sets: HashMap::new(),
             block_bodies: HashMap::new(),
         }
@@ -102,6 +125,7 @@ impl TyEnv {
     pub fn with_method_sets_from(mut self, other: &TyEnv) -> Self {
         self.method_sets = other.method_sets.clone();
         self.next_ms_id = other.next_ms_id;
+        self.next_infer_id = other.next_infer_id;
         self
     }
 
@@ -123,6 +147,12 @@ impl TyEnv {
 
     fn pop_binding(&mut self) {
         self.bindings.pop();
+    }
+
+    fn fresh_infer(&mut self) -> Ty {
+        let id = self.next_infer_id;
+        self.next_infer_id += 1;
+        Ty::Infer(id)
     }
 
     fn fresh_method_set_id(&mut self) -> u64 {
@@ -271,10 +301,12 @@ pub fn core_module_type() -> Ty {
     fields.push(("float".into(), f(Ty::FloatLiteral, Ty::Float)));
     fields.push(("char".into(), f(Ty::IntLiteral, Ty::Char)));
 
-    // Equality builtins (standalone)
-    fields.push(("ref_eq".into(), f(Ty::Any, Ty::Bool)));
-    fields.push(("val_eq".into(), f(Ty::Any, Ty::Bool)));
-    fields.push(("method_set".into(), f(Ty::Any, Ty::Any))); // generative, handled specially
+    // Equality builtins (standalone, generic — both args must be same type)
+    let g0 = Ty::Generic(0);
+    let eq_param = Ty::Struct(vec![("0".into(), g0.clone()), ("1".into(), g0.clone())]);
+    fields.push(("ref_eq".into(), f(eq_param.clone(), Ty::Bool)));
+    fields.push(("val_eq".into(), f(eq_param, Ty::Bool)));
+    fields.push(("method_set".into(), Ty::MethodSetConstructor));
 
     // Array methods — parametric with Generic type variables.
     // G0 = element type T, G1 = second type variable U.
@@ -523,8 +555,8 @@ fn union_add(mut variants: Vec<Ty>, ty: Ty) -> Result<Ty, std::string::String> {
 /// `Unknown` is compatible with any type (acts as a wildcard).
 pub fn unify(a: &Ty, b: &Ty) -> Result<Ty, std::string::String> {
     match (a, b) {
-        // Any/Generic unify with anything (wildcards)
-        (Ty::Any, other) | (other, Ty::Any) => Ok(other.clone()),
+        // Infer/Generic unify with anything (wildcards)
+        (Ty::Infer(_), other) | (other, Ty::Infer(_)) => Ok(other.clone()),
         (Ty::Generic(_), other) | (other, Ty::Generic(_)) => Ok(other.clone()),
 
         // Primitives: must match exactly
@@ -614,6 +646,8 @@ pub fn unify(a: &Ty, b: &Ty) -> Result<Ty, std::string::String> {
             Ok(Ty::Union(vec![a.clone(), b.clone()]))
         }
 
+        (Ty::MethodSetConstructor, Ty::MethodSetConstructor) => Ok(Ty::MethodSetConstructor),
+
         // MethodSet: must have same generative ID (same lexical site)
         (
             Ty::MethodSet {
@@ -669,8 +703,8 @@ fn unify_with_generics(
                 Ok(other.clone())
             }
         }
-        // Any still acts as wildcard (for non-parametric polymorphism)
-        (Ty::Any, other) | (other, Ty::Any) => Ok(other.clone()),
+        // Infer acts as wildcard (for deferred inference)
+        (Ty::Infer(_), other) | (other, Ty::Infer(_)) => Ok(other.clone()),
         // Recurse into compound types
         (Ty::Array(e1), Ty::Array(e2)) => {
             let elem = unify_with_generics(e1, e2, subst)?;
@@ -801,7 +835,7 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                     .find(|(name, _)| name == field)
                     .map(|(_, ty)| ty.clone())
                     .ok_or_else(|| format!("type error: field '{}' not found in struct", field)),
-                Ty::Any => Err(format!(
+                Ty::Infer(_) => Err(format!(
                     "type error: field access '{}' on value of unknown type",
                     field
                 )),
@@ -874,7 +908,10 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
         MirKind::Pipe(lhs, rhs) => check_pipe(lhs, rhs, env),
 
         // ── Let (pattern destructuring — standalone, not via pipe) ──
-        MirKind::Let { pattern, body } => check_let(pattern, body, &Ty::Any, env),
+        MirKind::Let { pattern, body } => {
+            let input = env.fresh_infer();
+            check_let(pattern, body, &input, env)
+        }
 
         // ── Call ──
         MirKind::Call(func, arg) => check_call(func, arg, env),
@@ -889,7 +926,6 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                     env.pop_binding();
                     result
                 }
-                Ty::Any => check(body, env),
                 _ => Err("type error: apply expects a method set".to_string()),
             }
         }
@@ -899,19 +935,20 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
 
         // ── Block (lambda) ──
         MirKind::Block(body) => {
-            env.bind("in".to_string(), Ty::Any);
+            let param = env.fresh_infer();
+            env.bind("in".to_string(), param.clone());
             let body_ty = check(body, env)?;
             env.pop_binding();
             Ok(Ty::Fn {
-                param: Box::new(Ty::Any),
+                param: Box::new(param),
                 ret: Box::new(body_ty),
             })
         }
 
         // ── BranchBlock (pattern-matching lambda) ──
-        // When not called via check_call, input type is Unknown.
+        // When not called via check_call, input type is not yet known.
         MirKind::BranchBlock(arms) => {
-            let input_ty = Ty::Any;
+            let input_ty = env.fresh_infer();
             env.bind("in".to_string(), input_ty.clone());
             let mut result_ty: Option<Ty> = None;
             for arm in arms {
@@ -929,25 +966,31 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                 });
             }
             env.pop_binding(); // pop "in"
-            let ret = result_ty.unwrap_or(Ty::Any);
+            let ret = result_ty.unwrap_or_else(|| env.fresh_infer());
             Ok(Ty::Fn {
-                param: Box::new(Ty::Any),
+                param: Box::new(input_ty),
                 ret: Box::new(ret),
             })
         }
 
         // ── Array ──
         MirKind::Array(elems) => {
-            let mut elem_ty = Ty::Any;
+            let mut elem_ty: Option<Ty> = None;
             for elem in elems {
                 let ty = check(elem, env)?;
-                elem_ty = unify(&elem_ty, &ty)?;
+                elem_ty = Some(match elem_ty {
+                    None => ty,
+                    Some(prev) => unify(&prev, &ty)?,
+                });
             }
-            Ok(Ty::Array(Box::new(elem_ty)))
+            Ok(Ty::Array(Box::new(elem_ty.unwrap_or_else(|| env.fresh_infer()))))
         }
 
         // ── LetArray (standalone, not via pipe) ──
-        MirKind::LetArray { patterns, body } => check_let_array(patterns, body, &Ty::Any, env),
+        MirKind::LetArray { patterns, body } => {
+            let input = env.fresh_infer();
+            check_let_array(patterns, body, &input, env)
+        }
 
         // ── MethodCall ──
         MirKind::MethodCall {
@@ -960,17 +1003,22 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
             // Stage 1: struct field access (method stored as field)
             if let Ty::Struct(fields) = &recv_ty {
                 if let Some((_, field_ty)) = fields.iter().find(|(n, _)| n == method) {
-                    let arg_ty = check(arg, env)?;
                     return match field_ty {
-                        Ty::Fn { param, ret } => {
-                            unify(&arg_ty, param)?;
-                            Ok(*ret.clone())
+                        Ty::MethodSetConstructor => check_method_set_call(arg, env),
+                        _ => {
+                            let arg_ty = check(arg, env)?;
+                            match field_ty {
+                                Ty::Fn { param, ret } => {
+                                    unify(&arg_ty, param)?;
+                                    Ok(*ret.clone())
+                                }
+                                Ty::Infer(_) => Ok(env.fresh_infer()),
+                                _ => Err(format!(
+                                    "type error: cannot call non-function field '{}'",
+                                    method
+                                )),
+                            }
                         }
-                        Ty::Any => Ok(Ty::Any),
-                        _ => Err(format!(
-                            "type error: cannot call non-function field '{}'",
-                            method
-                        )),
                     };
                 }
             }
@@ -1009,27 +1057,28 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                 }
             }
 
-            // For stages 1 and 3, check arg normally (no method signature to infer from)
-            let _arg_ty = check(arg, env)?;
+            // Infer: receiver type not yet known — check arg but return Infer.
+            // The block will be re-checked with a concrete type at the call site.
+            if matches!(recv_ty, Ty::Infer(_)) {
+                let _arg_ty = check(arg, env)?;
+                return Ok(env.fresh_infer());
+            }
 
-            // Stage 3: fallback methods for types without explicit method sets.
-            // TODO: These fallbacks won't be needed once all types have method sets
-            // in scope. They exist because the type checker may encounter method calls
-            // before method sets are applied (e.g. in std.nana itself).
+            // Fallback: built-in comparison for types without explicit method sets.
+            // The runtime supports eq/not_eq on structs, tags, tag constructors,
+            // and arrays, plus ordering on primitives — all via eval_compare.
+            let _arg_ty = check(arg, env)?;
             if matches!(
                 method.as_str(),
                 "eq" | "not_eq" | "lt" | "gt" | "lt_eq" | "gt_eq"
             ) {
                 return Ok(Ty::Bool);
             }
-            if method == "to_string" {
-                return Ok(Ty::String);
-            }
 
-            // Method not found — can't error because method sets may be applied
-            // dynamically (e.g. user-defined method_set via std.method_set).
-            // TODO: error once method_set calls through field access are tracked.
-            Ok(Ty::Any)
+            Err(format!(
+                "type error: no method '{}' on type {:?}",
+                method, recv_ty
+            ))
         }
     }
 }
@@ -1039,12 +1088,12 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
 fn check_arg_defer_blocks(arg: &Mir, env: &mut TyEnv) -> Result<Ty, String> {
     match arg.as_ref() {
         MirKind::Block(_) => Ok(Ty::Fn {
-            param: Box::new(Ty::Any),
-            ret: Box::new(Ty::Any),
+            param: Box::new(env.fresh_infer()),
+            ret: Box::new(env.fresh_infer()),
         }),
         MirKind::BranchBlock(_) => Ok(Ty::Fn {
-            param: Box::new(Ty::Any),
-            ret: Box::new(Ty::Any),
+            param: Box::new(env.fresh_infer()),
+            ret: Box::new(env.fresh_infer()),
         }),
         MirKind::Struct(fields) => {
             let mut typed_fields = Vec::new();
@@ -1223,6 +1272,21 @@ fn recheck_single_callback(
 }
 
 fn check_pipe(lhs: &Mir, rhs: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
+    // Store block/branch bodies for deferred re-checking at call sites.
+    // When `{ body } >> let(name); ...`, store the block under `name`
+    // so that `name(arg)` can re-check the body with a known arg type.
+    if let MirKind::Let { pattern, .. } = rhs.as_ref() {
+        if let Pattern::Name(name) = pattern {
+            match lhs.as_ref() {
+                MirKind::Block(_) | MirKind::BranchBlock(_) => {
+                    env.block_bodies.insert(name.clone(), lhs.clone());
+                }
+                _ => {
+                    env.block_bodies.remove(name);
+                }
+            }
+        }
+    }
     let lhs_ty = default_literals(check(lhs, env)?);
     match rhs.as_ref() {
         // Pipe into let: `expr >> let(pattern); body`
@@ -1243,7 +1307,6 @@ fn check_pipe(lhs: &Mir, rhs: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::
                     env.pop_binding();
                     result
                 }
-                Ty::Any => check(body, env),
                 _ => Err("type error: apply expects a method set".to_string()),
             }
         }
@@ -1322,7 +1385,7 @@ fn check_let(
                                     Ty::Struct(remaining)
                                 }
                             }
-                            _ => Ty::Any,
+                            _ => env.fresh_infer(),
                         };
                         env.bind(field.binding.clone(), rest_ty);
                         bindings_added += 1;
@@ -1344,13 +1407,13 @@ fn check_let(
                             .iter()
                             .find(|(n, _)| *n == lookup_key)
                             .map(|(_, ty)| ty.clone())
-                            .unwrap_or(Ty::Any)
+                            .unwrap_or_else(|| env.fresh_infer())
                     }
                     _ => {
                         if field.label.is_none() {
                             positional_idx += 1;
                         }
-                        Ty::Any
+                        env.fresh_infer()
                     }
                 };
                 env.bind(field.binding.clone(), field_ty);
@@ -1374,7 +1437,7 @@ fn check_let_array(
     // Extract element type from Array input
     let elem_ty = match input_ty {
         Ty::Array(elem) => elem.as_ref().clone(),
-        _ => Ty::Any,
+        _ => env.fresh_infer(),
     };
     let mut bindings_added = 0usize;
     for pat in patterns {
@@ -1447,13 +1510,6 @@ fn check_let_array_with_passthrough(
 }
 
 fn check_call(func: &Mir, arg: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
-    // Special case: method_set call
-    if let MirKind::Ident(name) = func.as_ref() {
-        if name == "method_set" {
-            return check_method_set_call(arg, env);
-        }
-    }
-
     // Bidirectional: when calling a Block or BranchBlock, check the arg first
     // so we can bind `in` to the arg's type instead of Unknown.
     match func.as_ref() {
@@ -1488,15 +1544,16 @@ fn check_call(func: &Mir, arg: &Mir, env: &mut TyEnv) -> Result<Ty, std::string:
             let arg_ty = check(arg, env)?;
             match func_ty {
                 Ty::Fn { param, ret } => {
-                    // Check that arg type is compatible with param type
-                    unify(&arg_ty, &param)?;
-                    Ok(*ret)
+                    let mut subst = HashMap::new();
+                    unify_with_generics(&arg_ty, &param, &mut subst)?;
+                    Ok(substitute_generics(&ret, &subst))
                 }
                 Ty::TagConstructor(tag_id) => Ok(Ty::Tagged {
                     tag_id,
                     payload: Box::new(arg_ty),
                 }),
-                Ty::Any => Ok(Ty::Any), // genuinely polymorphic (e.g. method_set result)
+                Ty::MethodSetConstructor => check_method_set_call(arg, env),
+                Ty::Infer(_) => Ok(env.fresh_infer()),
                 _ => Err(format!("type error: cannot call non-function")),
             }
         }
@@ -1527,7 +1584,7 @@ fn check_branch_block_with_input(
         });
     }
     env.pop_binding(); // pop "in"
-    Ok(result_ty.unwrap_or(Ty::Any))
+    Ok(result_ty.unwrap_or_else(|| env.fresh_infer()))
 }
 
 /// Bind variables introduced by a branch pattern. Returns the number of bindings added.
@@ -1536,7 +1593,8 @@ fn bind_branch_pattern(pattern: &MirBranchPattern, input_ty: &Ty, env: &mut TyEn
         MirBranchPattern::Literal(_) => 0,
         MirBranchPattern::Tag(tag_name, binding) => match binding {
             Some(BranchBinding::Name(n)) => {
-                let payload_ty = resolve_tag_payload(tag_name, input_ty, env);
+                let payload_ty = resolve_tag_payload(tag_name, input_ty, env)
+                    .unwrap_or_else(|| env.fresh_infer());
                 env.bind(n.clone(), payload_ty);
                 1
             }
@@ -1553,23 +1611,23 @@ fn bind_branch_pattern(pattern: &MirBranchPattern, input_ty: &Ty, env: &mut TyEn
 
 /// Resolve the payload type for a tag pattern by looking up the tag name
 /// in the environment and matching against the input type (Tagged or Union).
-fn resolve_tag_payload(tag_name: &str, input_ty: &Ty, env: &TyEnv) -> Ty {
+fn resolve_tag_payload(tag_name: &str, input_ty: &Ty, env: &TyEnv) -> Option<Ty> {
     // Step 1: resolve tag name → tag ID via the type environment
     let tag_id = match env.get(tag_name) {
         Some(Ty::TagConstructor(id)) => *id,
-        _ => return Ty::Any, // tag name not in scope or not a tag constructor
+        _ => return None,
     };
     // Step 2: extract payload from input type
     extract_payload_for_tag(tag_id, input_ty)
 }
 
 /// Extract the payload type for a specific tag ID from a type.
-fn extract_payload_for_tag(tag_id: TagId, ty: &Ty) -> Ty {
+fn extract_payload_for_tag(tag_id: TagId, ty: &Ty) -> Option<Ty> {
     match ty {
         Ty::Tagged {
             tag_id: id,
             payload,
-        } if *id == tag_id => *payload.clone(),
+        } if *id == tag_id => Some(*payload.clone()),
         Ty::Union(variants) => {
             for v in variants {
                 if let Ty::Tagged {
@@ -1578,13 +1636,13 @@ fn extract_payload_for_tag(tag_id: TagId, ty: &Ty) -> Ty {
                 } = v
                 {
                     if *id == tag_id {
-                        return *payload.clone();
+                        return Some(*payload.clone());
                     }
                 }
             }
-            Ty::Any
+            None
         }
-        _ => Ty::Any,
+        _ => None,
     }
 }
 
@@ -1762,17 +1820,11 @@ mod tests {
         let mut env = TyEnv::new();
         env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
         let fn_ty = Ty::Fn {
-            param: Box::new(Ty::Any),
-            ret: Box::new(Ty::Any),
+            param: Box::new(Ty::Infer(0)),
+            ret: Box::new(Ty::Infer(0)),
         };
         env.bind("int_add".into(), fn_ty);
-        env.bind(
-            "method_set".into(),
-            Ty::Fn {
-                param: Box::new(Ty::Any),
-                ret: Box::new(Ty::Any),
-            },
-        );
+        env.bind("method_set".into(), Ty::MethodSetConstructor);
 
         let expr = mir(MirKind::Call(
             mir(MirKind::Ident("method_set".into())),
@@ -1799,16 +1851,90 @@ mod tests {
     }
 
     #[test]
+    fn method_set_via_field_access() {
+        // std.method_set(Int, (add = int_add)) should work the same as bare method_set(...)
+        let mut env = TyEnv::new();
+        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        let fn_ty = Ty::Fn {
+            param: Box::new(Ty::Infer(0)),
+            ret: Box::new(Ty::Infer(0)),
+        };
+        env.bind("int_add".into(), fn_ty);
+        // Simulate a module with method_set as a field
+        let module_ty = Ty::Struct(vec![("method_set".into(), Ty::MethodSetConstructor)]);
+        env.bind("mymod".into(), module_ty);
+
+        // mymod.method_set(Int, (add = int_add))
+        let expr = mir(MirKind::Call(
+            mir(MirKind::FieldAccess(
+                mir(MirKind::Ident("mymod".into())),
+                "method_set".into(),
+            )),
+            mir(MirKind::Struct(vec![
+                MirField {
+                    label: None,
+                    value: mir(MirKind::Ident("Int".into())),
+                    is_spread: false,
+                },
+                MirField {
+                    label: None,
+                    value: mir(MirKind::Struct(vec![MirField {
+                        label: Some("add".into()),
+                        value: mir(MirKind::Ident("int_add".into())),
+                        is_spread: false,
+                    }])),
+                    is_spread: false,
+                },
+            ])),
+        ));
+
+        let ty = check(&expr, &mut env).unwrap();
+        assert!(matches!(ty, Ty::MethodSet { id: 0, tag_id } if tag_id == TAG_ID_INT));
+    }
+
+    #[test]
+    fn method_set_aliased() {
+        // let ms = method_set; ms(Int, (add = int_add)) should also work
+        let mut env = TyEnv::new();
+        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        let fn_ty = Ty::Fn {
+            param: Box::new(Ty::Infer(0)),
+            ret: Box::new(Ty::Infer(0)),
+        };
+        env.bind("int_add".into(), fn_ty);
+        // Bind under an arbitrary name
+        env.bind("hoge".into(), Ty::MethodSetConstructor);
+
+        // hoge(Int, (add = int_add))
+        let expr = mir(MirKind::Call(
+            mir(MirKind::Ident("hoge".into())),
+            mir(MirKind::Struct(vec![
+                MirField {
+                    label: None,
+                    value: mir(MirKind::Ident("Int".into())),
+                    is_spread: false,
+                },
+                MirField {
+                    label: None,
+                    value: mir(MirKind::Struct(vec![MirField {
+                        label: Some("add".into()),
+                        value: mir(MirKind::Ident("int_add".into())),
+                        is_spread: false,
+                    }])),
+                    is_spread: false,
+                },
+            ])),
+        ));
+
+        let ty = check(&expr, &mut env).unwrap();
+        assert!(matches!(ty, Ty::MethodSet { id: 0, tag_id } if tag_id == TAG_ID_INT));
+    }
+
+    #[test]
     fn method_set_non_constructor_errors() {
         let mut env = TyEnv::new();
         env.bind("not_a_ctor".into(), Ty::Int);
-        env.bind(
-            "method_set".into(),
-            Ty::Fn {
-                param: Box::new(Ty::Any),
-                ret: Box::new(Ty::Any),
-            },
-        );
+        env.bind("method_set".into(), Ty::MethodSetConstructor);
 
         let expr = mir(MirKind::Call(
             mir(MirKind::Ident("method_set".into())),
@@ -1833,13 +1959,7 @@ mod tests {
     fn method_set_non_struct_methods_errors() {
         let mut env = TyEnv::new();
         env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
-        env.bind(
-            "method_set".into(),
-            Ty::Fn {
-                param: Box::new(Ty::Any),
-                ret: Box::new(Ty::Any),
-            },
-        );
+        env.bind("method_set".into(), Ty::MethodSetConstructor);
 
         let expr = mir(MirKind::Call(
             mir(MirKind::Ident("method_set".into())),
@@ -1879,9 +1999,9 @@ mod tests {
 
     #[test]
     fn unify_unknown_with_anything() {
-        assert_eq!(unify(&Ty::Any, &Ty::Int).unwrap(), Ty::Int);
-        assert_eq!(unify(&Ty::Float, &Ty::Any).unwrap(), Ty::Float);
-        assert_eq!(unify(&Ty::Any, &Ty::Any).unwrap(), Ty::Any);
+        assert_eq!(unify(&Ty::Infer(0), &Ty::Int).unwrap(), Ty::Int);
+        assert_eq!(unify(&Ty::Float, &Ty::Infer(0)).unwrap(), Ty::Float);
+        assert_eq!(unify(&Ty::Infer(0), &Ty::Infer(0)).unwrap(), Ty::Infer(0));
     }
 
     #[test]
@@ -1954,8 +2074,8 @@ mod tests {
     #[test]
     fn unify_functions_unknown_fills() {
         let a = Ty::Fn {
-            param: Box::new(Ty::Any),
-            ret: Box::new(Ty::Any),
+            param: Box::new(Ty::Infer(0)),
+            ret: Box::new(Ty::Infer(0)),
         };
         let b = Ty::Fn {
             param: Box::new(Ty::Int),
@@ -2019,13 +2139,13 @@ mod tests {
             },
         ]));
         let ty = check(&expr, &mut env).unwrap();
-        assert_eq!(
-            ty,
-            Ty::Fn {
-                param: Box::new(Ty::Any),
-                ret: Box::new(Ty::Byte)
+        match ty {
+            Ty::Fn { param, ret } => {
+                assert!(matches!(*param, Ty::Infer(_)));
+                assert_eq!(*ret, Ty::Byte);
             }
-        );
+            _ => panic!("expected Fn, got {:?}", ty),
+        }
     }
 
     #[test]
@@ -2059,7 +2179,7 @@ mod tests {
     fn unify_tagged_same_id_unifies_payload() {
         let a = Ty::Tagged {
             tag_id: 100,
-            payload: Box::new(Ty::Any),
+            payload: Box::new(Ty::Infer(0)),
         };
         let b = Ty::Tagged {
             tag_id: 100,
@@ -2098,7 +2218,7 @@ mod tests {
     fn unify_union_with_existing_tag_merges() {
         let ok = Ty::Tagged {
             tag_id: 100,
-            payload: Box::new(Ty::Any),
+            payload: Box::new(Ty::Infer(0)),
         };
         let err = Ty::Tagged {
             tag_id: 101,
@@ -2246,13 +2366,13 @@ mod tests {
         // { 42 } is a lambda that returns IntLiteral
         let expr = mir(MirKind::Block(mir(MirKind::Int(42))));
         let ty = check(&expr, &mut env).unwrap();
-        assert_eq!(
-            ty,
-            Ty::Fn {
-                param: Box::new(Ty::Any),
-                ret: Box::new(Ty::IntLiteral)
+        match ty {
+            Ty::Fn { param, ret } => {
+                assert!(matches!(*param, Ty::Infer(_)));
+                assert_eq!(*ret, Ty::IntLiteral);
             }
-        );
+            _ => panic!("expected Fn, got {:?}", ty),
+        }
     }
 
     #[test]
@@ -2273,13 +2393,13 @@ mod tests {
             },
         ]));
         let ty = check(&expr, &mut env).unwrap();
-        assert_eq!(
-            ty,
-            Ty::Fn {
-                param: Box::new(Ty::Any),
-                ret: Box::new(Ty::IntLiteral)
+        match ty {
+            Ty::Fn { param, ret } => {
+                assert!(matches!(*param, Ty::Infer(_)));
+                assert_eq!(*ret, Ty::IntLiteral);
             }
-        );
+            _ => panic!("expected Fn, got {:?}", ty),
+        }
     }
 
     #[test]
@@ -2306,20 +2426,20 @@ mod tests {
     fn branch_with_binding_pattern() {
         use crate::mir::{MirBranchArm, MirBranchPattern};
         let mut env = TyEnv::new();
-        // { x -> x } — catch-all returns Unknown (input type unknown)
+        // { x -> x } — catch-all returns the input type (both param and ret are inferred)
         let expr = mir(MirKind::BranchBlock(vec![MirBranchArm {
             pattern: MirBranchPattern::Binding("x".into()),
             guard: None,
             body: mir(MirKind::Ident("x".into())),
         }]));
         let ty = check(&expr, &mut env).unwrap();
-        assert_eq!(
-            ty,
-            Ty::Fn {
-                param: Box::new(Ty::Any),
-                ret: Box::new(Ty::Any)
+        match ty {
+            Ty::Fn { param, ret } => {
+                assert!(matches!(*param, Ty::Infer(_)));
+                assert!(matches!(*ret, Ty::Infer(_)));
             }
-        );
+            _ => panic!("expected Fn, got {:?}", ty),
+        }
     }
 
     #[test]
@@ -2429,18 +2549,12 @@ mod tests {
         let mut env = TyEnv::new();
         env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
         let fn_ty = Ty::Fn {
-            param: Box::new(Ty::Any),
-            ret: Box::new(Ty::Any),
+            param: Box::new(Ty::Infer(0)),
+            ret: Box::new(Ty::Infer(0)),
         };
         env.bind("int_to_string".into(), fn_ty.clone());
         env.bind("int_to_string_other".into(), fn_ty);
-        env.bind(
-            "method_set".into(),
-            Ty::Fn {
-                param: Box::new(Ty::Any),
-                ret: Box::new(Ty::Any),
-            },
-        );
+        env.bind("method_set".into(), Ty::MethodSetConstructor);
 
         // Helper to build method_set(Int, (to_string = f))
         let make_ms = |f: &str| {
@@ -2493,19 +2607,13 @@ mod tests {
     fn q4_one_method_set_with_varying_struct_ok() {
         let mut env = TyEnv::new();
         let fn_ty = Ty::Fn {
-            param: Box::new(Ty::Any),
-            ret: Box::new(Ty::Any),
+            param: Box::new(Ty::Infer(0)),
+            ret: Box::new(Ty::Infer(0)),
         };
         env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
         env.bind("int_to_string".into(), fn_ty.clone());
         env.bind("int_to_string_other".into(), fn_ty.clone());
-        env.bind(
-            "method_set".into(),
-            Ty::Fn {
-                param: Box::new(Ty::Any),
-                ret: Box::new(Ty::Any),
-            },
-        );
+        env.bind("method_set".into(), Ty::MethodSetConstructor);
 
         // let int_ms1 = (to_string = int_to_string)
         // let int_ms2 = (to_string = int_to_string_other)
@@ -2556,17 +2664,11 @@ mod tests {
         // Set up: method_set(Int, (add = fn(Unknown->Int)))
         env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
         let int_add_ty = Ty::Fn {
-            param: Box::new(Ty::Any),
+            param: Box::new(Ty::Infer(0)),
             ret: Box::new(Ty::Int),
         };
         env.bind("int_add".into(), int_add_ty);
-        env.bind(
-            "method_set".into(),
-            Ty::Fn {
-                param: Box::new(Ty::Any),
-                ret: Box::new(Ty::Any),
-            },
-        );
+        env.bind("method_set".into(), Ty::MethodSetConstructor);
 
         // Create the method set: method_set(Int, (add = int_add))
         let ms_call = mir(MirKind::Call(
@@ -2607,17 +2709,11 @@ mod tests {
         env2.bind(
             "int_add".into(),
             Ty::Fn {
-                param: Box::new(Ty::Any),
+                param: Box::new(Ty::Infer(0)),
                 ret: Box::new(Ty::Int),
             },
         );
-        env2.bind(
-            "method_set".into(),
-            Ty::Fn {
-                param: Box::new(Ty::Any),
-                ret: Box::new(Ty::Any),
-            },
-        );
+        env2.bind("method_set".into(), Ty::MethodSetConstructor);
         let ty = check(&expr, &mut env2).unwrap();
         assert_eq!(ty, Ty::Int);
     }
@@ -2629,7 +2725,7 @@ mod tests {
         let struct_ty = Ty::Struct(vec![(
             "add".into(),
             Ty::Fn {
-                param: Box::new(Ty::Any),
+                param: Box::new(Ty::Infer(0)),
                 ret: Box::new(Ty::Int),
             },
         )]);
@@ -2715,16 +2811,15 @@ mod tests {
     }
 
     #[test]
-    fn method_call_to_string_fallback() {
+    fn method_call_without_method_set_errors() {
         let mut env = TyEnv::new();
-        // x.to_string() where x is Unknown — should still return String
+        // 42.to_string() without any method set in scope is a type error
         let expr = mir(MirKind::MethodCall {
             receiver: mir(MirKind::Int(42)),
             method: "to_string".into(),
             arg: mir(MirKind::Unit),
         });
-        let ty = check(&expr, &mut env).unwrap();
-        assert_eq!(ty, Ty::String);
+        assert!(check(&expr, &mut env).is_err());
     }
 
     #[test]
@@ -2799,7 +2894,7 @@ mod tests {
 
         // [1, 2].map(f) where f: Any → String
         let callback = Ty::Fn {
-            param: Box::new(Ty::Any),
+            param: Box::new(Ty::Infer(0)),
             ret: Box::new(Ty::String),
         };
         env.bind("f".into(), callback);
@@ -2928,7 +3023,7 @@ mod tests {
         assert_eq!(
             ty,
             Ty::Fn {
-                param: Box::new(Ty::Any),
+                param: Box::new(Ty::Infer(0)),
                 ret: Box::new(Ty::Int)
             }
         );
@@ -3034,13 +3129,13 @@ mod tests {
     #[test]
     fn prepend_arg_ty_named_struct() {
         // recv.fold(init=0, f=cb) — named fields stay named, recv is prepended as 0
-        let arg = Ty::Struct(vec![("init".into(), Ty::Int), ("f".into(), Ty::Any)]);
+        let arg = Ty::Struct(vec![("init".into(), Ty::Int), ("f".into(), Ty::Infer(0))]);
         assert_eq!(
             prepend_arg_ty(&Ty::Array(Box::new(Ty::Int)), &arg),
             Ty::Struct(vec![
                 ("0".into(), Ty::Array(Box::new(Ty::Int))),
                 ("init".into(), Ty::Int),
-                ("f".into(), Ty::Any),
+                ("f".into(), Ty::Infer(0)),
             ])
         );
     }
@@ -3147,14 +3242,10 @@ mod tests {
         let mir = crate::mir::lower(&ast);
 
         let mut env = TyEnv::new().with_module("core", core_module_type());
-        // std.nana needs method_set as a bare binding
-        env.bind(
-            "method_set".into(),
-            Ty::Fn {
-                param: Box::new(Ty::Any),
-                ret: Box::new(Ty::Any),
-            },
-        );
+        // std.nana does `let method_set = core.method_set` which gets
+        // MethodSetConstructor from the core module, but we also bind it
+        // here so the name is available before the let-binding is processed.
+        env.bind("method_set".into(), Ty::MethodSetConstructor);
 
         let ty = check(&mir, &mut env).expect("typecheck failed");
 

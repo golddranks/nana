@@ -200,7 +200,13 @@ pub fn run_with_std_and_warnings(source: &str) -> Result<(Value, Vec<String>), S
             }
         }
     }
-    types::check(&mir, &mut ty_env)?;
+    let result_ty = types::check(&mir, &mut ty_env)?;
+    if result_ty.contains_infer() {
+        return Err(format!(
+            "type error: unresolved inference variable in result type {:?}",
+            result_ty
+        ));
+    }
 
     let (val, final_env) = eval::eval_toplevel(&mir, &env, &Value::Unit)
         .map_err(|e| format!("runtime error: {}", e))?;

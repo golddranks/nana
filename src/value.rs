@@ -7,31 +7,45 @@ use crate::mir::{Mir, MirBranchArm};
 
 pub type TagId = u64;
 
-// Reserved TagIds for built-in primitive types (0–15).
-// User-generated tag IDs start at 16 (see parser.rs TAG_COUNTER).
-pub const TAG_ID_INT: TagId = 0;
-pub const TAG_ID_FLOAT: TagId = 1;
+// Reserved TagIds for built-in primitive types (0–17).
+// User-generated tag IDs start at 18 (see parser.rs TAG_COUNTER).
+pub const TAG_ID_I64: TagId = 0;
+pub const TAG_ID_F64: TagId = 1;
 pub const TAG_ID_BOOL: TagId = 2;
 pub const TAG_ID_STRING: TagId = 3;
 pub const TAG_ID_CHAR: TagId = 4;
-pub const TAG_ID_BYTE: TagId = 5;
+pub const TAG_ID_U8: TagId = 5;
 pub const TAG_ID_ARRAY: TagId = 6;
 pub const TAG_ID_UNIT: TagId = 7;
 pub const TAG_ID_STRUCT: TagId = 8;
 pub const TAG_ID_I32: TagId = 9;
 pub const TAG_ID_F32: TagId = 10;
+pub const TAG_ID_I8: TagId = 11;
+pub const TAG_ID_I16: TagId = 12;
+pub const TAG_ID_U16: TagId = 13;
+pub const TAG_ID_U32: TagId = 14;
+pub const TAG_ID_U64: TagId = 15;
+pub const TAG_ID_I128: TagId = 16;
+pub const TAG_ID_U128: TagId = 17;
 
 /// Map a primitive Value to its built-in TagId for method set dispatch.
 pub fn builtin_tag_id(value: &Value) -> Option<TagId> {
     match value {
-        Value::Int(_) => Some(TAG_ID_INT),
-        Value::Float(_) => Some(TAG_ID_FLOAT),
+        Value::I64(_) => Some(TAG_ID_I64),
+        Value::F64(_) => Some(TAG_ID_F64),
         Value::Bool(_) => Some(TAG_ID_BOOL),
         Value::Str(_) => Some(TAG_ID_STRING),
         Value::Char(_) => Some(TAG_ID_CHAR),
-        Value::Byte(_) => Some(TAG_ID_BYTE),
+        Value::U8(_) => Some(TAG_ID_U8),
+        Value::I8(_) => Some(TAG_ID_I8),
+        Value::I16(_) => Some(TAG_ID_I16),
+        Value::U16(_) => Some(TAG_ID_U16),
         Value::I32(_) => Some(TAG_ID_I32),
+        Value::U32(_) => Some(TAG_ID_U32),
         Value::F32(_) => Some(TAG_ID_F32),
+        Value::U64(_) => Some(TAG_ID_U64),
+        Value::I128(_) => Some(TAG_ID_I128),
+        Value::U128(_) => Some(TAG_ID_U128),
         Value::Array(_) => Some(TAG_ID_ARRAY),
         Value::Unit => Some(TAG_ID_UNIT),
         Value::Struct(_) => Some(TAG_ID_STRUCT),
@@ -170,14 +184,21 @@ impl Env {
 
 #[derive(Clone)]
 pub enum Value {
-    Int(i64),
-    Float(f64),
+    I64(i64),
+    F64(f64),
     Bool(bool),
     Str(String),
     Char(char),
-    Byte(u8),
+    U8(u8),
+    I8(i8),
+    I16(i16),
+    U16(u16),
     I32(i32),
+    U32(u32),
     F32(f32),
+    U64(u64),
+    I128(i128),
+    U128(u128),
     Unit,
     Array(Vec<Value>),
     Struct(Vec<(String, Value)>),
@@ -253,8 +274,8 @@ impl Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Int(n) => write!(f, "{}", n),
-            Value::Float(n) => {
+            Value::I64(n) => write!(f, "{}", n),
+            Value::F64(n) => {
                 if n.fract() == 0.0 {
                     write!(f, "{}.0", n)
                 } else {
@@ -272,7 +293,7 @@ impl fmt::Display for Value {
                 '\'' => write!(f, "'\\''"),
                 _ => write!(f, "'{}'", c),
             },
-            Value::Byte(b) => match b {
+            Value::U8(b) => match b {
                 b'\0' => write!(f, "b'\\0'"),
                 b'\n' => write!(f, "b'\\n'"),
                 b'\r' => write!(f, "b'\\r'"),
@@ -282,7 +303,11 @@ impl fmt::Display for Value {
                 0x20..=0x7e => write!(f, "b'{}'", *b as char),
                 _ => write!(f, "b'\\x{:02x}'", b),
             },
+            Value::I8(n) => write!(f, "{}i8", n),
+            Value::I16(n) => write!(f, "{}i16", n),
+            Value::U16(n) => write!(f, "{}u16", n),
             Value::I32(n) => write!(f, "{}i32", n),
+            Value::U32(n) => write!(f, "{}u32", n),
             Value::F32(n) => {
                 if n.fract() == 0.0 {
                     write!(f, "{}.0f32", n)
@@ -290,6 +315,9 @@ impl fmt::Display for Value {
                     write!(f, "{}f32", n)
                 }
             }
+            Value::U64(n) => write!(f, "{}u64", n),
+            Value::I128(n) => write!(f, "{}i128", n),
+            Value::U128(n) => write!(f, "{}u128", n),
             Value::Unit => write!(f, "()"),
             Value::Array(elems) => {
                 write!(f, "[")?;
@@ -352,14 +380,21 @@ impl PartialEq for Env {
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::I64(a), Value::I64(b)) => a == b,
+            (Value::F64(a), Value::F64(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Char(a), Value::Char(b)) => a == b,
-            (Value::Byte(a), Value::Byte(b)) => a == b,
+            (Value::U8(a), Value::U8(b)) => a == b,
+            (Value::I8(a), Value::I8(b)) => a == b,
+            (Value::I16(a), Value::I16(b)) => a == b,
+            (Value::U16(a), Value::U16(b)) => a == b,
             (Value::I32(a), Value::I32(b)) => a == b,
+            (Value::U32(a), Value::U32(b)) => a == b,
             (Value::F32(a), Value::F32(b)) => a == b,
+            (Value::U64(a), Value::U64(b)) => a == b,
+            (Value::I128(a), Value::I128(b)) => a == b,
+            (Value::U128(a), Value::U128(b)) => a == b,
             (Value::Unit, Value::Unit) => true,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Struct(a), Value::Struct(b)) => a == b,

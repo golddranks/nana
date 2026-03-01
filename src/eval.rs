@@ -13,12 +13,12 @@ fn next_closure_id() -> u64 {
 pub fn eval(expr: &Mir, env: &Env, input: &Value) -> Result<Value, String> {
     match expr.as_ref() {
         // ── Literals ──
-        MirKind::Int(n) => Ok(Value::Int(*n)),
-        MirKind::Float(f) => Ok(Value::Float(*f)),
+        MirKind::Int(n) => Ok(Value::I64(*n)),
+        MirKind::Float(f) => Ok(Value::F64(*f)),
         MirKind::Bool(b) => Ok(Value::Bool(*b)),
         MirKind::Str(s) => Ok(Value::Str(s.clone())),
         MirKind::Char(c) => Ok(Value::Char(*c)),
-        MirKind::Byte(b) => Ok(Value::Byte(*b)),
+        MirKind::Byte(b) => Ok(Value::U8(*b)),
         MirKind::Unit => Ok(Value::Unit),
 
         // ── Variable reference ──
@@ -376,7 +376,6 @@ fn match_branch_pattern(pattern: &MirBranchPattern, value: &Value, env: &Env) ->
     }
 }
 
-
 /// Extract the receiver (field "0") as an array, and the remaining arg.
 /// When called via method set dispatch, the receiver is prepended as field "0".
 fn extract_receiver_array(arg: &Value, name: &str) -> Result<(Vec<Value>, Value), String> {
@@ -627,15 +626,15 @@ fn bind_array_pattern(
 }
 
 /// Extract the receiver (field "0") as an int, and the remaining arg.
-fn extract_receiver_int(arg: &Value, name: &str) -> Result<(i64, Value), String> {
+fn extract_receiver_i64(arg: &Value, name: &str) -> Result<(i64, Value), String> {
     match arg {
-        Value::Int(n) => Ok((*n, Value::Unit)),
+        Value::I64(n) => Ok((*n, Value::Unit)),
         Value::Struct(fields) => {
             let recv = fields.iter().find(|(l, _)| l == "0")
                 .map(|(_, v)| v)
                 .ok_or_else(|| format!("{}: expected int as first argument", name))?;
             let n = match recv {
-                Value::Int(n) => *n,
+                Value::I64(n) => *n,
                 _ => return Err(format!("{}: expected int as first argument", name)),
             };
             let rest = extract_rest_arg(fields);
@@ -644,26 +643,6 @@ fn extract_receiver_int(arg: &Value, name: &str) -> Result<(i64, Value), String>
         _ => Err(format!("{}: expected int as first argument", name)),
     }
 }
-
-/// Extract the receiver (field "0") as a float, and the remaining arg.
-fn extract_receiver_float(arg: &Value, name: &str) -> Result<(f64, Value), String> {
-    match arg {
-        Value::Float(f) => Ok((*f, Value::Unit)),
-        Value::Struct(fields) => {
-            let recv = fields.iter().find(|(l, _)| l == "0")
-                .map(|(_, v)| v)
-                .ok_or_else(|| format!("{}: expected float as first argument", name))?;
-            let f = match recv {
-                Value::Float(f) => *f,
-                _ => return Err(format!("{}: expected float as first argument", name)),
-            };
-            let rest = extract_rest_arg(fields);
-            Ok((f, rest))
-        }
-        _ => Err(format!("{}: expected float as first argument", name)),
-    }
-}
-
 fn extract_receiver_i32(arg: &Value, name: &str) -> Result<(i32, Value), String> {
     match arg {
         Value::I32(n) => Ok((*n, Value::Unit)),
@@ -704,6 +683,185 @@ fn extract_receiver_f32(arg: &Value, name: &str) -> Result<(f32, Value), String>
     }
 }
 
+fn extract_receiver_i128(arg: &Value, name: &str) -> Result<(i128, Value), String> {
+    match arg {
+        Value::I128(n) => Ok((*n, Value::Unit)),
+        Value::Struct(fields) if !fields.is_empty() => {
+            match &fields[0].1 {
+                Value::I128(n) => {
+                    let rest = if fields.len() == 2 {
+                        fields[1].1.clone()
+                    } else {
+                        Value::Struct(fields[1..].to_vec())
+                    };
+                    Ok((*n, rest))
+                }
+                _ => Err(format!("{}: expected i128 receiver", name)),
+            }
+        }
+        _ => Err(format!("{}: expected i128 receiver", name)),
+    }
+}
+
+fn extract_receiver_u128(arg: &Value, name: &str) -> Result<(u128, Value), String> {
+    match arg {
+        Value::U128(n) => Ok((*n, Value::Unit)),
+        Value::Struct(fields) if !fields.is_empty() => {
+            match &fields[0].1 {
+                Value::U128(n) => {
+                    let rest = if fields.len() == 2 {
+                        fields[1].1.clone()
+                    } else {
+                        Value::Struct(fields[1..].to_vec())
+                    };
+                    Ok((*n, rest))
+                }
+                _ => Err(format!("{}: expected u128 receiver", name)),
+            }
+        }
+        _ => Err(format!("{}: expected u128 receiver", name)),
+    }
+}
+
+fn extract_receiver_i8(arg: &Value, name: &str) -> Result<(i8, Value), String> {
+    match arg {
+        Value::I8(n) => Ok((*n, Value::Unit)),
+        Value::Struct(fields) if !fields.is_empty() => {
+            match &fields[0].1 {
+                Value::I8(n) => {
+                    let rest = if fields.len() == 2 {
+                        fields[1].1.clone()
+                    } else {
+                        Value::Struct(fields[1..].to_vec())
+                    };
+                    Ok((*n, rest))
+                }
+                _ => Err(format!("{}: expected i8 receiver", name)),
+            }
+        }
+        _ => Err(format!("{}: expected i8 receiver", name)),
+    }
+}
+
+fn extract_receiver_u8(arg: &Value, name: &str) -> Result<(u8, Value), String> {
+    match arg {
+        Value::U8(n) => Ok((*n, Value::Unit)),
+        Value::Struct(fields) if !fields.is_empty() => {
+            match &fields[0].1 {
+                Value::U8(n) => {
+                    let rest = if fields.len() == 2 {
+                        fields[1].1.clone()
+                    } else {
+                        Value::Struct(fields[1..].to_vec())
+                    };
+                    Ok((*n, rest))
+                }
+                _ => Err(format!("{}: expected u8 receiver", name)),
+            }
+        }
+        _ => Err(format!("{}: expected u8 receiver", name)),
+    }
+}
+
+fn extract_receiver_i16(arg: &Value, name: &str) -> Result<(i16, Value), String> {
+    match arg {
+        Value::I16(n) => Ok((*n, Value::Unit)),
+        Value::Struct(fields) if !fields.is_empty() => {
+            match &fields[0].1 {
+                Value::I16(n) => {
+                    let rest = if fields.len() == 2 {
+                        fields[1].1.clone()
+                    } else {
+                        Value::Struct(fields[1..].to_vec())
+                    };
+                    Ok((*n, rest))
+                }
+                _ => Err(format!("{}: expected i16 receiver", name)),
+            }
+        }
+        _ => Err(format!("{}: expected i16 receiver", name)),
+    }
+}
+
+fn extract_receiver_u16(arg: &Value, name: &str) -> Result<(u16, Value), String> {
+    match arg {
+        Value::U16(n) => Ok((*n, Value::Unit)),
+        Value::Struct(fields) if !fields.is_empty() => {
+            match &fields[0].1 {
+                Value::U16(n) => {
+                    let rest = if fields.len() == 2 {
+                        fields[1].1.clone()
+                    } else {
+                        Value::Struct(fields[1..].to_vec())
+                    };
+                    Ok((*n, rest))
+                }
+                _ => Err(format!("{}: expected u16 receiver", name)),
+            }
+        }
+        _ => Err(format!("{}: expected u16 receiver", name)),
+    }
+}
+
+fn extract_receiver_u32(arg: &Value, name: &str) -> Result<(u32, Value), String> {
+    match arg {
+        Value::U32(n) => Ok((*n, Value::Unit)),
+        Value::Struct(fields) if !fields.is_empty() => {
+            match &fields[0].1 {
+                Value::U32(n) => {
+                    let rest = if fields.len() == 2 {
+                        fields[1].1.clone()
+                    } else {
+                        Value::Struct(fields[1..].to_vec())
+                    };
+                    Ok((*n, rest))
+                }
+                _ => Err(format!("{}: expected u32 receiver", name)),
+            }
+        }
+        _ => Err(format!("{}: expected u32 receiver", name)),
+    }
+}
+
+fn extract_receiver_u64(arg: &Value, name: &str) -> Result<(u64, Value), String> {
+    match arg {
+        Value::U64(n) => Ok((*n, Value::Unit)),
+        Value::Struct(fields) if !fields.is_empty() => {
+            match &fields[0].1 {
+                Value::U64(n) => {
+                    let rest = if fields.len() == 2 {
+                        fields[1].1.clone()
+                    } else {
+                        Value::Struct(fields[1..].to_vec())
+                    };
+                    Ok((*n, rest))
+                }
+                _ => Err(format!("{}: expected u64 receiver", name)),
+            }
+        }
+        _ => Err(format!("{}: expected u64 receiver", name)),
+    }
+}
+
+fn extract_receiver_f64(arg: &Value, name: &str) -> Result<(f64, Value), String> {
+    match arg {
+        Value::F64(n) => Ok((*n, Value::Unit)),
+        Value::Struct(fields) if !fields.is_empty() => {
+            match &fields[0].1 {
+                Value::F64(n) => {
+                    let rest = if fields.len() == 2 {
+                        fields[1].1.clone()
+                    } else {
+                        Value::Struct(fields[1..].to_vec())
+                    };
+                    Ok((*n, rest))
+                }
+                _ => Err(format!("{}: expected f64 receiver", name)),
+            }
+        }
+        _ => Err(format!("{}: expected f64 receiver", name)),
+    }
+}
 /// Extract the receiver (field "0") as a bool, and the remaining arg.
 fn extract_receiver_bool(arg: &Value, name: &str) -> Result<(bool, Value), String> {
     match arg {
@@ -741,26 +899,6 @@ fn extract_receiver_char(arg: &Value, name: &str) -> Result<(char, Value), Strin
         _ => Err(format!("{}: expected char as first argument", name)),
     }
 }
-
-/// Extract the receiver (field "0") as a byte, and the remaining arg.
-fn extract_receiver_byte(arg: &Value, name: &str) -> Result<(u8, Value), String> {
-    match arg {
-        Value::Byte(b) => Ok((*b, Value::Unit)),
-        Value::Struct(fields) => {
-            let recv = fields.iter().find(|(l, _)| l == "0")
-                .map(|(_, v)| v)
-                .ok_or_else(|| format!("{}: expected byte as first argument", name))?;
-            let b = match recv {
-                Value::Byte(b) => *b,
-                _ => return Err(format!("{}: expected byte as first argument", name)),
-            };
-            let rest = extract_rest_arg(fields);
-            Ok((b, rest))
-        }
-        _ => Err(format!("{}: expected byte as first argument", name)),
-    }
-}
-
 /// Extract the receiver (field "0") as unit, and the remaining arg.
 fn extract_receiver_unit(arg: &Value, name: &str) -> Result<Value, String> {
     match arg {
@@ -823,7 +961,7 @@ fn extract_range(arg: &Value, name: &str) -> Result<(i64, i64), String> {
                 .map(|(_, v)| v.clone())
                 .ok_or_else(|| format!("{}: expected range with 'end' field", name))?;
             match (s, e) {
-                (Value::Int(s), Value::Int(e)) => Ok((s, e)),
+                (Value::I64(s), Value::I64(e)) => Ok((s, e)),
                 _ => Err(format!("{}: start and end must be integers", name)),
             }
         }
@@ -835,16 +973,48 @@ fn extract_range(arg: &Value, name: &str) -> Result<(i64, i64), String> {
 /// This implements the spec's "numeric literals convert automatically to the required type".
 fn coerce_literal_if_needed(recv: &Value, arg: Value) -> Value {
     match recv {
-        Value::Byte(_) => match &arg {
-            Value::Int(n) if *n >= 0 && *n <= 255 => Value::Byte(*n as u8),
+        Value::U8(_) => match &arg {
+            Value::I64(n) if *n >= 0 && *n <= 255 => Value::U8(*n as u8),
             _ => arg,
         },
         Value::I32(_) => match &arg {
-            Value::Int(n) if *n >= i32::MIN as i64 && *n <= i32::MAX as i64 => Value::I32(*n as i32),
+            Value::I64(n) if *n >= i32::MIN as i64 && *n <= i32::MAX as i64 => Value::I32(*n as i32),
             _ => arg,
         },
         Value::F32(_) => match &arg {
-            Value::Float(f) => Value::F32(*f as f32),
+            Value::F64(f) => Value::F32(*f as f32),
+            _ => arg,
+        },
+        Value::I128(_) => match &arg {
+            Value::I64(n) => Value::I128(*n as i128),
+            _ => arg,
+        },
+        Value::U128(_) => match &arg {
+            Value::I64(n) if *n >= 0 => Value::U128(*n as u128),
+            _ => arg,
+        },
+        Value::I8(_) => match &arg {
+            Value::I64(n) if *n >= i8::MIN as i64 && *n <= i8::MAX as i64 => Value::I8(*n as i8),
+            _ => arg,
+        },
+        Value::I16(_) => match &arg {
+            Value::I64(n) if *n >= i16::MIN as i64 && *n <= i16::MAX as i64 => Value::I16(*n as i16),
+            _ => arg,
+        },
+        Value::U16(_) => match &arg {
+            Value::I64(n) if *n >= 0 && *n <= u16::MAX as i64 => Value::U16(*n as u16),
+            _ => arg,
+        },
+        Value::U32(_) => match &arg {
+            Value::I64(n) if *n >= 0 && *n <= u32::MAX as i64 => Value::U32(*n as u32),
+            _ => arg,
+        },
+        Value::U64(_) => match &arg {
+            Value::I64(n) if *n >= 0 => Value::U64(*n as u64),
+            _ => arg,
+        },
+        Value::F64(_) => match &arg {
+            Value::F64(f) => Value::F64(*f),
             _ => arg,
         },
         _ => arg,
@@ -891,14 +1061,21 @@ fn is_function(v: &Value) -> bool {
 
 fn eval_compare(op: CmpOp, lhs: &Value, rhs: &Value) -> Result<Value, String> {
     match (lhs, rhs) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(compare_partial(op, a, b)?)),
+        (Value::I64(a), Value::I64(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
+        (Value::F64(a), Value::F64(b)) => Ok(Value::Bool(compare_partial(op, a, b)?)),
         (Value::I32(a), Value::I32(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
         (Value::F32(a), Value::F32(b)) => Ok(Value::Bool(compare_partial(op, a, b)?)),
+        (Value::I128(a), Value::I128(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
+        (Value::U128(a), Value::U128(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
+        (Value::I8(a), Value::I8(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
+        (Value::U8(a), Value::U8(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
+        (Value::I16(a), Value::I16(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
+        (Value::U16(a), Value::U16(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
+        (Value::U32(a), Value::U32(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
+        (Value::U64(a), Value::U64(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
         (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
         (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
         (Value::Char(a), Value::Char(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
-        (Value::Byte(a), Value::Byte(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
         (Value::Unit, Value::Unit) => match op {
             CmpOp::Eq => Ok(Value::Bool(true)),
             CmpOp::NotEq => Ok(Value::Bool(false)),
@@ -1090,27 +1267,27 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
         // Type hints — identity functions that assert the type.
         // At runtime, IntLiteral values arrive as Value::Int, so we coerce.
         "byte" => match arg {
-            Value::Byte(b) => Ok(Value::Byte(b)),
-            Value::Int(n) => {
+            Value::U8(b) => Ok(Value::U8(b)),
+            Value::I64(n) => {
                 if n < 0 || n > 255 {
                     Err(format!("byte: value {} out of range (0..255)", n))
                 } else {
-                    Ok(Value::Byte(n as u8))
+                    Ok(Value::U8(n as u8))
                 }
             }
             _ => Err(format!("byte: expected byte, got {}", arg)),
         },
-        "int" => match arg {
-            Value::Int(n) => Ok(Value::Int(n)),
+        "int" | "i64" => match arg {
+            Value::I64(n) => Ok(Value::I64(n)),
             _ => Err(format!("int: expected int, got {}", arg)),
         },
         "float" => match arg {
-            Value::Float(f) => Ok(Value::Float(f)),
+            Value::F64(f) => Ok(Value::F64(f)),
             _ => Err(format!("float: expected float, got {}", arg)),
         },
         "char" => match arg {
             Value::Char(c) => Ok(Value::Char(c)),
-            Value::Int(n) => {
+            Value::I64(n) => {
                 if n < 0 {
                     return Err(format!("char: negative value {}", n));
                 }
@@ -1123,7 +1300,7 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
         },
         "i32" => match arg {
             Value::I32(n) => Ok(Value::I32(n)),
-            Value::Int(n) => {
+            Value::I64(n) => {
                 if n < i32::MIN as i64 || n > i32::MAX as i64 {
                     Err(format!("i32: value {} out of range", n))
                 } else {
@@ -1134,26 +1311,98 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
         },
         "f32" => match arg {
             Value::F32(f) => Ok(Value::F32(f)),
-            Value::Float(f) => Ok(Value::F32(f as f32)),
+            Value::F64(f) => Ok(Value::F32(f as f32)),
             _ => Err(format!("f32: expected f32, got {}", arg)),
         },
-        // ── Conversion methods (receiver is first arg) ──
-        "int_to_float" => match arg {
-            Value::Int(n) => Ok(Value::Float(n as f64)),
-            _ => Err(format!("to_float: expected int, got {}", arg)),
+        "i128" => match arg {
+            Value::I128(n) => Ok(Value::I128(n)),
+            Value::I64(n) => Ok(Value::I128(n as i128)),
+            _ => Err(format!("i128: expected i128, got {}", arg)),
         },
-        "int_to_byte" => match arg {
-            Value::Int(n) => {
-                if n < 0 || n > 255 {
-                    Err(format!("to_byte: value {} out of range (0..255)", n))
+        "u128" => match arg {
+            Value::U128(n) => Ok(Value::U128(n)),
+            Value::I64(n) => {
+                if n < 0 {
+                    Err(format!("u128: value {} out of range", n))
                 } else {
-                    Ok(Value::Byte(n as u8))
+                    Ok(Value::U128(n as u128))
                 }
             }
-            _ => Err(format!("to_byte: expected int, got {}", arg)),
+            _ => Err(format!("u128: expected u128, got {}", arg)),
         },
+        "i8" => match arg {
+            Value::I8(n) => Ok(Value::I8(n)),
+            Value::I64(n) => {
+                if n < i8::MIN as i64 || n > i8::MAX as i64 {
+                    Err(format!("i8: value {} out of range", n))
+                } else {
+                    Ok(Value::I8(n as i8))
+                }
+            }
+            _ => Err(format!("i8: expected i8, got {}", arg)),
+        },
+        "u8" => match arg {
+            Value::U8(n) => Ok(Value::U8(n)),
+            Value::I64(n) => {
+                if n < 0 || n > u8::MAX as i64 {
+                    Err(format!("u8: value {} out of range", n))
+                } else {
+                    Ok(Value::U8(n as u8))
+                }
+            }
+            _ => Err(format!("u8: expected u8, got {}", arg)),
+        },
+        "i16" => match arg {
+            Value::I16(n) => Ok(Value::I16(n)),
+            Value::I64(n) => {
+                if n < i16::MIN as i64 || n > i16::MAX as i64 {
+                    Err(format!("i16: value {} out of range", n))
+                } else {
+                    Ok(Value::I16(n as i16))
+                }
+            }
+            _ => Err(format!("i16: expected i16, got {}", arg)),
+        },
+        "u16" => match arg {
+            Value::U16(n) => Ok(Value::U16(n)),
+            Value::I64(n) => {
+                if n < 0 || n > u16::MAX as i64 {
+                    Err(format!("u16: value {} out of range", n))
+                } else {
+                    Ok(Value::U16(n as u16))
+                }
+            }
+            _ => Err(format!("u16: expected u16, got {}", arg)),
+        },
+        "u32" => match arg {
+            Value::U32(n) => Ok(Value::U32(n)),
+            Value::I64(n) => {
+                if n < 0 || n > u32::MAX as i64 {
+                    Err(format!("u32: value {} out of range", n))
+                } else {
+                    Ok(Value::U32(n as u32))
+                }
+            }
+            _ => Err(format!("u32: expected u32, got {}", arg)),
+        },
+        "u64" => match arg {
+            Value::U64(n) => Ok(Value::U64(n)),
+            Value::I64(n) => {
+                if n < 0 {
+                    Err(format!("u64: value {} out of range", n))
+                } else {
+                    Ok(Value::U64(n as u64))
+                }
+            }
+            _ => Err(format!("u64: expected u64, got {}", arg)),
+        },
+        "f64" => match arg {
+            Value::F64(f) => Ok(Value::F64(f)),
+            _ => Err(format!("f64: expected f64, got {}", arg)),
+        },
+        // ── Conversion methods (receiver is first arg) ──
         "int_to_char" => match arg {
-            Value::Int(n) => {
+            Value::I64(n) => {
                 if n < 0 {
                     return Err(format!("to_char: negative value {}", n));
                 }
@@ -1165,31 +1414,35 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             _ => Err(format!("to_char: expected int, got {}", arg)),
         },
         "float_ceil" => match arg {
-            Value::Float(f) => Ok(Value::Int(f.ceil() as i64)),
+            Value::F64(f) => Ok(Value::I64(f.ceil() as i64)),
             _ => Err(format!("ceil: expected float, got {}", arg)),
         },
         "float_floor" => match arg {
-            Value::Float(f) => Ok(Value::Int(f.floor() as i64)),
+            Value::F64(f) => Ok(Value::I64(f.floor() as i64)),
             _ => Err(format!("floor: expected float, got {}", arg)),
         },
         "float_round" => match arg {
-            Value::Float(f) => Ok(Value::Int(f.round() as i64)),
+            Value::F64(f) => Ok(Value::I64(f.round() as i64)),
             _ => Err(format!("round: expected float, got {}", arg)),
         },
         "float_trunc" => match arg {
-            Value::Float(f) => Ok(Value::Int(f.trunc() as i64)),
+            Value::F64(f) => Ok(Value::I64(f.trunc() as i64)),
             _ => Err(format!("trunc: expected float, got {}", arg)),
         },
-        "char_to_int" => match arg {
-            Value::Char(c) => Ok(Value::Int(c as u32 as i64)),
+        "float_to_i64" => match arg {
+            Value::F64(f) => Ok(Value::I64(f as i64)),
+            _ => Err(format!("to_int: expected float, got {}", arg)),
+        },
+        "char_to_i64" => match arg {
+            Value::Char(c) => Ok(Value::I64(c as u32 as i64)),
             _ => Err(format!("to_int: expected char, got {}", arg)),
         },
-        "byte_to_int" => match arg {
-            Value::Byte(b) => Ok(Value::Int(b as i64)),
+        "byte_to_i64" => match arg {
+            Value::U8(b) => Ok(Value::I64(b as i64)),
             _ => Err(format!("to_int: expected byte, got {}", arg)),
         },
         "int_to_i32" => match arg {
-            Value::Int(n) => {
+            Value::I64(n) => {
                 if n < i32::MIN as i64 || n > i32::MAX as i64 {
                     Err(format!("to_i32: value {} out of range", n))
                 } else {
@@ -1198,13 +1451,103 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             }
             _ => Err(format!("to_i32: expected int, got {}", arg)),
         },
+        "int_to_f32" => match arg {
+            Value::I64(n) => Ok(Value::F32(n as f32)),
+            _ => Err(format!("to_f32: expected int, got {}", arg)),
+        },
         "float_to_f32" => match arg {
-            Value::Float(f) => Ok(Value::F32(f as f32)),
+            Value::F64(f) => Ok(Value::F32(f as f32)),
             _ => Err(format!("to_f32: expected float, got {}", arg)),
         },
-        "byte_to_i32" => match arg {
-            Value::Byte(b) => Ok(Value::I32(b as i32)),
-            _ => Err(format!("to_i32: expected byte, got {}", arg)),
+        "u8_to_i32" => match arg {
+            Value::U8(b) => Ok(Value::I32(b as i32)),
+            _ => Err(format!("to_i32: expected u8, got {}", arg)),
+        },
+        "int_to_i128" => match arg {
+            Value::I64(n) => Ok(Value::I128(n as i128)),
+            _ => Err(format!("to_i128: expected int, got {}", arg)),
+        },
+        "int_to_u128" => match arg {
+            Value::I64(n) => {
+                if n < 0 {
+                    Err(format!("to_u128: value {} out of range", n))
+                } else {
+                    Ok(Value::U128(n as u128))
+                }
+            }
+            _ => Err(format!("to_u128: expected int, got {}", arg)),
+        },
+        "u8_to_i128" => match arg {
+            Value::U8(b) => Ok(Value::I128(b as i128)),
+            _ => Err(format!("to_i128: expected u8, got {}", arg)),
+        },
+        "u8_to_u128" => match arg {
+            Value::U8(b) => Ok(Value::U128(b as u128)),
+            _ => Err(format!("to_u128: expected u8, got {}", arg)),
+        },
+        "i32_to_i128" => match arg {
+            Value::I32(n) => Ok(Value::I128(n as i128)),
+            _ => Err(format!("to_i128: expected i32, got {}", arg)),
+        },
+        "i32_to_u128" => match arg {
+            Value::I32(n) => {
+                if n < 0 {
+                    Err(format!("to_u128: value {} out of range", n))
+                } else {
+                    Ok(Value::U128(n as u128))
+                }
+            }
+            _ => Err(format!("to_u128: expected i32, got {}", arg)),
+        },
+        "int_to_i8" => match arg {
+            Value::I64(n) => {
+                if n < i8::MIN as i64 || n > i8::MAX as i64 { Err(format!("to_i8: value {} out of range", n)) }
+                else { Ok(Value::I8(n as i8)) }
+            }
+            _ => Err(format!("to_i8: expected int, got {}", arg)),
+        },
+        "int_to_u8" => match arg {
+            Value::I64(n) => {
+                if n < 0 || n > u8::MAX as i64 { Err(format!("to_u8: value {} out of range", n)) }
+                else { Ok(Value::U8(n as u8)) }
+            }
+            _ => Err(format!("to_u8: expected int, got {}", arg)),
+        },
+        "int_to_i16" => match arg {
+            Value::I64(n) => {
+                if n < i16::MIN as i64 || n > i16::MAX as i64 { Err(format!("to_i16: value {} out of range", n)) }
+                else { Ok(Value::I16(n as i16)) }
+            }
+            _ => Err(format!("to_i16: expected int, got {}", arg)),
+        },
+        "int_to_u16" => match arg {
+            Value::I64(n) => {
+                if n < 0 || n > u16::MAX as i64 { Err(format!("to_u16: value {} out of range", n)) }
+                else { Ok(Value::U16(n as u16)) }
+            }
+            _ => Err(format!("to_u16: expected int, got {}", arg)),
+        },
+        "int_to_u32" => match arg {
+            Value::I64(n) => {
+                if n < 0 || n > u32::MAX as i64 { Err(format!("to_u32: value {} out of range", n)) }
+                else { Ok(Value::U32(n as u32)) }
+            }
+            _ => Err(format!("to_u32: expected int, got {}", arg)),
+        },
+        "int_to_u64" => match arg {
+            Value::I64(n) => {
+                if n < 0 { Err(format!("to_u64: value {} out of range", n)) }
+                else { Ok(Value::U64(n as u64)) }
+            }
+            _ => Err(format!("to_u64: expected int, got {}", arg)),
+        },
+        "int_to_f64" => match arg {
+            Value::I64(n) => Ok(Value::F64(n as f64)),
+            _ => Err(format!("to_f64: expected int, got {}", arg)),
+        },
+        "float_to_f64" => match arg {
+            Value::F64(f) => Ok(Value::F64(f)),
+            _ => Err(format!("to_f64: expected float, got {}", arg)),
         },
         "ref_eq" => match arg {
             Value::Struct(fields) if fields.len() == 2 => {
@@ -1222,7 +1565,7 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
         "array_get" => {
             let (elems, rest) = extract_receiver_array(&arg, "array_get")?;
             let idx = match rest {
-                Value::Int(i) => i,
+                Value::I64(i) => i,
                 _ => return Err("array_get: expected integer index".to_string()),
             };
             if idx < 0 {
@@ -1247,7 +1590,7 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
         }
         "array_len" => {
             let (elems, _) = extract_receiver_array(&arg, "array_len")?;
-            Ok(Value::Int(elems.len() as i64))
+            Ok(Value::I64(elems.len() as i64))
         }
         "array_map" => {
             let (elems, func) = extract_receiver_array(&arg, "array_map")?;
@@ -1307,29 +1650,29 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
         // ── String method builtins (receiver is first arg) ──
         "string_byte_len" => {
             let (s, _) = extract_receiver_str(&arg, "string_byte_len")?;
-            Ok(Value::Int(s.len() as i64))
+            Ok(Value::I64(s.len() as i64))
         }
         "string_char_len" => {
             let (s, _) = extract_receiver_str(&arg, "string_char_len")?;
-            Ok(Value::Int(s.chars().count() as i64))
+            Ok(Value::I64(s.chars().count() as i64))
         }
         "string_byte_get" => {
             let (s, rest) = extract_receiver_str(&arg, "string_byte_get")?;
             let idx = match rest {
-                Value::Int(i) => i,
+                Value::I64(i) => i,
                 _ => return Err("byte_get: expected integer index".to_string()),
             };
             if idx < 0 {
                 return Err(format!("byte_get: negative index: {}", idx));
             }
             let idx = idx as usize;
-            s.as_bytes().get(idx).copied().map(Value::Byte)
+            s.as_bytes().get(idx).copied().map(Value::U8)
                 .ok_or_else(|| format!("byte_get: index {} out of bounds (byte_len {})", idx, s.len()))
         }
         "string_char_get" => {
             let (s, rest) = extract_receiver_str(&arg, "string_char_get")?;
             let idx = match rest {
-                Value::Int(i) => i,
+                Value::I64(i) => i,
                 _ => return Err("char_get: expected integer index".to_string()),
             };
             if idx < 0 {
@@ -1341,7 +1684,7 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
         }
         "string_as_bytes" => {
             let (s, _) = extract_receiver_str(&arg, "string_as_bytes")?;
-            Ok(Value::Array(s.bytes().map(Value::Byte).collect()))
+            Ok(Value::Array(s.bytes().map(Value::U8).collect()))
         }
         "string_chars" => {
             let (s, _) = extract_receiver_str(&arg, "string_chars")?;
@@ -1425,69 +1768,69 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
         }
         // ── Int operator builtins ──
         "int_add" => {
-            let (a, rest) = extract_receiver_int(&arg, "int_add")?;
+            let (a, rest) = extract_receiver_i64(&arg, "int_add")?;
             match rest {
-                Value::Int(b) => a.checked_add(b).map(Value::Int)
+                Value::I64(b) => a.checked_add(b).map(Value::I64)
                     .ok_or_else(|| "integer overflow in addition".to_string()),
                 _ => Err("add: expected int argument".to_string()),
             }
         }
         "int_subtract" => {
-            let (a, rest) = extract_receiver_int(&arg, "int_subtract")?;
+            let (a, rest) = extract_receiver_i64(&arg, "int_subtract")?;
             match rest {
-                Value::Int(b) => a.checked_sub(b).map(Value::Int)
+                Value::I64(b) => a.checked_sub(b).map(Value::I64)
                     .ok_or_else(|| "integer overflow in subtraction".to_string()),
                 _ => Err("subtract: expected int argument".to_string()),
             }
         }
         "int_times" => {
-            let (a, rest) = extract_receiver_int(&arg, "int_times")?;
+            let (a, rest) = extract_receiver_i64(&arg, "int_times")?;
             match rest {
-                Value::Int(b) => a.checked_mul(b).map(Value::Int)
+                Value::I64(b) => a.checked_mul(b).map(Value::I64)
                     .ok_or_else(|| "integer overflow in multiplication".to_string()),
                 _ => Err("times: expected int argument".to_string()),
             }
         }
         "int_divided_by" => {
-            let (a, rest) = extract_receiver_int(&arg, "int_divided_by")?;
+            let (a, rest) = extract_receiver_i64(&arg, "int_divided_by")?;
             match rest {
-                Value::Int(0) => Err("division by zero".to_string()),
-                Value::Int(b) => a.checked_div(b).map(Value::Int)
+                Value::I64(0) => Err("division by zero".to_string()),
+                Value::I64(b) => a.checked_div(b).map(Value::I64)
                     .ok_or_else(|| "integer overflow in division".to_string()),
                 _ => Err("divided_by: expected int argument".to_string()),
             }
         }
         "int_negate" => {
-            let (a, _) = extract_receiver_int(&arg, "int_negate")?;
-            a.checked_neg().map(Value::Int)
+            let (a, _) = extract_receiver_i64(&arg, "int_negate")?;
+            a.checked_neg().map(Value::I64)
                 .ok_or_else(|| "integer overflow in negation".to_string())
         }
         "int_eq" => {
-            let (a, rest) = extract_receiver_int(&arg, "int_eq")?;
-            match rest { Value::Int(b) => Ok(Value::Bool(a == b)), _ => Err("eq: expected int".to_string()) }
+            let (a, rest) = extract_receiver_i64(&arg, "int_eq")?;
+            match rest { Value::I64(b) => Ok(Value::Bool(a == b)), _ => Err("eq: expected int".to_string()) }
         }
         "int_not_eq" => {
-            let (a, rest) = extract_receiver_int(&arg, "int_not_eq")?;
-            match rest { Value::Int(b) => Ok(Value::Bool(a != b)), _ => Err("not_eq: expected int".to_string()) }
+            let (a, rest) = extract_receiver_i64(&arg, "int_not_eq")?;
+            match rest { Value::I64(b) => Ok(Value::Bool(a != b)), _ => Err("not_eq: expected int".to_string()) }
         }
         "int_lt" => {
-            let (a, rest) = extract_receiver_int(&arg, "int_lt")?;
-            match rest { Value::Int(b) => Ok(Value::Bool(a < b)), _ => Err("lt: expected int".to_string()) }
+            let (a, rest) = extract_receiver_i64(&arg, "int_lt")?;
+            match rest { Value::I64(b) => Ok(Value::Bool(a < b)), _ => Err("lt: expected int".to_string()) }
         }
         "int_gt" => {
-            let (a, rest) = extract_receiver_int(&arg, "int_gt")?;
-            match rest { Value::Int(b) => Ok(Value::Bool(a > b)), _ => Err("gt: expected int".to_string()) }
+            let (a, rest) = extract_receiver_i64(&arg, "int_gt")?;
+            match rest { Value::I64(b) => Ok(Value::Bool(a > b)), _ => Err("gt: expected int".to_string()) }
         }
         "int_lt_eq" => {
-            let (a, rest) = extract_receiver_int(&arg, "int_lt_eq")?;
-            match rest { Value::Int(b) => Ok(Value::Bool(a <= b)), _ => Err("lt_eq: expected int".to_string()) }
+            let (a, rest) = extract_receiver_i64(&arg, "int_lt_eq")?;
+            match rest { Value::I64(b) => Ok(Value::Bool(a <= b)), _ => Err("lt_eq: expected int".to_string()) }
         }
         "int_gt_eq" => {
-            let (a, rest) = extract_receiver_int(&arg, "int_gt_eq")?;
-            match rest { Value::Int(b) => Ok(Value::Bool(a >= b)), _ => Err("gt_eq: expected int".to_string()) }
+            let (a, rest) = extract_receiver_i64(&arg, "int_gt_eq")?;
+            match rest { Value::I64(b) => Ok(Value::Bool(a >= b)), _ => Err("gt_eq: expected int".to_string()) }
         }
         "int_to_string" => {
-            let (a, _) = extract_receiver_int(&arg, "int_to_string")?;
+            let (a, _) = extract_receiver_i64(&arg, "int_to_string")?;
             Ok(Value::Str(a.to_string()))
         }
 
@@ -1552,24 +1895,24 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             let (a, _) = extract_receiver_i32(&arg, "i32_to_string")?;
             Ok(Value::Str(format!("{}i32", a)))
         }
-        "i32_to_int" => {
-            let (a, _) = extract_receiver_i32(&arg, "i32_to_int")?;
-            Ok(Value::Int(a as i64))
+        "i32_to_i64" => {
+            let (a, _) = extract_receiver_i32(&arg, "i32_to_i64")?;
+            Ok(Value::I64(a as i64))
         }
-        "i32_to_float" => {
-            let (a, _) = extract_receiver_i32(&arg, "i32_to_float")?;
-            Ok(Value::Float(a as f64))
+        "i32_to_f64" => {
+            let (a, _) = extract_receiver_i32(&arg, "i32_to_f64")?;
+            Ok(Value::F64(a as f64))
         }
         "i32_to_f32" => {
             let (a, _) = extract_receiver_i32(&arg, "i32_to_f32")?;
             Ok(Value::F32(a as f32))
         }
-        "i32_to_byte" => {
-            let (a, _) = extract_receiver_i32(&arg, "i32_to_byte")?;
+        "i32_to_u8" => {
+            let (a, _) = extract_receiver_i32(&arg, "i32_to_u8")?;
             if a < 0 || a > 255 {
                 Err(format!("to_byte: value {} out of range (0..255)", a))
             } else {
-                Ok(Value::Byte(a as u8))
+                Ok(Value::U8(a as u8))
             }
         }
 
@@ -1633,13 +1976,13 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
                 Ok(Value::Str(format!("{}f32", a)))
             }
         }
-        "f32_to_float" => {
-            let (a, _) = extract_receiver_f32(&arg, "f32_to_float")?;
-            Ok(Value::Float(a as f64))
+        "f32_to_f64" => {
+            let (a, _) = extract_receiver_f32(&arg, "f32_to_f64")?;
+            Ok(Value::F64(a as f64))
         }
-        "f32_to_int" => {
-            let (a, _) = extract_receiver_f32(&arg, "f32_to_int")?;
-            Ok(Value::Int(a as i64))
+        "f32_to_i64" => {
+            let (a, _) = extract_receiver_f32(&arg, "f32_to_i64")?;
+            Ok(Value::I64(a as i64))
         }
         "f32_to_i32" => {
             let (a, _) = extract_receiver_f32(&arg, "f32_to_i32")?;
@@ -1662,78 +2005,701 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             Ok(Value::I32(a.trunc() as i32))
         }
 
+        // ── I128 operator builtins ──
+        "i128_add" => {
+            let (a, rest) = extract_receiver_i128(&arg, "i128_add")?;
+            match rest {
+                Value::I128(b) => a.checked_add(b).map(Value::I128)
+                    .ok_or_else(|| "integer overflow in i128 addition".to_string()),
+                _ => Err("add: expected i128 argument".to_string()),
+            }
+        }
+        "i128_subtract" => {
+            let (a, rest) = extract_receiver_i128(&arg, "i128_subtract")?;
+            match rest {
+                Value::I128(b) => a.checked_sub(b).map(Value::I128)
+                    .ok_or_else(|| "integer overflow in i128 subtraction".to_string()),
+                _ => Err("subtract: expected i128 argument".to_string()),
+            }
+        }
+        "i128_times" => {
+            let (a, rest) = extract_receiver_i128(&arg, "i128_times")?;
+            match rest {
+                Value::I128(b) => a.checked_mul(b).map(Value::I128)
+                    .ok_or_else(|| "integer overflow in i128 multiplication".to_string()),
+                _ => Err("times: expected i128 argument".to_string()),
+            }
+        }
+        "i128_divided_by" => {
+            let (a, rest) = extract_receiver_i128(&arg, "i128_divided_by")?;
+            match rest {
+                Value::I128(0) => Err("division by zero".to_string()),
+                Value::I128(b) => a.checked_div(b).map(Value::I128)
+                    .ok_or_else(|| "integer overflow in i128 division".to_string()),
+                _ => Err("divided_by: expected i128 argument".to_string()),
+            }
+        }
+        "i128_negate" => {
+            let (a, _) = extract_receiver_i128(&arg, "i128_negate")?;
+            a.checked_neg().map(Value::I128)
+                .ok_or_else(|| "integer overflow in i128 negation".to_string())
+        }
+        "i128_eq" | "i128_not_eq" | "i128_lt" | "i128_gt" | "i128_lt_eq" | "i128_gt_eq" => {
+            let (a, rest) = extract_receiver_i128(&arg, name)?;
+            match rest {
+                Value::I128(b) => {
+                    let result = match name {
+                        "i128_eq" => a == b,
+                        "i128_not_eq" => a != b,
+                        "i128_lt" => a < b,
+                        "i128_gt" => a > b,
+                        "i128_lt_eq" => a <= b,
+                        "i128_gt_eq" => a >= b,
+                        _ => unreachable!(),
+                    };
+                    Ok(Value::Bool(result))
+                }
+                _ => Err(format!("{}: expected i128 argument", name)),
+            }
+        }
+        "i128_to_string" => {
+            let (a, _) = extract_receiver_i128(&arg, "i128_to_string")?;
+            Ok(Value::Str(format!("{}i128", a)))
+        }
+        "i128_to_i64" => {
+            let (a, _) = extract_receiver_i128(&arg, "i128_to_i64")?;
+            if a < i64::MIN as i128 || a > i64::MAX as i128 {
+                Err(format!("to_int: value {} out of range", a))
+            } else {
+                Ok(Value::I64(a as i64))
+            }
+        }
+        "i128_to_i32" => {
+            let (a, _) = extract_receiver_i128(&arg, "i128_to_i32")?;
+            if a < i32::MIN as i128 || a > i32::MAX as i128 {
+                Err(format!("to_i32: value {} out of range", a))
+            } else {
+                Ok(Value::I32(a as i32))
+            }
+        }
+        "i128_to_u128" => {
+            let (a, _) = extract_receiver_i128(&arg, "i128_to_u128")?;
+            if a < 0 {
+                Err(format!("to_u128: value {} out of range", a))
+            } else {
+                Ok(Value::U128(a as u128))
+            }
+        }
+
+        // ── U128 operator builtins ──
+        "u128_add" => {
+            let (a, rest) = extract_receiver_u128(&arg, "u128_add")?;
+            match rest {
+                Value::U128(b) => a.checked_add(b).map(Value::U128)
+                    .ok_or_else(|| "integer overflow in u128 addition".to_string()),
+                _ => Err("add: expected u128 argument".to_string()),
+            }
+        }
+        "u128_subtract" => {
+            let (a, rest) = extract_receiver_u128(&arg, "u128_subtract")?;
+            match rest {
+                Value::U128(b) => a.checked_sub(b).map(Value::U128)
+                    .ok_or_else(|| "integer underflow in u128 subtraction".to_string()),
+                _ => Err("subtract: expected u128 argument".to_string()),
+            }
+        }
+        "u128_times" => {
+            let (a, rest) = extract_receiver_u128(&arg, "u128_times")?;
+            match rest {
+                Value::U128(b) => a.checked_mul(b).map(Value::U128)
+                    .ok_or_else(|| "integer overflow in u128 multiplication".to_string()),
+                _ => Err("times: expected u128 argument".to_string()),
+            }
+        }
+        "u128_divided_by" => {
+            let (a, rest) = extract_receiver_u128(&arg, "u128_divided_by")?;
+            match rest {
+                Value::U128(0) => Err("division by zero".to_string()),
+                Value::U128(b) => Ok(Value::U128(a / b)),
+                _ => Err("divided_by: expected u128 argument".to_string()),
+            }
+        }
+        "u128_eq" | "u128_not_eq" | "u128_lt" | "u128_gt" | "u128_lt_eq" | "u128_gt_eq" => {
+            let (a, rest) = extract_receiver_u128(&arg, name)?;
+            match rest {
+                Value::U128(b) => {
+                    let result = match name {
+                        "u128_eq" => a == b,
+                        "u128_not_eq" => a != b,
+                        "u128_lt" => a < b,
+                        "u128_gt" => a > b,
+                        "u128_lt_eq" => a <= b,
+                        "u128_gt_eq" => a >= b,
+                        _ => unreachable!(),
+                    };
+                    Ok(Value::Bool(result))
+                }
+                _ => Err(format!("{}: expected u128 argument", name)),
+            }
+        }
+        "u128_to_string" => {
+            let (a, _) = extract_receiver_u128(&arg, "u128_to_string")?;
+            Ok(Value::Str(format!("{}u128", a)))
+        }
+        "u128_to_i64" => {
+            let (a, _) = extract_receiver_u128(&arg, "u128_to_i64")?;
+            if a > i64::MAX as u128 {
+                Err(format!("to_int: value {} out of range", a))
+            } else {
+                Ok(Value::I64(a as i64))
+            }
+        }
+        "u128_to_i32" => {
+            let (a, _) = extract_receiver_u128(&arg, "u128_to_i32")?;
+            if a > i32::MAX as u128 {
+                Err(format!("to_i32: value {} out of range", a))
+            } else {
+                Ok(Value::I32(a as i32))
+            }
+        }
+        "u128_to_i128" => {
+            let (a, _) = extract_receiver_u128(&arg, "u128_to_i128")?;
+            if a > i128::MAX as u128 {
+                Err(format!("to_i128: value {} out of range", a))
+            } else {
+                Ok(Value::I128(a as i128))
+            }
+        }
+
+        // ── I8 operator builtins ──
+        "i8_add" => {
+            let (a, rest) = extract_receiver_i8(&arg, "i8_add")?;
+            match rest {
+                Value::I8(b) => a.checked_add(b).map(Value::I8)
+                    .ok_or_else(|| "integer overflow in i8 addition".to_string()),
+                _ => Err("add: expected i8 argument".to_string()),
+            }
+        }
+        "i8_subtract" => {
+            let (a, rest) = extract_receiver_i8(&arg, "i8_subtract")?;
+            match rest {
+                Value::I8(b) => a.checked_sub(b).map(Value::I8)
+                    .ok_or_else(|| "integer overflow in i8 subtraction".to_string()),
+                _ => Err("subtract: expected i8 argument".to_string()),
+            }
+        }
+        "i8_times" => {
+            let (a, rest) = extract_receiver_i8(&arg, "i8_times")?;
+            match rest {
+                Value::I8(b) => a.checked_mul(b).map(Value::I8)
+                    .ok_or_else(|| "integer overflow in i8 multiplication".to_string()),
+                _ => Err("times: expected i8 argument".to_string()),
+            }
+        }
+        "i8_divided_by" => {
+            let (a, rest) = extract_receiver_i8(&arg, "i8_divided_by")?;
+            match rest {
+                Value::I8(0) => Err("division by zero".to_string()),
+                Value::I8(b) => a.checked_div(b).map(Value::I8)
+                    .ok_or_else(|| "integer overflow in i8 division".to_string()),
+                _ => Err("divided_by: expected i8 argument".to_string()),
+            }
+        }
+        "i8_negate" => {
+            let (a, _) = extract_receiver_i8(&arg, "i8_negate")?;
+            a.checked_neg().map(Value::I8)
+                .ok_or_else(|| "integer overflow in i8 negation".to_string())
+        }
+        "i8_eq" | "i8_not_eq" | "i8_lt" | "i8_gt" | "i8_lt_eq" | "i8_gt_eq" => {
+            let (a, rest) = extract_receiver_i8(&arg, name)?;
+            match rest {
+                Value::I8(b) => {
+                    let result = match name {
+                        "i8_eq" => a == b,
+                        "i8_not_eq" => a != b,
+                        "i8_lt" => a < b,
+                        "i8_gt" => a > b,
+                        "i8_lt_eq" => a <= b,
+                        "i8_gt_eq" => a >= b,
+                        _ => unreachable!(),
+                    };
+                    Ok(Value::Bool(result))
+                }
+                _ => Err(format!("{}: expected i8 argument", name)),
+            }
+        }
+        "i8_to_string" => {
+            let (a, _) = extract_receiver_i8(&arg, "i8_to_string")?;
+            Ok(Value::Str(format!("{}i8", a)))
+        }
+        "i8_to_i64" => {
+            let (a, _) = extract_receiver_i8(&arg, "i8_to_i64")?;
+            Ok(Value::I64(a as i64))
+        }
+
+        // ── U8 operator builtins ──
+        "u8_add" => {
+            let (a, rest) = extract_receiver_u8(&arg, "u8_add")?;
+            match rest {
+                Value::U8(b) => a.checked_add(b).map(Value::U8)
+                    .ok_or_else(|| "integer overflow in u8 addition".to_string()),
+                _ => Err("add: expected u8 argument".to_string()),
+            }
+        }
+        "u8_subtract" => {
+            let (a, rest) = extract_receiver_u8(&arg, "u8_subtract")?;
+            match rest {
+                Value::U8(b) => a.checked_sub(b).map(Value::U8)
+                    .ok_or_else(|| "integer underflow in u8 subtraction".to_string()),
+                _ => Err("subtract: expected u8 argument".to_string()),
+            }
+        }
+        "u8_times" => {
+            let (a, rest) = extract_receiver_u8(&arg, "u8_times")?;
+            match rest {
+                Value::U8(b) => a.checked_mul(b).map(Value::U8)
+                    .ok_or_else(|| "integer overflow in u8 multiplication".to_string()),
+                _ => Err("times: expected u8 argument".to_string()),
+            }
+        }
+        "u8_divided_by" => {
+            let (a, rest) = extract_receiver_u8(&arg, "u8_divided_by")?;
+            match rest {
+                Value::U8(0) => Err("division by zero".to_string()),
+                Value::U8(b) => Ok(Value::U8(a / b)),
+                _ => Err("divided_by: expected u8 argument".to_string()),
+            }
+        }
+        "u8_eq" | "u8_not_eq" | "u8_lt" | "u8_gt" | "u8_lt_eq" | "u8_gt_eq" => {
+            let (a, rest) = extract_receiver_u8(&arg, name)?;
+            match rest {
+                Value::U8(b) => {
+                    let result = match name {
+                        "u8_eq" => a == b,
+                        "u8_not_eq" => a != b,
+                        "u8_lt" => a < b,
+                        "u8_gt" => a > b,
+                        "u8_lt_eq" => a <= b,
+                        "u8_gt_eq" => a >= b,
+                        _ => unreachable!(),
+                    };
+                    Ok(Value::Bool(result))
+                }
+                _ => Err(format!("{}: expected u8 argument", name)),
+            }
+        }
+        "u8_to_string" => {
+            let (a, _) = extract_receiver_u8(&arg, "u8_to_string")?;
+            Ok(Value::Str(format!("{}u8", a)))
+        }
+        "u8_to_i64" => {
+            let (a, _) = extract_receiver_u8(&arg, "u8_to_i64")?;
+            Ok(Value::I64(a as i64))
+        }
+
+        // ── I16 operator builtins ──
+        "i16_add" => {
+            let (a, rest) = extract_receiver_i16(&arg, "i16_add")?;
+            match rest {
+                Value::I16(b) => a.checked_add(b).map(Value::I16)
+                    .ok_or_else(|| "integer overflow in i16 addition".to_string()),
+                _ => Err("add: expected i16 argument".to_string()),
+            }
+        }
+        "i16_subtract" => {
+            let (a, rest) = extract_receiver_i16(&arg, "i16_subtract")?;
+            match rest {
+                Value::I16(b) => a.checked_sub(b).map(Value::I16)
+                    .ok_or_else(|| "integer overflow in i16 subtraction".to_string()),
+                _ => Err("subtract: expected i16 argument".to_string()),
+            }
+        }
+        "i16_times" => {
+            let (a, rest) = extract_receiver_i16(&arg, "i16_times")?;
+            match rest {
+                Value::I16(b) => a.checked_mul(b).map(Value::I16)
+                    .ok_or_else(|| "integer overflow in i16 multiplication".to_string()),
+                _ => Err("times: expected i16 argument".to_string()),
+            }
+        }
+        "i16_divided_by" => {
+            let (a, rest) = extract_receiver_i16(&arg, "i16_divided_by")?;
+            match rest {
+                Value::I16(0) => Err("division by zero".to_string()),
+                Value::I16(b) => a.checked_div(b).map(Value::I16)
+                    .ok_or_else(|| "integer overflow in i16 division".to_string()),
+                _ => Err("divided_by: expected i16 argument".to_string()),
+            }
+        }
+        "i16_negate" => {
+            let (a, _) = extract_receiver_i16(&arg, "i16_negate")?;
+            a.checked_neg().map(Value::I16)
+                .ok_or_else(|| "integer overflow in i16 negation".to_string())
+        }
+        "i16_eq" | "i16_not_eq" | "i16_lt" | "i16_gt" | "i16_lt_eq" | "i16_gt_eq" => {
+            let (a, rest) = extract_receiver_i16(&arg, name)?;
+            match rest {
+                Value::I16(b) => {
+                    let result = match name {
+                        "i16_eq" => a == b,
+                        "i16_not_eq" => a != b,
+                        "i16_lt" => a < b,
+                        "i16_gt" => a > b,
+                        "i16_lt_eq" => a <= b,
+                        "i16_gt_eq" => a >= b,
+                        _ => unreachable!(),
+                    };
+                    Ok(Value::Bool(result))
+                }
+                _ => Err(format!("{}: expected i16 argument", name)),
+            }
+        }
+        "i16_to_string" => {
+            let (a, _) = extract_receiver_i16(&arg, "i16_to_string")?;
+            Ok(Value::Str(format!("{}i16", a)))
+        }
+        "i16_to_i64" => {
+            let (a, _) = extract_receiver_i16(&arg, "i16_to_i64")?;
+            Ok(Value::I64(a as i64))
+        }
+
+        // ── U16 operator builtins ──
+        "u16_add" => {
+            let (a, rest) = extract_receiver_u16(&arg, "u16_add")?;
+            match rest {
+                Value::U16(b) => a.checked_add(b).map(Value::U16)
+                    .ok_or_else(|| "integer overflow in u16 addition".to_string()),
+                _ => Err("add: expected u16 argument".to_string()),
+            }
+        }
+        "u16_subtract" => {
+            let (a, rest) = extract_receiver_u16(&arg, "u16_subtract")?;
+            match rest {
+                Value::U16(b) => a.checked_sub(b).map(Value::U16)
+                    .ok_or_else(|| "integer underflow in u16 subtraction".to_string()),
+                _ => Err("subtract: expected u16 argument".to_string()),
+            }
+        }
+        "u16_times" => {
+            let (a, rest) = extract_receiver_u16(&arg, "u16_times")?;
+            match rest {
+                Value::U16(b) => a.checked_mul(b).map(Value::U16)
+                    .ok_or_else(|| "integer overflow in u16 multiplication".to_string()),
+                _ => Err("times: expected u16 argument".to_string()),
+            }
+        }
+        "u16_divided_by" => {
+            let (a, rest) = extract_receiver_u16(&arg, "u16_divided_by")?;
+            match rest {
+                Value::U16(0) => Err("division by zero".to_string()),
+                Value::U16(b) => Ok(Value::U16(a / b)),
+                _ => Err("divided_by: expected u16 argument".to_string()),
+            }
+        }
+        "u16_eq" | "u16_not_eq" | "u16_lt" | "u16_gt" | "u16_lt_eq" | "u16_gt_eq" => {
+            let (a, rest) = extract_receiver_u16(&arg, name)?;
+            match rest {
+                Value::U16(b) => {
+                    let result = match name {
+                        "u16_eq" => a == b,
+                        "u16_not_eq" => a != b,
+                        "u16_lt" => a < b,
+                        "u16_gt" => a > b,
+                        "u16_lt_eq" => a <= b,
+                        "u16_gt_eq" => a >= b,
+                        _ => unreachable!(),
+                    };
+                    Ok(Value::Bool(result))
+                }
+                _ => Err(format!("{}: expected u16 argument", name)),
+            }
+        }
+        "u16_to_string" => {
+            let (a, _) = extract_receiver_u16(&arg, "u16_to_string")?;
+            Ok(Value::Str(format!("{}u16", a)))
+        }
+        "u16_to_i64" => {
+            let (a, _) = extract_receiver_u16(&arg, "u16_to_i64")?;
+            Ok(Value::I64(a as i64))
+        }
+
+        // ── U32 operator builtins ──
+        "u32_add" => {
+            let (a, rest) = extract_receiver_u32(&arg, "u32_add")?;
+            match rest {
+                Value::U32(b) => a.checked_add(b).map(Value::U32)
+                    .ok_or_else(|| "integer overflow in u32 addition".to_string()),
+                _ => Err("add: expected u32 argument".to_string()),
+            }
+        }
+        "u32_subtract" => {
+            let (a, rest) = extract_receiver_u32(&arg, "u32_subtract")?;
+            match rest {
+                Value::U32(b) => a.checked_sub(b).map(Value::U32)
+                    .ok_or_else(|| "integer underflow in u32 subtraction".to_string()),
+                _ => Err("subtract: expected u32 argument".to_string()),
+            }
+        }
+        "u32_times" => {
+            let (a, rest) = extract_receiver_u32(&arg, "u32_times")?;
+            match rest {
+                Value::U32(b) => a.checked_mul(b).map(Value::U32)
+                    .ok_or_else(|| "integer overflow in u32 multiplication".to_string()),
+                _ => Err("times: expected u32 argument".to_string()),
+            }
+        }
+        "u32_divided_by" => {
+            let (a, rest) = extract_receiver_u32(&arg, "u32_divided_by")?;
+            match rest {
+                Value::U32(0) => Err("division by zero".to_string()),
+                Value::U32(b) => Ok(Value::U32(a / b)),
+                _ => Err("divided_by: expected u32 argument".to_string()),
+            }
+        }
+        "u32_eq" | "u32_not_eq" | "u32_lt" | "u32_gt" | "u32_lt_eq" | "u32_gt_eq" => {
+            let (a, rest) = extract_receiver_u32(&arg, name)?;
+            match rest {
+                Value::U32(b) => {
+                    let result = match name {
+                        "u32_eq" => a == b,
+                        "u32_not_eq" => a != b,
+                        "u32_lt" => a < b,
+                        "u32_gt" => a > b,
+                        "u32_lt_eq" => a <= b,
+                        "u32_gt_eq" => a >= b,
+                        _ => unreachable!(),
+                    };
+                    Ok(Value::Bool(result))
+                }
+                _ => Err(format!("{}: expected u32 argument", name)),
+            }
+        }
+        "u32_to_string" => {
+            let (a, _) = extract_receiver_u32(&arg, "u32_to_string")?;
+            Ok(Value::Str(format!("{}u32", a)))
+        }
+        "u32_to_i64" => {
+            let (a, _) = extract_receiver_u32(&arg, "u32_to_i64")?;
+            Ok(Value::I64(a as i64))
+        }
+
+        // ── U64 operator builtins ──
+        "u64_add" => {
+            let (a, rest) = extract_receiver_u64(&arg, "u64_add")?;
+            match rest {
+                Value::U64(b) => a.checked_add(b).map(Value::U64)
+                    .ok_or_else(|| "integer overflow in u64 addition".to_string()),
+                _ => Err("add: expected u64 argument".to_string()),
+            }
+        }
+        "u64_subtract" => {
+            let (a, rest) = extract_receiver_u64(&arg, "u64_subtract")?;
+            match rest {
+                Value::U64(b) => a.checked_sub(b).map(Value::U64)
+                    .ok_or_else(|| "integer underflow in u64 subtraction".to_string()),
+                _ => Err("subtract: expected u64 argument".to_string()),
+            }
+        }
+        "u64_times" => {
+            let (a, rest) = extract_receiver_u64(&arg, "u64_times")?;
+            match rest {
+                Value::U64(b) => a.checked_mul(b).map(Value::U64)
+                    .ok_or_else(|| "integer overflow in u64 multiplication".to_string()),
+                _ => Err("times: expected u64 argument".to_string()),
+            }
+        }
+        "u64_divided_by" => {
+            let (a, rest) = extract_receiver_u64(&arg, "u64_divided_by")?;
+            match rest {
+                Value::U64(0) => Err("division by zero".to_string()),
+                Value::U64(b) => Ok(Value::U64(a / b)),
+                _ => Err("divided_by: expected u64 argument".to_string()),
+            }
+        }
+        "u64_eq" | "u64_not_eq" | "u64_lt" | "u64_gt" | "u64_lt_eq" | "u64_gt_eq" => {
+            let (a, rest) = extract_receiver_u64(&arg, name)?;
+            match rest {
+                Value::U64(b) => {
+                    let result = match name {
+                        "u64_eq" => a == b,
+                        "u64_not_eq" => a != b,
+                        "u64_lt" => a < b,
+                        "u64_gt" => a > b,
+                        "u64_lt_eq" => a <= b,
+                        "u64_gt_eq" => a >= b,
+                        _ => unreachable!(),
+                    };
+                    Ok(Value::Bool(result))
+                }
+                _ => Err(format!("{}: expected u64 argument", name)),
+            }
+        }
+        "u64_to_string" => {
+            let (a, _) = extract_receiver_u64(&arg, "u64_to_string")?;
+            Ok(Value::Str(format!("{}u64", a)))
+        }
+        "u64_to_i64" => {
+            let (a, _) = extract_receiver_u64(&arg, "u64_to_i64")?;
+            Ok(Value::I64(a as i64))
+        }
+
+        // ── F64 operator builtins ──
+        "f64_add" => {
+            let (a, rest) = extract_receiver_f64(&arg, "f64_add")?;
+            match rest {
+                Value::F64(b) => Ok(Value::F64(a + b)),
+                _ => Err("add: expected f64 argument".to_string()),
+            }
+        }
+        "f64_subtract" => {
+            let (a, rest) = extract_receiver_f64(&arg, "f64_subtract")?;
+            match rest {
+                Value::F64(b) => Ok(Value::F64(a - b)),
+                _ => Err("subtract: expected f64 argument".to_string()),
+            }
+        }
+        "f64_times" => {
+            let (a, rest) = extract_receiver_f64(&arg, "f64_times")?;
+            match rest {
+                Value::F64(b) => Ok(Value::F64(a * b)),
+                _ => Err("times: expected f64 argument".to_string()),
+            }
+        }
+        "f64_divided_by" => {
+            let (a, rest) = extract_receiver_f64(&arg, "f64_divided_by")?;
+            match rest {
+                Value::F64(b) if b == 0.0 => Err("division by zero".to_string()),
+                Value::F64(b) => Ok(Value::F64(a / b)),
+                _ => Err("divided_by: expected f64 argument".to_string()),
+            }
+        }
+        "f64_negate" => {
+            let (a, _) = extract_receiver_f64(&arg, "f64_negate")?;
+            Ok(Value::F64(-a))
+        }
+        "f64_eq" | "f64_not_eq" | "f64_lt" | "f64_gt" | "f64_lt_eq" | "f64_gt_eq" => {
+            let (a, rest) = extract_receiver_f64(&arg, name)?;
+            match rest {
+                Value::F64(b) => {
+                    let result = match name {
+                        "f64_eq" => a == b,
+                        "f64_not_eq" => a != b,
+                        "f64_lt" => a < b,
+                        "f64_gt" => a > b,
+                        "f64_lt_eq" => a <= b,
+                        "f64_gt_eq" => a >= b,
+                        _ => unreachable!(),
+                    };
+                    Ok(Value::Bool(result))
+                }
+                _ => Err(format!("{}: expected f64 argument", name)),
+            }
+        }
+        "f64_to_string" => {
+            let (a, _) = extract_receiver_f64(&arg, "f64_to_string")?;
+            if a.fract() == 0.0 {
+                Ok(Value::Str(format!("{:.1}f64", a)))
+            } else {
+                Ok(Value::Str(format!("{}f64", a)))
+            }
+        }
+        "f64_to_f64" => {
+            let (a, _) = extract_receiver_f64(&arg, "f64_to_f64")?;
+            Ok(Value::F64(a))
+        }
+        "f64_to_i64" => {
+            let (a, _) = extract_receiver_f64(&arg, "f64_to_i64")?;
+            Ok(Value::I64(a as i64))
+        }
+        "f64_ceil" => {
+            let (a, _) = extract_receiver_f64(&arg, "f64_ceil")?;
+            Ok(Value::I64(a.ceil() as i64))
+        }
+        "f64_floor" => {
+            let (a, _) = extract_receiver_f64(&arg, "f64_floor")?;
+            Ok(Value::I64(a.floor() as i64))
+        }
+        "f64_round" => {
+            let (a, _) = extract_receiver_f64(&arg, "f64_round")?;
+            Ok(Value::I64(a.round() as i64))
+        }
+        "f64_trunc" => {
+            let (a, _) = extract_receiver_f64(&arg, "f64_trunc")?;
+            Ok(Value::I64(a.trunc() as i64))
+        }
+
         // ── Float operator builtins ──
         "float_add" => {
-            let (a, rest) = extract_receiver_float(&arg, "float_add")?;
+            let (a, rest) = extract_receiver_f64(&arg, "float_add")?;
             match rest {
-                Value::Float(b) => Ok(Value::Float(a + b)),
+                Value::F64(b) => Ok(Value::F64(a + b)),
                 _ => Err("add: expected float argument".to_string()),
             }
         }
         "float_subtract" => {
-            let (a, rest) = extract_receiver_float(&arg, "float_subtract")?;
+            let (a, rest) = extract_receiver_f64(&arg, "float_subtract")?;
             match rest {
-                Value::Float(b) => Ok(Value::Float(a - b)),
+                Value::F64(b) => Ok(Value::F64(a - b)),
                 _ => Err("subtract: expected float argument".to_string()),
             }
         }
         "float_times" => {
-            let (a, rest) = extract_receiver_float(&arg, "float_times")?;
+            let (a, rest) = extract_receiver_f64(&arg, "float_times")?;
             match rest {
-                Value::Float(b) => Ok(Value::Float(a * b)),
+                Value::F64(b) => Ok(Value::F64(a * b)),
                 _ => Err("times: expected float argument".to_string()),
             }
         }
         "float_divided_by" => {
-            let (a, rest) = extract_receiver_float(&arg, "float_divided_by")?;
+            let (a, rest) = extract_receiver_f64(&arg, "float_divided_by")?;
             match rest {
-                Value::Float(b) if b == 0.0 => Err("division by zero".to_string()),
-                Value::Float(b) => Ok(Value::Float(a / b)),
+                Value::F64(b) if b == 0.0 => Err("division by zero".to_string()),
+                Value::F64(b) => Ok(Value::F64(a / b)),
                 _ => Err("divided_by: expected float argument".to_string()),
             }
         }
         "float_negate" => {
-            let (a, _) = extract_receiver_float(&arg, "float_negate")?;
-            Ok(Value::Float(-a))
+            let (a, _) = extract_receiver_f64(&arg, "float_negate")?;
+            Ok(Value::F64(-a))
         }
         "float_eq" => {
-            let (a, rest) = extract_receiver_float(&arg, "float_eq")?;
-            match rest { Value::Float(b) => Ok(Value::Bool(a == b)), _ => Err("eq: expected float".to_string()) }
+            let (a, rest) = extract_receiver_f64(&arg, "float_eq")?;
+            match rest { Value::F64(b) => Ok(Value::Bool(a == b)), _ => Err("eq: expected float".to_string()) }
         }
         "float_not_eq" => {
-            let (a, rest) = extract_receiver_float(&arg, "float_not_eq")?;
-            match rest { Value::Float(b) => Ok(Value::Bool(a != b)), _ => Err("not_eq: expected float".to_string()) }
+            let (a, rest) = extract_receiver_f64(&arg, "float_not_eq")?;
+            match rest { Value::F64(b) => Ok(Value::Bool(a != b)), _ => Err("not_eq: expected float".to_string()) }
         }
         "float_lt" => {
-            let (a, rest) = extract_receiver_float(&arg, "float_lt")?;
+            let (a, rest) = extract_receiver_f64(&arg, "float_lt")?;
             match rest {
-                Value::Float(b) => a.partial_cmp(&b).map(|o| Value::Bool(o.is_lt())).ok_or_else(|| "NaN comparison".to_string()),
+                Value::F64(b) => a.partial_cmp(&b).map(|o| Value::Bool(o.is_lt())).ok_or_else(|| "NaN comparison".to_string()),
                 _ => Err("lt: expected float".to_string()),
             }
         }
         "float_gt" => {
-            let (a, rest) = extract_receiver_float(&arg, "float_gt")?;
+            let (a, rest) = extract_receiver_f64(&arg, "float_gt")?;
             match rest {
-                Value::Float(b) => a.partial_cmp(&b).map(|o| Value::Bool(o.is_gt())).ok_or_else(|| "NaN comparison".to_string()),
+                Value::F64(b) => a.partial_cmp(&b).map(|o| Value::Bool(o.is_gt())).ok_or_else(|| "NaN comparison".to_string()),
                 _ => Err("gt: expected float".to_string()),
             }
         }
         "float_lt_eq" => {
-            let (a, rest) = extract_receiver_float(&arg, "float_lt_eq")?;
+            let (a, rest) = extract_receiver_f64(&arg, "float_lt_eq")?;
             match rest {
-                Value::Float(b) => a.partial_cmp(&b).map(|o| Value::Bool(o.is_le())).ok_or_else(|| "NaN comparison".to_string()),
+                Value::F64(b) => a.partial_cmp(&b).map(|o| Value::Bool(o.is_le())).ok_or_else(|| "NaN comparison".to_string()),
                 _ => Err("lt_eq: expected float".to_string()),
             }
         }
         "float_gt_eq" => {
-            let (a, rest) = extract_receiver_float(&arg, "float_gt_eq")?;
+            let (a, rest) = extract_receiver_f64(&arg, "float_gt_eq")?;
             match rest {
-                Value::Float(b) => a.partial_cmp(&b).map(|o| Value::Bool(o.is_ge())).ok_or_else(|| "NaN comparison".to_string()),
+                Value::F64(b) => a.partial_cmp(&b).map(|o| Value::Bool(o.is_ge())).ok_or_else(|| "NaN comparison".to_string()),
                 _ => Err("gt_eq: expected float".to_string()),
             }
         }
         "float_to_string" => {
-            let (a, _) = extract_receiver_float(&arg, "float_to_string")?;
+            let (a, _) = extract_receiver_f64(&arg, "float_to_string")?;
             // Match Display impl: whole-number floats get ".0" suffix
             let s = if a.fract() == 0.0 {
                 format!("{}.0", a)
@@ -1871,31 +2837,31 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
 
         // ── Byte operator builtins ──
         "byte_eq" => {
-            let (a, rest) = extract_receiver_byte(&arg, "byte_eq")?;
-            match rest { Value::Byte(b) => Ok(Value::Bool(a == b)), _ => Err("eq: expected byte".to_string()) }
+            let (a, rest) = extract_receiver_u8(&arg, "byte_eq")?;
+            match rest { Value::U8(b) => Ok(Value::Bool(a == b)), _ => Err("eq: expected byte".to_string()) }
         }
         "byte_not_eq" => {
-            let (a, rest) = extract_receiver_byte(&arg, "byte_not_eq")?;
-            match rest { Value::Byte(b) => Ok(Value::Bool(a != b)), _ => Err("not_eq: expected byte".to_string()) }
+            let (a, rest) = extract_receiver_u8(&arg, "byte_not_eq")?;
+            match rest { Value::U8(b) => Ok(Value::Bool(a != b)), _ => Err("not_eq: expected byte".to_string()) }
         }
         "byte_lt" => {
-            let (a, rest) = extract_receiver_byte(&arg, "byte_lt")?;
-            match rest { Value::Byte(b) => Ok(Value::Bool(a < b)), _ => Err("lt: expected byte".to_string()) }
+            let (a, rest) = extract_receiver_u8(&arg, "byte_lt")?;
+            match rest { Value::U8(b) => Ok(Value::Bool(a < b)), _ => Err("lt: expected byte".to_string()) }
         }
         "byte_gt" => {
-            let (a, rest) = extract_receiver_byte(&arg, "byte_gt")?;
-            match rest { Value::Byte(b) => Ok(Value::Bool(a > b)), _ => Err("gt: expected byte".to_string()) }
+            let (a, rest) = extract_receiver_u8(&arg, "byte_gt")?;
+            match rest { Value::U8(b) => Ok(Value::Bool(a > b)), _ => Err("gt: expected byte".to_string()) }
         }
         "byte_lt_eq" => {
-            let (a, rest) = extract_receiver_byte(&arg, "byte_lt_eq")?;
-            match rest { Value::Byte(b) => Ok(Value::Bool(a <= b)), _ => Err("lt_eq: expected byte".to_string()) }
+            let (a, rest) = extract_receiver_u8(&arg, "byte_lt_eq")?;
+            match rest { Value::U8(b) => Ok(Value::Bool(a <= b)), _ => Err("lt_eq: expected byte".to_string()) }
         }
         "byte_gt_eq" => {
-            let (a, rest) = extract_receiver_byte(&arg, "byte_gt_eq")?;
-            match rest { Value::Byte(b) => Ok(Value::Bool(a >= b)), _ => Err("gt_eq: expected byte".to_string()) }
+            let (a, rest) = extract_receiver_u8(&arg, "byte_gt_eq")?;
+            match rest { Value::U8(b) => Ok(Value::Bool(a >= b)), _ => Err("gt_eq: expected byte".to_string()) }
         }
         "byte_to_string" => {
-            let (a, _) = extract_receiver_byte(&arg, "byte_to_string")?;
+            let (a, _) = extract_receiver_u8(&arg, "byte_to_string")?;
             Ok(Value::Str(format!("0x{:02x}", a)))
         }
 
@@ -2022,16 +2988,24 @@ pub fn build_core_module() -> Value {
 
     // Type constructors for primitive types (using reserved TagIds)
     let type_constructors = [
-        ("Int", TAG_ID_INT),
-        ("Float", TAG_ID_FLOAT),
+        ("I64", TAG_ID_I64),
+        ("F64", TAG_ID_F64),
         ("Bool", TAG_ID_BOOL),
         ("String", TAG_ID_STRING),
         ("Char", TAG_ID_CHAR),
-        ("Byte", TAG_ID_BYTE),
+        ("U8", TAG_ID_U8),
         ("Array", TAG_ID_ARRAY),
         ("Unit", TAG_ID_UNIT),
         ("I32", TAG_ID_I32),
         ("F32", TAG_ID_F32),
+        ("I128", TAG_ID_I128),
+        ("U128", TAG_ID_U128),
+        ("I8", TAG_ID_I8),
+        ("I16", TAG_ID_I16),
+        ("U16", TAG_ID_U16),
+        ("U32", TAG_ID_U32),
+        ("U64", TAG_ID_U64),
+        ("F64", TAG_ID_F64),
     ];
     for (name, id) in &type_constructors {
         fields.push((name.to_string(), Value::TagConstructor {
@@ -2043,7 +3017,9 @@ pub fn build_core_module() -> Value {
     // All builtin functions
     let builtins = [
         "not", "and", "or", "print",
-        "byte", "int", "float", "char", "i32", "f32", "ref_eq", "val_eq", "method_set",
+        "byte", "int", "i64", "float", "char", "i32", "f32", "i128", "u128",
+        "i8", "u8", "i16", "u16", "u32", "u64", "f64",
+        "ref_eq", "val_eq", "method_set",
         // Array method builtins (receiver as first arg)
         "array_get", "array_slice", "array_len", "array_map", "array_filter",
         "array_fold", "array_zip",
@@ -2060,32 +3036,74 @@ pub fn build_core_module() -> Value {
         // Int operator builtins
         "int_add", "int_subtract", "int_times", "int_divided_by", "int_negate",
         "int_eq", "int_not_eq", "int_lt", "int_gt", "int_lt_eq", "int_gt_eq",
-        "int_to_string", "int_to_float", "int_to_byte", "int_to_char",
+        "int_to_string", "int_to_f64", "int_to_u8", "int_to_char",
         // I32 operator builtins
         "i32_add", "i32_subtract", "i32_times", "i32_divided_by", "i32_negate",
         "i32_eq", "i32_not_eq", "i32_lt", "i32_gt", "i32_lt_eq", "i32_gt_eq",
-        "i32_to_string", "i32_to_int", "i32_to_float", "i32_to_f32", "i32_to_byte",
+        "i32_to_string", "i32_to_i64", "i32_to_f64", "i32_to_f32", "i32_to_u8",
+        // I128 operator builtins
+        "i128_add", "i128_subtract", "i128_times", "i128_divided_by", "i128_negate",
+        "i128_eq", "i128_not_eq", "i128_lt", "i128_gt", "i128_lt_eq", "i128_gt_eq",
+        "i128_to_string", "i128_to_i64", "i128_to_i32", "i128_to_u128",
+        // U128 operator builtins
+        "u128_add", "u128_subtract", "u128_times", "u128_divided_by",
+        "u128_eq", "u128_not_eq", "u128_lt", "u128_gt", "u128_lt_eq", "u128_gt_eq",
+        "u128_to_string", "u128_to_i64", "u128_to_i32", "u128_to_i128",
         // F32 operator builtins
         "f32_add", "f32_subtract", "f32_times", "f32_divided_by", "f32_negate",
         "f32_eq", "f32_not_eq", "f32_lt", "f32_gt", "f32_lt_eq", "f32_gt_eq",
-        "f32_to_string", "f32_to_float", "f32_to_int", "f32_to_i32",
+        "f32_to_string", "f32_to_f64", "f32_to_i64", "f32_to_i32",
         "f32_ceil", "f32_floor", "f32_round", "f32_trunc",
         // Float operator builtins
         "float_add", "float_subtract", "float_times", "float_divided_by", "float_negate",
         "float_eq", "float_not_eq", "float_lt", "float_gt", "float_lt_eq", "float_gt_eq",
-        "float_to_string", "float_ceil", "float_floor", "float_round", "float_trunc",
+        "float_to_string", "float_to_i64", "float_ceil", "float_floor", "float_round", "float_trunc",
         // Bool operator builtins
         "bool_eq", "bool_not_eq", "bool_to_string",
         // Char operator builtins
         "char_eq", "char_not_eq", "char_lt", "char_gt", "char_lt_eq", "char_gt_eq",
-        "char_to_string", "char_to_int",
+        "char_to_string", "char_to_i64",
         // Byte operator builtins
         "byte_eq", "byte_not_eq", "byte_lt", "byte_gt", "byte_lt_eq", "byte_gt_eq",
-        "byte_to_string", "byte_to_int",
+        "byte_to_string", "byte_to_i64",
         // Unit operator builtins
         "unit_eq", "unit_not_eq",
         // Cross-type conversions
-        "int_to_i32", "float_to_f32", "byte_to_i32",
+        "int_to_i32", "float_to_f32", "u8_to_i32",
+        "int_to_i128", "int_to_u128", "u8_to_i128", "u8_to_u128",
+        "i32_to_i128", "i32_to_u128",
+        // Cross-type conversions for new types
+        "int_to_i8", "int_to_i16", "int_to_u16",
+        "int_to_u32", "int_to_u64", "int_to_f32", "float_to_f64",
+        // I8 operator builtins
+        "i8_add", "i8_subtract", "i8_times", "i8_divided_by", "i8_negate",
+        "i8_eq", "i8_not_eq", "i8_lt", "i8_gt", "i8_lt_eq", "i8_gt_eq",
+        "i8_to_string", "i8_to_i64",
+        // U8 operator builtins
+        "u8_add", "u8_subtract", "u8_times", "u8_divided_by",
+        "u8_eq", "u8_not_eq", "u8_lt", "u8_gt", "u8_lt_eq", "u8_gt_eq",
+        "u8_to_string", "u8_to_i64",
+        // I16 operator builtins
+        "i16_add", "i16_subtract", "i16_times", "i16_divided_by", "i16_negate",
+        "i16_eq", "i16_not_eq", "i16_lt", "i16_gt", "i16_lt_eq", "i16_gt_eq",
+        "i16_to_string", "i16_to_i64",
+        // U16 operator builtins
+        "u16_add", "u16_subtract", "u16_times", "u16_divided_by",
+        "u16_eq", "u16_not_eq", "u16_lt", "u16_gt", "u16_lt_eq", "u16_gt_eq",
+        "u16_to_string", "u16_to_i64",
+        // U32 operator builtins
+        "u32_add", "u32_subtract", "u32_times", "u32_divided_by",
+        "u32_eq", "u32_not_eq", "u32_lt", "u32_gt", "u32_lt_eq", "u32_gt_eq",
+        "u32_to_string", "u32_to_i64",
+        // U64 operator builtins
+        "u64_add", "u64_subtract", "u64_times", "u64_divided_by",
+        "u64_eq", "u64_not_eq", "u64_lt", "u64_gt", "u64_lt_eq", "u64_gt_eq",
+        "u64_to_string", "u64_to_i64",
+        // F64 operator builtins
+        "f64_add", "f64_subtract", "f64_times", "f64_divided_by", "f64_negate",
+        "f64_eq", "f64_not_eq", "f64_lt", "f64_gt", "f64_lt_eq", "f64_gt_eq",
+        "f64_to_string", "f64_to_f64", "f64_to_i64",
+        "f64_ceil", "f64_floor", "f64_round", "f64_trunc",
     ];
     for name in &builtins {
         fields.push((name.to_string(), Value::BuiltinFn(name.to_string())));

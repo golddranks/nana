@@ -2,8 +2,8 @@ use crate::ast::*;
 use crate::lexer::{StringPart, Token};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-// IDs 0–15 are reserved for built-in primitive types (see value.rs).
-static TAG_COUNTER: AtomicU64 = AtomicU64::new(16);
+// IDs 0–17 are reserved for built-in primitive types (see value.rs).
+static TAG_COUNTER: AtomicU64 = AtomicU64::new(18);
 
 fn next_tag_id() -> u64 {
     TAG_COUNTER.fetch_add(1, Ordering::Relaxed)

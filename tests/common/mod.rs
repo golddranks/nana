@@ -12,22 +12,49 @@ pub fn s(v: &str) -> Value {
     Value::Str(v.to_string())
 }
 pub fn int(v: i64) -> Value {
-    Value::Int(v)
+    Value::I64(v)
 }
 pub fn float(v: f64) -> Value {
-    Value::Float(v)
+    Value::F64(v)
 }
 pub fn ch(v: char) -> Value {
     Value::Char(v)
 }
 pub fn byte(v: u8) -> Value {
-    Value::Byte(v)
+    Value::U8(v)
 }
 pub fn i32_val(v: i32) -> Value {
     Value::I32(v)
 }
 pub fn f32_val(v: f32) -> Value {
     Value::F32(v)
+}
+pub fn i8_val(v: i8) -> Value {
+    Value::I8(v)
+}
+pub fn u8_val(v: u8) -> Value {
+    Value::U8(v)
+}
+pub fn i16_val(v: i16) -> Value {
+    Value::I16(v)
+}
+pub fn u16_val(v: u16) -> Value {
+    Value::U16(v)
+}
+pub fn u32_val(v: u32) -> Value {
+    Value::U32(v)
+}
+pub fn u64_val(v: u64) -> Value {
+    Value::U64(v)
+}
+pub fn f64_val(v: f64) -> Value {
+    Value::F64(v)
+}
+pub fn i128_val(v: i128) -> Value {
+    Value::I128(v)
+}
+pub fn u128_val(v: u128) -> Value {
+    Value::U128(v)
 }
 
 pub const STD_PRELUDE: &str = "\
@@ -44,6 +71,15 @@ let val_eq = std.val_eq; \
 let method_set = std.method_set; \
 let i32 = std.i32; \
 let f32 = std.f32; \
+let i128 = std.i128; \
+let u128 = std.u128; \
+let i8 = std.i8; \
+let u8 = std.u8; \
+let i16 = std.i16; \
+let u16 = std.u16; \
+let u32 = std.u32; \
+let u64 = std.u64; \
+let f64 = std.f64; \
 ";
 
 /// Create a REPL environment with std + operator method sets applied.

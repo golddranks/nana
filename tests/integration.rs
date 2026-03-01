@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 mod common;
 use common::*;
 
@@ -1768,8 +1769,8 @@ fn run_with_mods(source: &str, modules: &[(&str, Value)]) -> Value {
 
 fn math_module() -> Value {
     Value::Struct(vec![
-        ("pi".to_string(), Value::Int(3)),
-        ("e".to_string(), Value::Int(2)),
+        ("pi".to_string(), Value::I64(3)),
+        ("e".to_string(), Value::I64(2)),
     ])
 }
 
@@ -1929,7 +1930,7 @@ fn let_bound_int_literal_coerces() {
     // defaulted to Int), so it can coerce to Byte in byte contexts.
     assert_val("let a = 65; b'A' == a", T);
     assert_val("let a = 4; a + 1", int(5));
-    assert_val("let a = 4; a.to_byte()", byte(4));
+    assert_val("let a = 4; a.to_u8()", byte(4));
 }
 
 #[test]
@@ -1984,15 +1985,15 @@ fn char_type_hint() {
 
 #[test]
 fn int_to_float() {
-    assert_val("42.to_float()", float(42.0));
-    assert_val("(-3).to_float()", float(-3.0));
+    assert_val("42.to_f64()", float(42.0));
+    assert_val("(-3).to_f64()", float(-3.0));
 }
 
 #[test]
 fn int_to_byte() {
-    assert_val("65.to_byte()", byte(65));
-    assert_error("256.to_byte()", "out of range");
-    assert_error("(-1).to_byte()", "out of range");
+    assert_val("65.to_u8()", byte(65));
+    assert_error("256.to_u8()", "out of range");
+    assert_error("(-1).to_u8()", "out of range");
 }
 
 #[test]
@@ -2017,14 +2018,14 @@ fn float_rounding() {
 
 #[test]
 fn char_to_int() {
-    assert_val("'A'.to_int()", int(65));
-    assert_val("'\\0'.to_int()", int(0));
+    assert_val("'A'.to_i64()", int(65));
+    assert_val("'\\0'.to_i64()", int(0));
 }
 
 #[test]
 fn byte_to_int() {
-    assert_val("b'A'.to_int()", int(65));
-    assert_val("b'\\0'.to_int()", int(0));
+    assert_val("b'A'.to_i64()", int(65));
+    assert_val("b'\\0'.to_i64()", int(0));
 }
 
 // ── I32 (32-bit integer) ─────────────────────────────────────────
@@ -2080,11 +2081,11 @@ fn i32_literal_coercion() {
 
 #[test]
 fn i32_conversions() {
-    assert_val("i32(42).to_int()", int(42));
-    assert_val("i32(42).to_float()", float(42.0));
+    assert_val("i32(42).to_i64()", int(42));
+    assert_val("i32(42).to_f64()", float(42.0));
     assert_val("i32(42).to_f32()", f32_val(42.0));
-    assert_val("i32(65).to_byte()", byte(65));
-    assert_error("i32(256).to_byte()", "out of range");
+    assert_val("i32(65).to_u8()", byte(65));
+    assert_error("i32(256).to_u8()", "out of range");
     assert_output("i32(42).to_string()", "\"42i32\"");
 }
 
@@ -2159,8 +2160,8 @@ fn f32_rounding() {
 
 #[test]
 fn f32_conversions() {
-    assert_val("f32(3.0).to_float()", float(3.0));
-    assert_val("f32(3.0).to_int()", int(3));
+    assert_val("f32(3.0).to_f64()", float(3.0));
+    assert_val("f32(3.0).to_i64()", int(3));
     assert_val("f32(3.0).to_i32()", i32_val(3));
     assert_output("f32(3.0).to_string()", "\"3.0f32\"");
 }
@@ -2173,6 +2174,181 @@ fn f32_cross_type_rejection() {
 #[test]
 fn float_to_f32_conversion() {
     assert_val("3.14.to_f32()", f32_val(3.14_f64 as f32));
+}
+
+// ── I128 (128-bit signed integer) ────────────────────────────────
+
+#[test]
+fn i128_type_hint() {
+    assert_val("i128(42)", i128_val(42));
+    assert_val("i128(0)", i128_val(0));
+}
+
+#[test]
+fn i128_type_hint_rejects_wrong_types() {
+    assert_error("i128(3.14)", "type error");
+    assert_error("i128(true)", "type error");
+    assert_error("i128(\"hi\")", "type error");
+}
+
+#[test]
+fn i128_arithmetic() {
+    assert_val("i128(10) + i128(20)", i128_val(30));
+    assert_val("i128(10) - i128(3)", i128_val(7));
+    assert_val("i128(6) * i128(7)", i128_val(42));
+    assert_val("i128(10) / i128(3)", i128_val(3));
+    assert_val("i128(0) - i128(5)", i128_val(-5));
+}
+
+#[test]
+fn i128_overflow() {
+    // Can't express i128::MAX as a literal (lexer only handles i64 range).
+    // Instead, test that checked arithmetic works by chaining multiplications.
+    assert_error(
+        "let big = i128(9223372036854775807); big * big * big",
+        "overflow",
+    );
+}
+
+#[test]
+fn i128_division_by_zero() {
+    assert_error("i128(1) / i128(0)", "division by zero");
+}
+
+#[test]
+fn i128_comparisons() {
+    assert_val("i128(1) == i128(1)", T);
+    assert_val("i128(1) != i128(2)", T);
+    assert_val("i128(1) < i128(2)", T);
+    assert_val("i128(2) > i128(1)", T);
+    assert_val("i128(1) <= i128(1)", T);
+    assert_val("i128(2) >= i128(1)", T);
+}
+
+#[test]
+fn i128_literal_coercion() {
+    assert_val("i128(1) + 2", i128_val(3));
+    assert_val("let a = 42; i128(a)", i128_val(42));
+}
+
+#[test]
+fn i128_conversions() {
+    assert_val("i128(42).to_i64()", int(42));
+    assert_val("i128(42).to_i32()", i32_val(42));
+    assert_val("i128(42).to_u128()", u128_val(42));
+    assert_error("i128(0) - i128(1) >> { n -> n.to_u128() }", "out of range");
+    assert_output("i128(42).to_string()", "\"42i128\"");
+}
+
+#[test]
+fn i128_cross_type_rejection() {
+    assert_error("i128(1) + int(2)", "type error");
+    assert_error("i128(1) + i32(2)", "type error");
+}
+
+#[test]
+fn int_to_i128_conversion() {
+    assert_val("42.to_i128()", i128_val(42));
+    assert_val("(-1).to_i128()", i128_val(-1));
+}
+
+#[test]
+fn byte_to_i128_conversion() {
+    assert_val("b'A'.to_i128()", i128_val(65));
+}
+
+#[test]
+fn i32_to_i128_conversion() {
+    assert_val("i32(42).to_i128()", i128_val(42));
+}
+
+// ── U128 (128-bit unsigned integer) ──────────────────────────────
+
+#[test]
+fn u128_type_hint() {
+    assert_val("u128(42)", u128_val(42));
+    assert_val("u128(0)", u128_val(0));
+}
+
+#[test]
+fn u128_type_hint_rejects_wrong_types() {
+    assert_error("u128(3.14)", "type error");
+    assert_error("u128(true)", "type error");
+}
+
+#[test]
+fn u128_type_hint_rejects_negative() {
+    assert_error("u128(0) - u128(1)", "underflow");
+}
+
+#[test]
+fn u128_arithmetic() {
+    assert_val("u128(10) + u128(20)", u128_val(30));
+    assert_val("u128(10) - u128(3)", u128_val(7));
+    assert_val("u128(6) * u128(7)", u128_val(42));
+    assert_val("u128(10) / u128(3)", u128_val(3));
+}
+
+#[test]
+fn u128_overflow() {
+    // Can't express u128::MAX as a literal (lexer only handles i64 range).
+    // Instead, test that checked arithmetic works by chaining multiplications.
+    assert_error(
+        "let big = u128(9223372036854775807); big * big * big",
+        "overflow",
+    );
+}
+
+#[test]
+fn u128_division_by_zero() {
+    assert_error("u128(1) / u128(0)", "division by zero");
+}
+
+#[test]
+fn u128_comparisons() {
+    assert_val("u128(1) == u128(1)", T);
+    assert_val("u128(1) != u128(2)", T);
+    assert_val("u128(1) < u128(2)", T);
+    assert_val("u128(2) > u128(1)", T);
+    assert_val("u128(1) <= u128(1)", T);
+    assert_val("u128(2) >= u128(1)", T);
+}
+
+#[test]
+fn u128_literal_coercion() {
+    assert_val("u128(1) + 2", u128_val(3));
+    assert_val("let a = 42; u128(a)", u128_val(42));
+}
+
+#[test]
+fn u128_conversions() {
+    assert_val("u128(42).to_i64()", int(42));
+    assert_val("u128(42).to_i32()", i32_val(42));
+    assert_val("u128(42).to_i128()", i128_val(42));
+    assert_output("u128(42).to_string()", "\"42u128\"");
+}
+
+#[test]
+fn u128_cross_type_rejection() {
+    assert_error("u128(1) + int(2)", "type error");
+    assert_error("u128(1) + i128(2)", "type error");
+}
+
+#[test]
+fn int_to_u128_conversion() {
+    assert_val("42.to_u128()", u128_val(42));
+    assert_error("(-1).to_u128()", "out of range");
+}
+
+#[test]
+fn byte_to_u128_conversion() {
+    assert_val("b'A'.to_u128()", u128_val(65));
+}
+
+#[test]
+fn i32_to_u128_conversion() {
+    assert_val("i32(42).to_u128()", u128_val(42));
+    assert_error("i32(0) - i32(1) >> { n -> n.to_u128() }", "out of range");
 }
 
 // ── ref_eq, val_eq, and function comparison ──────────────────────
@@ -2355,7 +2531,7 @@ fn method_set_design_example() {
 fn std_array_methods_via_method_set() {
     assert_std(r#"
         use(std);
-        apply(std.int_methods);
+        apply(std.i64_methods);
         apply(std.array_methods);
         [1, 2, 3].map{ * 2 }
     "#, Value::Array(vec![int(2), int(4), int(6)]));
@@ -2365,7 +2541,7 @@ fn std_array_methods_via_method_set() {
 fn std_array_filter_via_method_set() {
     assert_std(r#"
         use(std);
-        apply(std.int_methods);
+        apply(std.i64_methods);
         apply(std.array_methods);
         [1, 2, 3, 4].filter{ > 2 }
     "#, Value::Array(vec![int(3), int(4)]));
@@ -2375,7 +2551,7 @@ fn std_array_filter_via_method_set() {
 fn std_array_fold_via_method_set() {
     assert_std(r#"
         use(std);
-        apply(std.int_methods);
+        apply(std.i64_methods);
         apply(std.array_methods);
         [1, 2, 3].fold(0, { >> let(acc, elem); acc + elem })
     "#, int(6));
@@ -2628,4 +2804,429 @@ fn infer_ok_block_as_callback() {
 fn infer_ok_branch_called_immediately() {
     // Branch block called immediately — Infer resolved
     assert_val("true >> { true -> 1, false -> 0 }", int(1));
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// I8 tests
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn i8_type_hint() {
+    assert_val("i8(42)", i8_val(42));
+    assert_val("i8(0)", i8_val(0));
+}
+
+#[test]
+fn i8_type_hint_rejects_wrong_types() {
+    assert_error("i8(3.14)", "type error");
+    assert_error("i8(true)", "type error");
+}
+
+#[test]
+fn i8_arithmetic() {
+    assert_val("i8(10) + i8(20)", i8_val(30));
+    assert_val("i8(10) - i8(3)", i8_val(7));
+    assert_val("i8(6) * i8(7)", i8_val(42));
+    assert_val("i8(10) / i8(3)", i8_val(3));
+    assert_val("i8(0) - i8(5)", i8_val(-5));
+}
+
+#[test]
+fn i8_overflow() {
+    assert_error("i8(127) + i8(1)", "overflow");
+}
+
+#[test]
+fn i8_division_by_zero() {
+    assert_error("i8(1) / i8(0)", "division by zero");
+}
+
+#[test]
+fn i8_comparisons() {
+    assert_val("i8(1) == i8(1)", T);
+    assert_val("i8(1) != i8(2)", T);
+    assert_val("i8(1) < i8(2)", T);
+    assert_val("i8(2) > i8(1)", T);
+}
+
+#[test]
+fn i8_literal_coercion() {
+    assert_val("i8(1) + 2", i8_val(3));
+    assert_val("let a = 42; i8(a)", i8_val(42));
+}
+
+#[test]
+fn i8_conversions() {
+    assert_val("i8(42).to_i64()", int(42));
+    assert_output("i8(42).to_string()", "\"42i8\"");
+}
+
+#[test]
+fn i8_cross_type_rejection() {
+    assert_error("i8(1) + int(2)", "type error");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// U8 tests
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn u8_type_hint() {
+    assert_val("u8(42)", u8_val(42));
+    assert_val("u8(0)", u8_val(0));
+}
+
+#[test]
+fn u8_type_hint_rejects_wrong_types() {
+    assert_error("u8(3.14)", "type error");
+    assert_error("u8(true)", "type error");
+}
+
+#[test]
+fn u8_arithmetic() {
+    assert_val("u8(10) + u8(20)", u8_val(30));
+    assert_val("u8(10) - u8(3)", u8_val(7));
+    assert_val("u8(6) * u8(7)", u8_val(42));
+    assert_val("u8(10) / u8(3)", u8_val(3));
+}
+
+#[test]
+fn u8_overflow() {
+    assert_error("u8(255) + u8(1)", "overflow");
+}
+
+#[test]
+fn u8_underflow() {
+    assert_error("u8(0) - u8(1)", "underflow");
+}
+
+#[test]
+fn u8_division_by_zero() {
+    assert_error("u8(1) / u8(0)", "division by zero");
+}
+
+#[test]
+fn u8_comparisons() {
+    assert_val("u8(1) == u8(1)", T);
+    assert_val("u8(1) != u8(2)", T);
+    assert_val("u8(1) < u8(2)", T);
+    assert_val("u8(2) > u8(1)", T);
+}
+
+#[test]
+fn u8_literal_coercion() {
+    assert_val("u8(1) + 2", u8_val(3));
+    assert_val("let a = 42; u8(a)", u8_val(42));
+}
+
+#[test]
+fn u8_conversions() {
+    assert_val("u8(42).to_i64()", int(42));
+    assert_output("u8(42).to_string()", "\"42u8\"");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// I16 tests
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn i16_type_hint() {
+    assert_val("i16(42)", i16_val(42));
+    assert_val("i16(0)", i16_val(0));
+}
+
+#[test]
+fn i16_type_hint_rejects_wrong_types() {
+    assert_error("i16(3.14)", "type error");
+    assert_error("i16(true)", "type error");
+}
+
+#[test]
+fn i16_arithmetic() {
+    assert_val("i16(100) + i16(200)", i16_val(300));
+    assert_val("i16(100) - i16(30)", i16_val(70));
+    assert_val("i16(6) * i16(7)", i16_val(42));
+    assert_val("i16(100) / i16(3)", i16_val(33));
+    assert_val("i16(0) - i16(5)", i16_val(-5));
+}
+
+#[test]
+fn i16_overflow() {
+    assert_error("i16(32767) + i16(1)", "overflow");
+}
+
+#[test]
+fn i16_division_by_zero() {
+    assert_error("i16(1) / i16(0)", "division by zero");
+}
+
+#[test]
+fn i16_comparisons() {
+    assert_val("i16(1) == i16(1)", T);
+    assert_val("i16(1) != i16(2)", T);
+    assert_val("i16(1) < i16(2)", T);
+    assert_val("i16(2) > i16(1)", T);
+}
+
+#[test]
+fn i16_literal_coercion() {
+    assert_val("i16(1) + 2", i16_val(3));
+    assert_val("let a = 42; i16(a)", i16_val(42));
+}
+
+#[test]
+fn i16_conversions() {
+    assert_val("i16(42).to_i64()", int(42));
+    assert_output("i16(42).to_string()", "\"42i16\"");
+}
+
+#[test]
+fn i16_cross_type_rejection() {
+    assert_error("i16(1) + int(2)", "type error");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// U16 tests
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn u16_type_hint() {
+    assert_val("u16(42)", u16_val(42));
+    assert_val("u16(0)", u16_val(0));
+}
+
+#[test]
+fn u16_type_hint_rejects_wrong_types() {
+    assert_error("u16(3.14)", "type error");
+    assert_error("u16(true)", "type error");
+}
+
+#[test]
+fn u16_arithmetic() {
+    assert_val("u16(100) + u16(200)", u16_val(300));
+    assert_val("u16(100) - u16(30)", u16_val(70));
+    assert_val("u16(6) * u16(7)", u16_val(42));
+    assert_val("u16(100) / u16(3)", u16_val(33));
+}
+
+#[test]
+fn u16_overflow() {
+    assert_error("u16(65535) + u16(1)", "overflow");
+}
+
+#[test]
+fn u16_underflow() {
+    assert_error("u16(0) - u16(1)", "underflow");
+}
+
+#[test]
+fn u16_division_by_zero() {
+    assert_error("u16(1) / u16(0)", "division by zero");
+}
+
+#[test]
+fn u16_comparisons() {
+    assert_val("u16(1) == u16(1)", T);
+    assert_val("u16(1) != u16(2)", T);
+    assert_val("u16(1) < u16(2)", T);
+    assert_val("u16(2) > u16(1)", T);
+}
+
+#[test]
+fn u16_literal_coercion() {
+    assert_val("u16(1) + 2", u16_val(3));
+    assert_val("let a = 42; u16(a)", u16_val(42));
+}
+
+#[test]
+fn u16_conversions() {
+    assert_val("u16(42).to_i64()", int(42));
+    assert_output("u16(42).to_string()", "\"42u16\"");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// U32 tests
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn u32_type_hint() {
+    assert_val("u32(42)", u32_val(42));
+    assert_val("u32(0)", u32_val(0));
+}
+
+#[test]
+fn u32_type_hint_rejects_wrong_types() {
+    assert_error("u32(3.14)", "type error");
+    assert_error("u32(true)", "type error");
+}
+
+#[test]
+fn u32_arithmetic() {
+    assert_val("u32(100) + u32(200)", u32_val(300));
+    assert_val("u32(100) - u32(30)", u32_val(70));
+    assert_val("u32(6) * u32(7)", u32_val(42));
+    assert_val("u32(100) / u32(3)", u32_val(33));
+}
+
+#[test]
+fn u32_overflow() {
+    assert_error("u32(4294967295) + u32(1)", "overflow");
+}
+
+#[test]
+fn u32_underflow() {
+    assert_error("u32(0) - u32(1)", "underflow");
+}
+
+#[test]
+fn u32_division_by_zero() {
+    assert_error("u32(1) / u32(0)", "division by zero");
+}
+
+#[test]
+fn u32_comparisons() {
+    assert_val("u32(1) == u32(1)", T);
+    assert_val("u32(1) != u32(2)", T);
+    assert_val("u32(1) < u32(2)", T);
+    assert_val("u32(2) > u32(1)", T);
+}
+
+#[test]
+fn u32_literal_coercion() {
+    assert_val("u32(1) + 2", u32_val(3));
+    assert_val("let a = 42; u32(a)", u32_val(42));
+}
+
+#[test]
+fn u32_conversions() {
+    assert_val("u32(42).to_i64()", int(42));
+    assert_output("u32(42).to_string()", "\"42u32\"");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// U64 tests
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn u64_type_hint() {
+    assert_val("u64(42)", u64_val(42));
+    assert_val("u64(0)", u64_val(0));
+}
+
+#[test]
+fn u64_type_hint_rejects_wrong_types() {
+    assert_error("u64(3.14)", "type error");
+    assert_error("u64(true)", "type error");
+}
+
+#[test]
+fn u64_arithmetic() {
+    assert_val("u64(100) + u64(200)", u64_val(300));
+    assert_val("u64(100) - u64(30)", u64_val(70));
+    assert_val("u64(6) * u64(7)", u64_val(42));
+    assert_val("u64(100) / u64(3)", u64_val(33));
+}
+
+#[test]
+fn u64_overflow() {
+    // u64 max is 2^64 - 1, but nana lexer only handles i64 range
+    // Use large multiplication chain to trigger overflow
+    let input = "let big = u64(4294967295); let huge = big * big; huge * huge";
+    assert_error(input, "overflow");
+}
+
+#[test]
+fn u64_underflow() {
+    assert_error("u64(0) - u64(1)", "underflow");
+}
+
+#[test]
+fn u64_division_by_zero() {
+    assert_error("u64(1) / u64(0)", "division by zero");
+}
+
+#[test]
+fn u64_comparisons() {
+    assert_val("u64(1) == u64(1)", T);
+    assert_val("u64(1) != u64(2)", T);
+    assert_val("u64(1) < u64(2)", T);
+    assert_val("u64(2) > u64(1)", T);
+}
+
+#[test]
+fn u64_literal_coercion() {
+    assert_val("u64(1) + 2", u64_val(3));
+    assert_val("let a = 42; u64(a)", u64_val(42));
+}
+
+#[test]
+fn u64_conversions() {
+    assert_val("u64(42).to_i64()", int(42));
+    assert_output("u64(42).to_string()", "\"42u64\"");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// F64 tests
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn f64_type_hint() {
+    assert_val("f64(3.14)", f64_val(3.14));
+    assert_val("f64(0.0)", f64_val(0.0));
+}
+
+#[test]
+fn f64_type_hint_rejects_wrong_types() {
+    assert_error("f64(true)", "type error");
+    assert_error("f64(\"hi\")", "type error");
+}
+
+#[test]
+fn f64_arithmetic() {
+    assert_val("f64(10.0) + f64(20.0)", f64_val(30.0));
+    assert_val("f64(10.0) - f64(3.0)", f64_val(7.0));
+    assert_val("f64(6.0) * f64(7.0)", f64_val(42.0));
+    assert_val("f64(10.0) / f64(4.0)", f64_val(2.5));
+}
+
+#[test]
+fn f64_division_by_zero() {
+    assert_error("f64(1.0) / f64(0.0)", "division by zero");
+}
+
+#[test]
+fn f64_comparisons() {
+    assert_val("f64(1.0) == f64(1.0)", T);
+    assert_val("f64(1.0) != f64(2.0)", T);
+    assert_val("f64(1.0) < f64(2.0)", T);
+    assert_val("f64(2.0) > f64(1.0)", T);
+}
+
+#[test]
+fn f64_literal_coercion() {
+    assert_val("f64(1.0) + 2.0", f64_val(3.0));
+    assert_val("let a = 1.5; f64(a)", f64_val(1.5));
+}
+
+#[test]
+fn f64_rounding() {
+    assert_val("f64(3.7).ceil()", int(4));
+    assert_val("f64(3.7).floor()", int(3));
+    assert_val("f64(3.5).round()", int(4));
+    assert_val("f64(3.7).trunc()", int(3));
+}
+
+#[test]
+fn f64_conversions() {
+    assert_val("f64(42.5).to_i64()", int(42));
+    assert_val("f64(42.0).to_f32()", f32_val(42.0));
+    assert_output("f64(42.0).to_string()", "\"42.0\"");
+}
+
+#[test]
+fn f64_cross_type_rejection() {
+    // f64 and float are now the same type, so f64 + float works
+    assert_val("f64(1.0) + float(2.0)", float(3.0));
+    // f64 and f32 are still different types
+    assert_error("f64(1.0) + f32(2.0)", "type error");
 }

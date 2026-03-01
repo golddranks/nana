@@ -8,11 +8,11 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 
 | Spec Feature | Status | Notes |
 |---|---|---|
-| `int` (64-bit) | Implemented | Literals, arithmetic, overflow checks |
-| `float` (64-bit) | Implemented | Literals, arithmetic, div-by-zero check |
+| `i64` (64-bit signed integer, default) | Implemented | Literals, arithmetic, overflow checks. `int` is a std-level alias for `i64`. |
+| `f64` (64-bit float, default) | Implemented | Literals, arithmetic, div-by-zero check. `float` is a std-level alias for `f64`. |
 | `bool` (`true`/`false`) | Implemented | |
-| `byte` (literal `b'a'`, `0xF4`) | Implemented | `b'a'` is explicit byte literal; `0xF4` is an int literal that coerces to byte via `IntLiteral` unification |
-| `byte` (plain `4` auto-converts) | Implemented | Type checker validates int literal → `Byte` coercion via constrained Infer; runtime auto-coerces int 0..255 to byte in method dispatch |
+| `u8` (byte, literal `b'a'`, `0xF4`) | Implemented | `b'a'` is explicit byte literal; `0xF4` is an int literal that coerces to u8 via `IntLiteral` unification. `byte` is a std-level alias for `u8`. |
+| `u8` (plain `4` auto-converts) | Implemented | Type checker validates int literal → `U8` coercion via constrained Infer; runtime auto-coerces int 0..255 to u8 in method dispatch |
 | Hex integer literals (`0xFF`) | Implemented | Parsed by lexer; underscore separators supported |
 | Binary integer literals (`0b1010`) | Implemented | Parsed by lexer; underscore separators supported |
 | `char` (Unicode scalar) | Implemented | |
@@ -21,9 +21,17 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | Multi-line strings (`\\` prefix, Zig-style) | Implemented | Lexer joins `\\`-prefixed lines, strips leading whitespace |
 | `as_bytes` (string to byte array) | Implemented | String method |
 | `chars()` (string to codepoints) | Implemented | String method |
-| `i32` (32-bit signed integer) | Implemented | `I32` type with full arithmetic, comparison, and conversion methods; `i32()` type hint constructor |
-| `f32` (32-bit float) | Implemented | `F32` type with full arithmetic, comparison, rounding, and conversion methods; `f32()` type hint constructor |
-| Literal-typed numerics / auto-coercion | Implemented | Int literals create constrained Infer variables that coerce to `Int`, `Byte`, or `I32`; float literals coerce to `Float` or `F32` |
+| `i8` (8-bit signed integer) | Implemented | Full arithmetic (checked), comparison, and conversion methods; `i8()` type hint constructor |
+| `u8` (8-bit unsigned integer) | Implemented | Arithmetic (no negate, checked), comparison, and conversion methods; `u8()` type hint constructor |
+| `i16` (16-bit signed integer) | Implemented | Full arithmetic (checked), comparison, and conversion methods; `i16()` type hint constructor |
+| `u16` (16-bit unsigned integer) | Implemented | Arithmetic (no negate, checked), comparison, and conversion methods; `u16()` type hint constructor |
+| `i32` (32-bit signed integer) | Implemented | Full arithmetic, comparison, and conversion methods; `i32()` type hint constructor |
+| `u32` (32-bit unsigned integer) | Implemented | Arithmetic (no negate, checked), comparison, and conversion methods; `u32()` type hint constructor |
+| `f32` (32-bit float) | Implemented | Full arithmetic, comparison, rounding, and conversion methods; `f32()` type hint constructor |
+| `u64` (64-bit unsigned integer) | Implemented | Arithmetic (no negate, checked), comparison, and conversion methods; `u64()` type hint constructor |
+| `i128` (128-bit signed integer) | Implemented | Full arithmetic, comparison, and conversion methods; `i128()` type hint constructor; checked arithmetic |
+| `u128` (128-bit unsigned integer) | Implemented | Arithmetic (no negate), comparison, and conversion methods; `u128()` type hint constructor; checked arithmetic |
+| Literal-typed numerics / auto-coercion | Implemented | Int literals create constrained Infer variables that coerce to `I64`, `U8`, `I8`, `I16`, `U16`, `I32`, `U32`, `U64`, `I128`, or `U128`; float literals coerce to `F64`, `F32` |
 | Unit `()` | Implemented | |
 | Arrays `[1,2,3]` | Implemented | Creation, concatenation, destructuring |
 | `arr.get(idx)` element access | Implemented | Method on arrays; bounds-checked |
@@ -36,6 +44,23 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | Tags / Sum Types | Implemented | `tag()`, `new_tag`, generative, lexical |
 | No-payload tag wraps `()` | Implemented | `A()` produces `A` with unit payload |
 | Spread on `()` (unit as empty struct) | Implemented | `(...unit_val)` is a no-op |
+
+---
+
+## Numeric Type Architecture
+
+All numeric types are defined at the core level with explicit bit-width names. The `std.nana` standard library provides convenience aliases:
+
+| Alias | Core Type | Notes |
+|---|---|---|
+| `int` | `I64` | Default integer type; `int()` type hint works identically to `i64()` |
+| `float` | `F64` | Default float type; `float()` type hint works identically to `f64()` |
+| `byte` | `U8` | `byte()` type hint works identically to `u8()` |
+
+Method names on numeric types use the canonical bit-width names:
+- `.to_i64()` instead of `.to_int()`
+- `.to_f64()` instead of `.to_float()`
+- `.to_u8()` instead of `.to_byte()`
 
 ---
 
@@ -139,7 +164,7 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | `arr.zip(other)` | Implemented | |
 | `str.byte_len()` | Implemented | Returns byte length |
 | `str.char_len()` | Implemented | Returns Unicode codepoint count |
-| `str.byte_get(idx)` | Implemented | Returns `Byte` at byte offset |
+| `str.byte_get(idx)` | Implemented | Returns `U8` at byte offset |
 | `str.char_get(idx)` | Implemented | Returns `Char` at codepoint offset |
 
 ---
@@ -191,12 +216,19 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | `ends_with` | Implemented | String method; checks suffix |
 | `replace` | Implemented | String method; takes `(pattern, replacement)` struct |
 | `str.slice(range)` | Implemented | String method; byte-based slicing |
-| `byte(n)` | Implemented | Builtin; converts int (0..255) to byte |
-| `int(x)` | Implemented | Builtin; converts float/byte/char/bool to int |
-| `float(x)` | Implemented | Builtin; converts int to float |
+| `byte(n)` / `u8(n)` | Implemented | Type hint; converts int (0..255) to u8 |
+| `int(x)` / `i64(x)` | Implemented | Type hint; identity on i64 values |
+| `float(x)` / `f64(x)` | Implemented | Type hint; identity on f64 values |
 | `char(n)` | Implemented | Builtin; converts int/byte to char (Unicode scalar validation) |
-| `i32(x)` | Implemented | Type hint; I32 → I32 identity, coerces int literals at runtime |
-| `f32(x)` | Implemented | Type hint; F32 → F32 identity, coerces float literals at runtime |
+| `i8(x)` | Implemented | Type hint; I8 identity, coerces int literals at runtime |
+| `i16(x)` | Implemented | Type hint; I16 identity, coerces int literals at runtime |
+| `u16(x)` | Implemented | Type hint; U16 identity, coerces int literals at runtime |
+| `i32(x)` | Implemented | Type hint; I32 identity, coerces int literals at runtime |
+| `u32(x)` | Implemented | Type hint; U32 identity, coerces int literals at runtime |
+| `f32(x)` | Implemented | Type hint; F32 identity, coerces float literals at runtime |
+| `u64(x)` | Implemented | Type hint; U64 identity, coerces int literals at runtime |
+| `i128(x)` | Implemented | Type hint; I128 identity, coerces int literals at runtime |
+| `u128(x)` | Implemented | Type hint; U128 identity, coerces int literals at runtime |
 | `ref_eq(a, b)` | Implemented | Builtin; structural equality for any values including functions |
 
 ---
@@ -241,7 +273,7 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | Spec Feature | Status | Notes |
 |---|---|---|
 | Static typing | Implemented | `types.rs`: forward checker with unification validates all expressions — literals, bindings, calls, method dispatch (2-stage: struct field, method set; method-not-found is a type error), branch arm consistency, struct/array construction, destructuring (struct + array patterns), tagged types, precise builtin param+return types, auto-apply prelude on `use(std)`, union/sum types for tagged branches, method param type checking with error propagation, numeric literal coercion via constrained Infer; `method_set` tracked as `Ty::MethodSetConstructor` (works through field access and aliasing); `ref_eq`/`val_eq` enforce same-type arguments via generics |
-| Type inference | Implemented | Forward propagation + unification + bidirectional inference for block/branch `in` parameters (inline and stored); `Ty::Infer(u64)` inference variables for deferred type resolution (standalone blocks, empty arrays, pattern fallbacks) — each use site gets a unique ID via `TyEnv::fresh_infer()`; constrained Infer variables for numeric literals (`InferConstraint::IntLiteral` coerces to `Int`/`Byte`/`I32`, `InferConstraint::FloatLiteral` coerces to `Float`/`F32`); generic type variables (`Ty::Generic(id)`) for parametric methods — type information flows through `map`, `filter`, `fold`, `zip`, `get`, `slice`, `ref_eq`, `val_eq`, etc. via `unify_with_generics` + `substitute_generics`; tagged value method dispatch; built-in comparison fallback for types without method sets; rest pattern struct type propagation; tag payload resolution in branch patterns; literal defaulting in bindings; no annotation syntax needed (fully inferred) |
+| Type inference | Implemented | Forward propagation + unification + bidirectional inference for block/branch `in` parameters (inline and stored); `Ty::Infer(u64)` inference variables for deferred type resolution (standalone blocks, empty arrays, pattern fallbacks) — each use site gets a unique ID via `TyEnv::fresh_infer()`; constrained Infer variables for numeric literals (`InferConstraint::IntLiteral` coerces to `I64`/`U8`/`I8`/`I16`/`U16`/`I32`/`U32`/`U64`/`I128`/`U128`, `InferConstraint::FloatLiteral` coerces to `F64`/`F32`); generic type variables (`Ty::Generic(id)`) for parametric methods — type information flows through `map`, `filter`, `fold`, `zip`, `get`, `slice`, `ref_eq`, `val_eq`, etc. via `unify_with_generics` + `substitute_generics`; tagged value method dispatch; built-in comparison fallback for types without method sets; rest pattern struct type propagation; tag payload resolution in branch patterns; literal defaulting in bindings; no annotation syntax needed (fully inferred) |
 | Generic array methods | Implemented | Array method signatures use `Generic(0)`/`Generic(1)` type variables: `get: Array(T)→T`, `map: Array(T)×(T→U)→Array(U)`, `filter: Array(T)×(T→Bool)→Array(T)`, `fold: Array(T)×(U, (acc:U,elem:T)→U)→U`, `zip: Array(T)×Array(U)→Array((T,U))`, etc. |
 | Occurs check | Implemented | Totality maintained by disallowing recursion syntactically; without recursive bindings or Y-combinator, infinite types cannot be constructed, so the occurs check is trivially satisfied |
 | Compilation = evaluation | Implemented | Single pass |

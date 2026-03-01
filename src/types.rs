@@ -12,22 +12,30 @@ use std::collections::HashMap;
 use crate::ast::{ArrayPat, BranchBinding, Pattern};
 use crate::mir::{Mir, MirBranchPattern, MirKind};
 use crate::value::{
-    TAG_ID_ARRAY, TAG_ID_BOOL, TAG_ID_BYTE, TAG_ID_CHAR, TAG_ID_F32, TAG_ID_FLOAT, TAG_ID_I32,
-    TAG_ID_INT, TAG_ID_STRING, TAG_ID_UNIT, TagId,
+    TAG_ID_ARRAY, TAG_ID_BOOL, TAG_ID_CHAR, TAG_ID_F32, TAG_ID_F64,
+    TAG_ID_I128, TAG_ID_I16, TAG_ID_I32, TAG_ID_I64, TAG_ID_I8, TAG_ID_STRING, TAG_ID_U128,
+    TAG_ID_U16, TAG_ID_U32, TAG_ID_U64, TAG_ID_U8, TAG_ID_UNIT, TagId,
 };
 
 // ── Types ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
-    Int,
-    Float,
+    I64,
+    F64,
     Bool,
     String,
     Char,
-    Byte,
+    U8,
+    I8,
+    I16,
+    U16,
     I32,
+    U32,
     F32,
+    U64,
+    I128,
+    U128,
     Unit,
     Array(Box<Ty>),
     Struct(Vec<(std::string::String, Ty)>),
@@ -145,14 +153,21 @@ impl Ty {
 pub fn ty_from_value(val: &crate::value::Value, env: &mut TyEnv) -> Ty {
     use crate::value::Value;
     match val {
-        Value::Int(_) => Ty::Int,
-        Value::Float(_) => Ty::Float,
+        Value::I64(_) => Ty::I64,
+        Value::F64(_) => Ty::F64,
         Value::Bool(_) => Ty::Bool,
         Value::Str(_) => Ty::String,
         Value::Char(_) => Ty::Char,
-        Value::Byte(_) => Ty::Byte,
+        Value::U8(_) => Ty::U8,
+        Value::I8(_) => Ty::I8,
+        Value::I16(_) => Ty::I16,
+        Value::U16(_) => Ty::U16,
         Value::I32(_) => Ty::I32,
+        Value::U32(_) => Ty::U32,
         Value::F32(_) => Ty::F32,
+        Value::U64(_) => Ty::U64,
+        Value::I128(_) => Ty::I128,
+        Value::U128(_) => Ty::U128,
         Value::Unit => Ty::Unit,
         Value::Array(elems) => {
             if let Some(first) = elems.first() {
@@ -287,8 +302,8 @@ impl TyEnv {
                     return self.default_constrained_infer(&self.resolve(resolved));
                 }
                 match self.infer_constraint(*id) {
-                    Some(InferConstraint::IntLiteral) => Ty::Int,
-                    Some(InferConstraint::FloatLiteral) => Ty::Float,
+                    Some(InferConstraint::IntLiteral) => Ty::I64,
+                    Some(InferConstraint::FloatLiteral) => Ty::F64,
                     None => ty.clone(),
                 }
             }
@@ -403,20 +418,27 @@ impl TyEnv {
 /// Map a primitive Ty to its built-in TagId for method set dispatch.
 fn ty_to_tag_id(ty: &Ty, env: &TyEnv) -> Option<TagId> {
     match ty {
-        Ty::Int => Some(TAG_ID_INT),
-        Ty::Float => Some(TAG_ID_FLOAT),
+        Ty::I64 => Some(TAG_ID_I64),
+        Ty::F64 => Some(TAG_ID_F64),
         Ty::Bool => Some(TAG_ID_BOOL),
         Ty::String => Some(TAG_ID_STRING),
         Ty::Char => Some(TAG_ID_CHAR),
-        Ty::Byte => Some(TAG_ID_BYTE),
+        Ty::U8 => Some(TAG_ID_U8),
+        Ty::I8 => Some(TAG_ID_I8),
+        Ty::I16 => Some(TAG_ID_I16),
+        Ty::U16 => Some(TAG_ID_U16),
         Ty::I32 => Some(TAG_ID_I32),
+        Ty::U32 => Some(TAG_ID_U32),
         Ty::F32 => Some(TAG_ID_F32),
+        Ty::U64 => Some(TAG_ID_U64),
+        Ty::I128 => Some(TAG_ID_I128),
+        Ty::U128 => Some(TAG_ID_U128),
         Ty::Array(_) => Some(TAG_ID_ARRAY),
         Ty::Unit => Some(TAG_ID_UNIT),
         Ty::Tagged { tag_id, .. } => Some(*tag_id),
         Ty::Infer(id) => match env.infer_constraint(*id) {
-            Some(InferConstraint::IntLiteral) => Some(TAG_ID_INT),
-            Some(InferConstraint::FloatLiteral) => Some(TAG_ID_FLOAT),
+            Some(InferConstraint::IntLiteral) => Some(TAG_ID_I64),
+            Some(InferConstraint::FloatLiteral) => Some(TAG_ID_F64),
             None => None,
         },
         _ => None,
@@ -454,16 +476,23 @@ pub fn core_module_type() -> Ty {
 
     // Type constructors (same order as build_core_module)
     let type_constructors: &[(&str, TagId)] = &[
-        ("Int", TAG_ID_INT),
-        ("Float", TAG_ID_FLOAT),
+        ("I64", TAG_ID_I64),
+        ("F64", TAG_ID_F64),
         ("Bool", TAG_ID_BOOL),
         ("String", TAG_ID_STRING),
         ("Char", TAG_ID_CHAR),
-        ("Byte", TAG_ID_BYTE),
+        ("U8", TAG_ID_U8),
         ("Array", TAG_ID_ARRAY),
         ("Unit", TAG_ID_UNIT),
+        ("I8", TAG_ID_I8),
+        ("I16", TAG_ID_I16),
+        ("U16", TAG_ID_U16),
         ("I32", TAG_ID_I32),
+        ("U32", TAG_ID_U32),
         ("F32", TAG_ID_F32),
+        ("U64", TAG_ID_U64),
+        ("I128", TAG_ID_I128),
+        ("U128", TAG_ID_U128),
     ];
     for (name, id) in type_constructors {
         fields.push((name.to_string(), Ty::TagConstructor(*id)));
@@ -509,12 +538,22 @@ pub fn core_module_type() -> Ty {
     fields.push(("print".into(), f(Ty::String, Ty::Unit)));
 
     // Type hints — identity functions that assert the type at compile time
-    fields.push(("byte".into(), f(Ty::Byte, Ty::Byte)));
-    fields.push(("int".into(), f(Ty::Int, Ty::Int)));
-    fields.push(("float".into(), f(Ty::Float, Ty::Float)));
+    fields.push(("byte".into(), f(Ty::U8, Ty::U8)));
+    fields.push(("int".into(), f(Ty::I64, Ty::I64)));
+    fields.push(("i64".into(), f(Ty::I64, Ty::I64)));
+    fields.push(("float".into(), f(Ty::F64, Ty::F64)));
     fields.push(("char".into(), f(Ty::Char, Ty::Char)));
+    fields.push(("i8".into(), f(Ty::I8, Ty::I8)));
+    fields.push(("u8".into(), f(Ty::U8, Ty::U8)));
+    fields.push(("i16".into(), f(Ty::I16, Ty::I16)));
+    fields.push(("u16".into(), f(Ty::U16, Ty::U16)));
     fields.push(("i32".into(), f(Ty::I32, Ty::I32)));
+    fields.push(("u32".into(), f(Ty::U32, Ty::U32)));
     fields.push(("f32".into(), f(Ty::F32, Ty::F32)));
+    fields.push(("u64".into(), f(Ty::U64, Ty::U64)));
+    fields.push(("f64".into(), f(Ty::F64, Ty::F64)));
+    fields.push(("i128".into(), f(Ty::I128, Ty::I128)));
+    fields.push(("u128".into(), f(Ty::U128, Ty::U128)));
 
     // Equality builtins (standalone, generic — both args must be same type)
     let g0 = Ty::Generic(0);
@@ -533,18 +572,18 @@ pub fn core_module_type() -> Ty {
     // array_get: Array(G0) × Int → G0
     fields.push((
         "array_get".into(),
-        binop2(arr_g0.clone(), Ty::Int, g0.clone()),
+        binop2(arr_g0.clone(), Ty::I64, g0.clone()),
     ));
     // array_slice: Array(G0) × Range → Array(G0)
     // After prepend: (0=Array(G0), start=Int, end=Int)
     let slice_param = Ty::Struct(vec![
         ("0".into(), arr_g0.clone()),
-        ("start".into(), Ty::Int),
-        ("end".into(), Ty::Int),
+        ("start".into(), Ty::I64),
+        ("end".into(), Ty::I64),
     ]);
     fields.push(("array_slice".into(), f(slice_param, arr_g0.clone())));
     // array_len: Array(G0) → Int
-    fields.push(("array_len".into(), unary(arr_g0.clone(), Ty::Int)));
+    fields.push(("array_len".into(), unary(arr_g0.clone(), Ty::I64)));
     // array_map: Array(G0) × (G0 → G1) → Array(G1)
     let map_cb = Ty::Fn {
         param: Box::new(g0.clone()),
@@ -595,19 +634,19 @@ pub fn core_module_type() -> Ty {
     fields.push(("array_not_eq".into(), binop(arr_g0.clone(), Ty::Bool)));
 
     // String methods
-    fields.push(("string_byte_len".into(), unary(Ty::String, Ty::Int)));
-    fields.push(("string_char_len".into(), unary(Ty::String, Ty::Int)));
+    fields.push(("string_byte_len".into(), unary(Ty::String, Ty::I64)));
+    fields.push(("string_char_len".into(), unary(Ty::String, Ty::I64)));
     fields.push((
         "string_byte_get".into(),
-        binop2(Ty::String, Ty::Int, Ty::Byte),
+        binop2(Ty::String, Ty::I64, Ty::U8),
     ));
     fields.push((
         "string_char_get".into(),
-        binop2(Ty::String, Ty::Int, Ty::Char),
+        binop2(Ty::String, Ty::I64, Ty::Char),
     ));
     fields.push((
         "string_as_bytes".into(),
-        unary(Ty::String, Ty::Array(Box::new(Ty::Byte))),
+        unary(Ty::String, Ty::Array(Box::new(Ty::U8))),
     ));
     fields.push((
         "string_chars".into(),
@@ -630,8 +669,8 @@ pub fn core_module_type() -> Ty {
     // After prepend: (0=String, start=Int, end=Int)
     let string_slice_param = Ty::Struct(vec![
         ("0".into(), Ty::String),
-        ("start".into(), Ty::Int),
-        ("end".into(), Ty::Int),
+        ("start".into(), Ty::I64),
+        ("end".into(), Ty::I64),
     ]);
     fields.push(("string_slice".into(), f(string_slice_param, Ty::String)));
     fields.push(("string_starts_with".into(), binop(Ty::String, Ty::Bool)));
@@ -654,41 +693,51 @@ pub fn core_module_type() -> Ty {
     fields.push(("string_to_string".into(), unary(Ty::String, Ty::String)));
 
     // Int methods — arithmetic is Int × Int → Int (no cross-type promotion)
-    fields.push(("int_add".into(), binop(Ty::Int, Ty::Int)));
-    fields.push(("int_subtract".into(), binop(Ty::Int, Ty::Int)));
-    fields.push(("int_times".into(), binop(Ty::Int, Ty::Int)));
-    fields.push(("int_divided_by".into(), binop(Ty::Int, Ty::Int)));
-    fields.push(("int_negate".into(), unary(Ty::Int, Ty::Int)));
-    fields.push(("int_eq".into(), binop(Ty::Int, Ty::Bool)));
-    fields.push(("int_not_eq".into(), binop(Ty::Int, Ty::Bool)));
-    fields.push(("int_lt".into(), binop(Ty::Int, Ty::Bool)));
-    fields.push(("int_gt".into(), binop(Ty::Int, Ty::Bool)));
-    fields.push(("int_lt_eq".into(), binop(Ty::Int, Ty::Bool)));
-    fields.push(("int_gt_eq".into(), binop(Ty::Int, Ty::Bool)));
-    fields.push(("int_to_string".into(), unary(Ty::Int, Ty::String)));
-    fields.push(("int_to_float".into(), unary(Ty::Int, Ty::Float)));
-    fields.push(("int_to_byte".into(), unary(Ty::Int, Ty::Byte)));
-    fields.push(("int_to_char".into(), unary(Ty::Int, Ty::Char)));
-    fields.push(("int_to_i32".into(), unary(Ty::Int, Ty::I32)));
+    fields.push(("int_add".into(), binop(Ty::I64, Ty::I64)));
+    fields.push(("int_subtract".into(), binop(Ty::I64, Ty::I64)));
+    fields.push(("int_times".into(), binop(Ty::I64, Ty::I64)));
+    fields.push(("int_divided_by".into(), binop(Ty::I64, Ty::I64)));
+    fields.push(("int_negate".into(), unary(Ty::I64, Ty::I64)));
+    fields.push(("int_eq".into(), binop(Ty::I64, Ty::Bool)));
+    fields.push(("int_not_eq".into(), binop(Ty::I64, Ty::Bool)));
+    fields.push(("int_lt".into(), binop(Ty::I64, Ty::Bool)));
+    fields.push(("int_gt".into(), binop(Ty::I64, Ty::Bool)));
+    fields.push(("int_lt_eq".into(), binop(Ty::I64, Ty::Bool)));
+    fields.push(("int_gt_eq".into(), binop(Ty::I64, Ty::Bool)));
+    fields.push(("int_to_string".into(), unary(Ty::I64, Ty::String)));
+    fields.push(("int_to_char".into(), unary(Ty::I64, Ty::Char)));
+    fields.push(("int_to_i32".into(), unary(Ty::I64, Ty::I32)));
+    fields.push(("int_to_i8".into(), unary(Ty::I64, Ty::I8)));
+    fields.push(("int_to_u8".into(), unary(Ty::I64, Ty::U8)));
+    fields.push(("int_to_i16".into(), unary(Ty::I64, Ty::I16)));
+    fields.push(("int_to_u16".into(), unary(Ty::I64, Ty::U16)));
+    fields.push(("int_to_u32".into(), unary(Ty::I64, Ty::U32)));
+    fields.push(("int_to_u64".into(), unary(Ty::I64, Ty::U64)));
+    fields.push(("int_to_f64".into(), unary(Ty::I64, Ty::F64)));
+    fields.push(("int_to_f32".into(), unary(Ty::I64, Ty::F32)));
+    fields.push(("int_to_i128".into(), unary(Ty::I64, Ty::I128)));
+    fields.push(("int_to_u128".into(), unary(Ty::I64, Ty::U128)));
 
     // Float methods — arithmetic is Float × Float → Float (no cross-type promotion)
-    fields.push(("float_add".into(), binop(Ty::Float, Ty::Float)));
-    fields.push(("float_subtract".into(), binop(Ty::Float, Ty::Float)));
-    fields.push(("float_times".into(), binop(Ty::Float, Ty::Float)));
-    fields.push(("float_divided_by".into(), binop(Ty::Float, Ty::Float)));
-    fields.push(("float_negate".into(), unary(Ty::Float, Ty::Float)));
-    fields.push(("float_eq".into(), binop(Ty::Float, Ty::Bool)));
-    fields.push(("float_not_eq".into(), binop(Ty::Float, Ty::Bool)));
-    fields.push(("float_lt".into(), binop(Ty::Float, Ty::Bool)));
-    fields.push(("float_gt".into(), binop(Ty::Float, Ty::Bool)));
-    fields.push(("float_lt_eq".into(), binop(Ty::Float, Ty::Bool)));
-    fields.push(("float_gt_eq".into(), binop(Ty::Float, Ty::Bool)));
-    fields.push(("float_to_string".into(), unary(Ty::Float, Ty::String)));
-    fields.push(("float_ceil".into(), unary(Ty::Float, Ty::Int)));
-    fields.push(("float_floor".into(), unary(Ty::Float, Ty::Int)));
-    fields.push(("float_round".into(), unary(Ty::Float, Ty::Int)));
-    fields.push(("float_trunc".into(), unary(Ty::Float, Ty::Int)));
-    fields.push(("float_to_f32".into(), unary(Ty::Float, Ty::F32)));
+    fields.push(("float_add".into(), binop(Ty::F64, Ty::F64)));
+    fields.push(("float_subtract".into(), binop(Ty::F64, Ty::F64)));
+    fields.push(("float_times".into(), binop(Ty::F64, Ty::F64)));
+    fields.push(("float_divided_by".into(), binop(Ty::F64, Ty::F64)));
+    fields.push(("float_negate".into(), unary(Ty::F64, Ty::F64)));
+    fields.push(("float_eq".into(), binop(Ty::F64, Ty::Bool)));
+    fields.push(("float_not_eq".into(), binop(Ty::F64, Ty::Bool)));
+    fields.push(("float_lt".into(), binop(Ty::F64, Ty::Bool)));
+    fields.push(("float_gt".into(), binop(Ty::F64, Ty::Bool)));
+    fields.push(("float_lt_eq".into(), binop(Ty::F64, Ty::Bool)));
+    fields.push(("float_gt_eq".into(), binop(Ty::F64, Ty::Bool)));
+    fields.push(("float_to_string".into(), unary(Ty::F64, Ty::String)));
+    fields.push(("float_ceil".into(), unary(Ty::F64, Ty::I64)));
+    fields.push(("float_floor".into(), unary(Ty::F64, Ty::I64)));
+    fields.push(("float_round".into(), unary(Ty::F64, Ty::I64)));
+    fields.push(("float_trunc".into(), unary(Ty::F64, Ty::I64)));
+    fields.push(("float_to_i64".into(), unary(Ty::F64, Ty::I64)));
+    fields.push(("float_to_f32".into(), unary(Ty::F64, Ty::F32)));
+    fields.push(("float_to_f64".into(), unary(Ty::F64, Ty::F64)));
 
     // Bool methods
     fields.push(("bool_eq".into(), binop(Ty::Bool, Ty::Bool)));
@@ -703,18 +752,20 @@ pub fn core_module_type() -> Ty {
     fields.push(("char_lt_eq".into(), binop(Ty::Char, Ty::Bool)));
     fields.push(("char_gt_eq".into(), binop(Ty::Char, Ty::Bool)));
     fields.push(("char_to_string".into(), unary(Ty::Char, Ty::String)));
-    fields.push(("char_to_int".into(), unary(Ty::Char, Ty::Int)));
+    fields.push(("char_to_i64".into(), unary(Ty::Char, Ty::I64)));
 
     // Byte methods
-    fields.push(("byte_eq".into(), binop(Ty::Byte, Ty::Bool)));
-    fields.push(("byte_not_eq".into(), binop(Ty::Byte, Ty::Bool)));
-    fields.push(("byte_lt".into(), binop(Ty::Byte, Ty::Bool)));
-    fields.push(("byte_gt".into(), binop(Ty::Byte, Ty::Bool)));
-    fields.push(("byte_lt_eq".into(), binop(Ty::Byte, Ty::Bool)));
-    fields.push(("byte_gt_eq".into(), binop(Ty::Byte, Ty::Bool)));
-    fields.push(("byte_to_string".into(), unary(Ty::Byte, Ty::String)));
-    fields.push(("byte_to_int".into(), unary(Ty::Byte, Ty::Int)));
-    fields.push(("byte_to_i32".into(), unary(Ty::Byte, Ty::I32)));
+    fields.push(("byte_eq".into(), binop(Ty::U8, Ty::Bool)));
+    fields.push(("byte_not_eq".into(), binop(Ty::U8, Ty::Bool)));
+    fields.push(("byte_lt".into(), binop(Ty::U8, Ty::Bool)));
+    fields.push(("byte_gt".into(), binop(Ty::U8, Ty::Bool)));
+    fields.push(("byte_lt_eq".into(), binop(Ty::U8, Ty::Bool)));
+    fields.push(("byte_gt_eq".into(), binop(Ty::U8, Ty::Bool)));
+    fields.push(("byte_to_string".into(), unary(Ty::U8, Ty::String)));
+    fields.push(("byte_to_i64".into(), unary(Ty::U8, Ty::I64)));
+    fields.push(("u8_to_i32".into(), unary(Ty::U8, Ty::I32)));
+    fields.push(("u8_to_i128".into(), unary(Ty::U8, Ty::I128)));
+    fields.push(("u8_to_u128".into(), unary(Ty::U8, Ty::U128)));
 
     // I32 methods — arithmetic is I32 × I32 → I32
     fields.push(("i32_add".into(), binop(Ty::I32, Ty::I32)));
@@ -729,10 +780,12 @@ pub fn core_module_type() -> Ty {
     fields.push(("i32_lt_eq".into(), binop(Ty::I32, Ty::Bool)));
     fields.push(("i32_gt_eq".into(), binop(Ty::I32, Ty::Bool)));
     fields.push(("i32_to_string".into(), unary(Ty::I32, Ty::String)));
-    fields.push(("i32_to_int".into(), unary(Ty::I32, Ty::Int)));
-    fields.push(("i32_to_float".into(), unary(Ty::I32, Ty::Float)));
+    fields.push(("i32_to_i64".into(), unary(Ty::I32, Ty::I64)));
+    fields.push(("i32_to_f64".into(), unary(Ty::I32, Ty::F64)));
     fields.push(("i32_to_f32".into(), unary(Ty::I32, Ty::F32)));
-    fields.push(("i32_to_byte".into(), unary(Ty::I32, Ty::Byte)));
+    fields.push(("i32_to_u8".into(), unary(Ty::I32, Ty::U8)));
+    fields.push(("i32_to_i128".into(), unary(Ty::I32, Ty::I128)));
+    fields.push(("i32_to_u128".into(), unary(Ty::I32, Ty::U128)));
 
     // F32 methods — arithmetic is F32 × F32 → F32
     fields.push(("f32_add".into(), binop(Ty::F32, Ty::F32)));
@@ -747,13 +800,152 @@ pub fn core_module_type() -> Ty {
     fields.push(("f32_lt_eq".into(), binop(Ty::F32, Ty::Bool)));
     fields.push(("f32_gt_eq".into(), binop(Ty::F32, Ty::Bool)));
     fields.push(("f32_to_string".into(), unary(Ty::F32, Ty::String)));
-    fields.push(("f32_to_float".into(), unary(Ty::F32, Ty::Float)));
-    fields.push(("f32_to_int".into(), unary(Ty::F32, Ty::Int)));
+    fields.push(("f32_to_f64".into(), unary(Ty::F32, Ty::F64)));
+    fields.push(("f32_to_i64".into(), unary(Ty::F32, Ty::I64)));
     fields.push(("f32_to_i32".into(), unary(Ty::F32, Ty::I32)));
     fields.push(("f32_ceil".into(), unary(Ty::F32, Ty::I32)));
     fields.push(("f32_floor".into(), unary(Ty::F32, Ty::I32)));
     fields.push(("f32_round".into(), unary(Ty::F32, Ty::I32)));
     fields.push(("f32_trunc".into(), unary(Ty::F32, Ty::I32)));
+
+    // I8 methods
+    fields.push(("i8_add".into(), binop(Ty::I8, Ty::I8)));
+    fields.push(("i8_subtract".into(), binop(Ty::I8, Ty::I8)));
+    fields.push(("i8_times".into(), binop(Ty::I8, Ty::I8)));
+    fields.push(("i8_divided_by".into(), binop(Ty::I8, Ty::I8)));
+    fields.push(("i8_negate".into(), unary(Ty::I8, Ty::I8)));
+    fields.push(("i8_eq".into(), binop(Ty::I8, Ty::Bool)));
+    fields.push(("i8_not_eq".into(), binop(Ty::I8, Ty::Bool)));
+    fields.push(("i8_lt".into(), binop(Ty::I8, Ty::Bool)));
+    fields.push(("i8_gt".into(), binop(Ty::I8, Ty::Bool)));
+    fields.push(("i8_lt_eq".into(), binop(Ty::I8, Ty::Bool)));
+    fields.push(("i8_gt_eq".into(), binop(Ty::I8, Ty::Bool)));
+    fields.push(("i8_to_string".into(), unary(Ty::I8, Ty::String)));
+    fields.push(("i8_to_i64".into(), unary(Ty::I8, Ty::I64)));
+
+    // U8 methods
+    fields.push(("u8_add".into(), binop(Ty::U8, Ty::U8)));
+    fields.push(("u8_subtract".into(), binop(Ty::U8, Ty::U8)));
+    fields.push(("u8_times".into(), binop(Ty::U8, Ty::U8)));
+    fields.push(("u8_divided_by".into(), binop(Ty::U8, Ty::U8)));
+    fields.push(("u8_eq".into(), binop(Ty::U8, Ty::Bool)));
+    fields.push(("u8_not_eq".into(), binop(Ty::U8, Ty::Bool)));
+    fields.push(("u8_lt".into(), binop(Ty::U8, Ty::Bool)));
+    fields.push(("u8_gt".into(), binop(Ty::U8, Ty::Bool)));
+    fields.push(("u8_lt_eq".into(), binop(Ty::U8, Ty::Bool)));
+    fields.push(("u8_gt_eq".into(), binop(Ty::U8, Ty::Bool)));
+    fields.push(("u8_to_string".into(), unary(Ty::U8, Ty::String)));
+    fields.push(("u8_to_i64".into(), unary(Ty::U8, Ty::I64)));
+
+    // I16 methods
+    fields.push(("i16_add".into(), binop(Ty::I16, Ty::I16)));
+    fields.push(("i16_subtract".into(), binop(Ty::I16, Ty::I16)));
+    fields.push(("i16_times".into(), binop(Ty::I16, Ty::I16)));
+    fields.push(("i16_divided_by".into(), binop(Ty::I16, Ty::I16)));
+    fields.push(("i16_negate".into(), unary(Ty::I16, Ty::I16)));
+    fields.push(("i16_eq".into(), binop(Ty::I16, Ty::Bool)));
+    fields.push(("i16_not_eq".into(), binop(Ty::I16, Ty::Bool)));
+    fields.push(("i16_lt".into(), binop(Ty::I16, Ty::Bool)));
+    fields.push(("i16_gt".into(), binop(Ty::I16, Ty::Bool)));
+    fields.push(("i16_lt_eq".into(), binop(Ty::I16, Ty::Bool)));
+    fields.push(("i16_gt_eq".into(), binop(Ty::I16, Ty::Bool)));
+    fields.push(("i16_to_string".into(), unary(Ty::I16, Ty::String)));
+    fields.push(("i16_to_i64".into(), unary(Ty::I16, Ty::I64)));
+
+    // U16 methods
+    fields.push(("u16_add".into(), binop(Ty::U16, Ty::U16)));
+    fields.push(("u16_subtract".into(), binop(Ty::U16, Ty::U16)));
+    fields.push(("u16_times".into(), binop(Ty::U16, Ty::U16)));
+    fields.push(("u16_divided_by".into(), binop(Ty::U16, Ty::U16)));
+    fields.push(("u16_eq".into(), binop(Ty::U16, Ty::Bool)));
+    fields.push(("u16_not_eq".into(), binop(Ty::U16, Ty::Bool)));
+    fields.push(("u16_lt".into(), binop(Ty::U16, Ty::Bool)));
+    fields.push(("u16_gt".into(), binop(Ty::U16, Ty::Bool)));
+    fields.push(("u16_lt_eq".into(), binop(Ty::U16, Ty::Bool)));
+    fields.push(("u16_gt_eq".into(), binop(Ty::U16, Ty::Bool)));
+    fields.push(("u16_to_string".into(), unary(Ty::U16, Ty::String)));
+    fields.push(("u16_to_i64".into(), unary(Ty::U16, Ty::I64)));
+
+    // U32 methods
+    fields.push(("u32_add".into(), binop(Ty::U32, Ty::U32)));
+    fields.push(("u32_subtract".into(), binop(Ty::U32, Ty::U32)));
+    fields.push(("u32_times".into(), binop(Ty::U32, Ty::U32)));
+    fields.push(("u32_divided_by".into(), binop(Ty::U32, Ty::U32)));
+    fields.push(("u32_eq".into(), binop(Ty::U32, Ty::Bool)));
+    fields.push(("u32_not_eq".into(), binop(Ty::U32, Ty::Bool)));
+    fields.push(("u32_lt".into(), binop(Ty::U32, Ty::Bool)));
+    fields.push(("u32_gt".into(), binop(Ty::U32, Ty::Bool)));
+    fields.push(("u32_lt_eq".into(), binop(Ty::U32, Ty::Bool)));
+    fields.push(("u32_gt_eq".into(), binop(Ty::U32, Ty::Bool)));
+    fields.push(("u32_to_string".into(), unary(Ty::U32, Ty::String)));
+    fields.push(("u32_to_i64".into(), unary(Ty::U32, Ty::I64)));
+
+    // U64 methods
+    fields.push(("u64_add".into(), binop(Ty::U64, Ty::U64)));
+    fields.push(("u64_subtract".into(), binop(Ty::U64, Ty::U64)));
+    fields.push(("u64_times".into(), binop(Ty::U64, Ty::U64)));
+    fields.push(("u64_divided_by".into(), binop(Ty::U64, Ty::U64)));
+    fields.push(("u64_eq".into(), binop(Ty::U64, Ty::Bool)));
+    fields.push(("u64_not_eq".into(), binop(Ty::U64, Ty::Bool)));
+    fields.push(("u64_lt".into(), binop(Ty::U64, Ty::Bool)));
+    fields.push(("u64_gt".into(), binop(Ty::U64, Ty::Bool)));
+    fields.push(("u64_lt_eq".into(), binop(Ty::U64, Ty::Bool)));
+    fields.push(("u64_gt_eq".into(), binop(Ty::U64, Ty::Bool)));
+    fields.push(("u64_to_string".into(), unary(Ty::U64, Ty::String)));
+    fields.push(("u64_to_i64".into(), unary(Ty::U64, Ty::I64)));
+
+    // F64 methods
+    fields.push(("f64_add".into(), binop(Ty::F64, Ty::F64)));
+    fields.push(("f64_subtract".into(), binop(Ty::F64, Ty::F64)));
+    fields.push(("f64_times".into(), binop(Ty::F64, Ty::F64)));
+    fields.push(("f64_divided_by".into(), binop(Ty::F64, Ty::F64)));
+    fields.push(("f64_negate".into(), unary(Ty::F64, Ty::F64)));
+    fields.push(("f64_eq".into(), binop(Ty::F64, Ty::Bool)));
+    fields.push(("f64_not_eq".into(), binop(Ty::F64, Ty::Bool)));
+    fields.push(("f64_lt".into(), binop(Ty::F64, Ty::Bool)));
+    fields.push(("f64_gt".into(), binop(Ty::F64, Ty::Bool)));
+    fields.push(("f64_lt_eq".into(), binop(Ty::F64, Ty::Bool)));
+    fields.push(("f64_gt_eq".into(), binop(Ty::F64, Ty::Bool)));
+    fields.push(("f64_to_string".into(), unary(Ty::F64, Ty::String)));
+    fields.push(("f64_to_f64".into(), unary(Ty::F64, Ty::F64)));
+    fields.push(("f64_to_i64".into(), unary(Ty::F64, Ty::I64)));
+    fields.push(("f64_ceil".into(), unary(Ty::F64, Ty::I64)));
+    fields.push(("f64_floor".into(), unary(Ty::F64, Ty::I64)));
+    fields.push(("f64_round".into(), unary(Ty::F64, Ty::I64)));
+    fields.push(("f64_trunc".into(), unary(Ty::F64, Ty::I64)));
+
+    // I128 methods — arithmetic is I128 × I128 → I128
+    fields.push(("i128_add".into(), binop(Ty::I128, Ty::I128)));
+    fields.push(("i128_subtract".into(), binop(Ty::I128, Ty::I128)));
+    fields.push(("i128_times".into(), binop(Ty::I128, Ty::I128)));
+    fields.push(("i128_divided_by".into(), binop(Ty::I128, Ty::I128)));
+    fields.push(("i128_negate".into(), unary(Ty::I128, Ty::I128)));
+    fields.push(("i128_eq".into(), binop(Ty::I128, Ty::Bool)));
+    fields.push(("i128_not_eq".into(), binop(Ty::I128, Ty::Bool)));
+    fields.push(("i128_lt".into(), binop(Ty::I128, Ty::Bool)));
+    fields.push(("i128_gt".into(), binop(Ty::I128, Ty::Bool)));
+    fields.push(("i128_lt_eq".into(), binop(Ty::I128, Ty::Bool)));
+    fields.push(("i128_gt_eq".into(), binop(Ty::I128, Ty::Bool)));
+    fields.push(("i128_to_string".into(), unary(Ty::I128, Ty::String)));
+    fields.push(("i128_to_i64".into(), unary(Ty::I128, Ty::I64)));
+    fields.push(("i128_to_i32".into(), unary(Ty::I128, Ty::I32)));
+    fields.push(("i128_to_u128".into(), unary(Ty::I128, Ty::U128)));
+
+    // U128 methods — arithmetic is U128 × U128 → U128
+    fields.push(("u128_add".into(), binop(Ty::U128, Ty::U128)));
+    fields.push(("u128_subtract".into(), binop(Ty::U128, Ty::U128)));
+    fields.push(("u128_times".into(), binop(Ty::U128, Ty::U128)));
+    fields.push(("u128_divided_by".into(), binop(Ty::U128, Ty::U128)));
+    fields.push(("u128_eq".into(), binop(Ty::U128, Ty::Bool)));
+    fields.push(("u128_not_eq".into(), binop(Ty::U128, Ty::Bool)));
+    fields.push(("u128_lt".into(), binop(Ty::U128, Ty::Bool)));
+    fields.push(("u128_gt".into(), binop(Ty::U128, Ty::Bool)));
+    fields.push(("u128_lt_eq".into(), binop(Ty::U128, Ty::Bool)));
+    fields.push(("u128_gt_eq".into(), binop(Ty::U128, Ty::Bool)));
+    fields.push(("u128_to_string".into(), unary(Ty::U128, Ty::String)));
+    fields.push(("u128_to_i64".into(), unary(Ty::U128, Ty::I64)));
+    fields.push(("u128_to_i32".into(), unary(Ty::U128, Ty::I32)));
+    fields.push(("u128_to_i128".into(), unary(Ty::U128, Ty::I128)));
 
     // Unit methods — after prepend_arg(Unit, Unit) = Unit, so param is just Unit
     fields.push(("unit_eq".into(), unary(Ty::Unit, Ty::Bool)));
@@ -831,12 +1023,15 @@ fn check_constraint_allows(env: &TyEnv, id: u64, ty: &Ty) -> Result<(), std::str
     if let Some(constraint) = env.infer_constraint(id) {
         match constraint {
             InferConstraint::IntLiteral => match ty {
-                Ty::Int | Ty::Byte | Ty::I32 => Ok(()),
-                _ => Err(format!("type error: cannot unify {:?} with {:?}", Ty::Int, ty)),
+                Ty::I64 | Ty::U8
+                | Ty::I8 | Ty::I16 | Ty::U16
+                | Ty::I32 | Ty::U32 | Ty::U64
+                | Ty::I128 | Ty::U128 => Ok(()),
+                _ => Err(format!("type error: cannot unify {:?} with {:?}", Ty::I64, ty)),
             },
             InferConstraint::FloatLiteral => match ty {
-                Ty::Float | Ty::F32 => Ok(()),
-                _ => Err(format!("type error: cannot unify {:?} with {:?}", Ty::Float, ty)),
+                Ty::F64 | Ty::F32 => Ok(()),
+                _ => Err(format!("type error: cannot unify {:?} with {:?}", Ty::F64, ty)),
             },
         }
     } else {
@@ -877,14 +1072,21 @@ pub fn unify(a: &Ty, b: &Ty, env: &mut TyEnv) -> Result<Ty, std::string::String>
         (Ty::Generic(_), other) | (other, Ty::Generic(_)) => Ok(other.clone()),
 
         // Primitives: must match exactly
-        (Ty::Int, Ty::Int) => Ok(Ty::Int),
-        (Ty::Float, Ty::Float) => Ok(Ty::Float),
+        (Ty::I64, Ty::I64) => Ok(Ty::I64),
+        (Ty::F64, Ty::F64) => Ok(Ty::F64),
         (Ty::Bool, Ty::Bool) => Ok(Ty::Bool),
         (Ty::String, Ty::String) => Ok(Ty::String),
         (Ty::Char, Ty::Char) => Ok(Ty::Char),
-        (Ty::Byte, Ty::Byte) => Ok(Ty::Byte),
+        (Ty::U8, Ty::U8) => Ok(Ty::U8),
+        (Ty::I8, Ty::I8) => Ok(Ty::I8),
+        (Ty::I16, Ty::I16) => Ok(Ty::I16),
+        (Ty::U16, Ty::U16) => Ok(Ty::U16),
         (Ty::I32, Ty::I32) => Ok(Ty::I32),
+        (Ty::U32, Ty::U32) => Ok(Ty::U32),
         (Ty::F32, Ty::F32) => Ok(Ty::F32),
+        (Ty::U64, Ty::U64) => Ok(Ty::U64),
+        (Ty::I128, Ty::I128) => Ok(Ty::I128),
+        (Ty::U128, Ty::U128) => Ok(Ty::U128),
         (Ty::Unit, Ty::Unit) => Ok(Ty::Unit),
         (Ty::Array(e1), Ty::Array(e2)) => {
             let elem = unify(e1, e2, env)?;
@@ -1083,7 +1285,6 @@ fn substitute_generics(ty: &Ty, subst: &HashMap<u64, Ty>) -> Ty {
         other => other.clone(),
     }
 }
-
 
 /// Find a block body for a struct field method call.
 /// Checks: 1) block_bodies["name.field"] for Ident receivers
@@ -1351,7 +1552,7 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
         MirKind::Bool(_) => Ok(Ty::Bool),
         MirKind::Str(_) => Ok(Ty::String),
         MirKind::Char(_) => Ok(Ty::Char),
-        MirKind::Byte(_) => Ok(Ty::Byte),
+        MirKind::Byte(_) => Ok(Ty::U8),
         MirKind::Unit => Ok(Ty::Unit),
 
         // ── Ident ──
@@ -2530,17 +2731,17 @@ mod tests {
             Ty::String
         );
         assert_eq!(check(&mir(MirKind::Char('a')), &mut env).unwrap(), Ty::Char);
-        assert_eq!(check(&mir(MirKind::Byte(0)), &mut env).unwrap(), Ty::Byte);
+        assert_eq!(check(&mir(MirKind::Byte(0)), &mut env).unwrap(), Ty::U8);
         assert_eq!(check(&mir(MirKind::Unit), &mut env).unwrap(), Ty::Unit);
     }
 
     #[test]
     fn ident_lookup() {
         let mut env = TyEnv::new();
-        env.bind("x".into(), Ty::Int);
+        env.bind("x".into(), Ty::I64);
         assert_eq!(
             check(&mir(MirKind::Ident("x".into())), &mut env).unwrap(),
-            Ty::Int
+            Ty::I64
         );
     }
 
@@ -2552,29 +2753,29 @@ mod tests {
 
     #[test]
     fn import_module() {
-        let mut env = TyEnv::new().with_module("core", Ty::Int);
+        let mut env = TyEnv::new().with_module("core", Ty::I64);
         assert_eq!(
             check(&mir(MirKind::Import("core".into())), &mut env).unwrap(),
-            Ty::Int
+            Ty::I64
         );
     }
 
     #[test]
     fn field_access() {
         let mut env = TyEnv::new();
-        let struct_ty = Ty::Struct(vec![("x".into(), Ty::Int), ("y".into(), Ty::Float)]);
+        let struct_ty = Ty::Struct(vec![("x".into(), Ty::I64), ("y".into(), Ty::F64)]);
         env.bind("s".into(), struct_ty);
         let expr = mir(MirKind::FieldAccess(
             mir(MirKind::Ident("s".into())),
             "x".into(),
         ));
-        assert_eq!(check(&expr, &mut env).unwrap(), Ty::Int);
+        assert_eq!(check(&expr, &mut env).unwrap(), Ty::I64);
     }
 
     #[test]
     fn field_access_missing() {
         let mut env = TyEnv::new();
-        let struct_ty = Ty::Struct(vec![("x".into(), Ty::Int)]);
+        let struct_ty = Ty::Struct(vec![("x".into(), Ty::I64)]);
         env.bind("s".into(), struct_ty);
         let expr = mir(MirKind::FieldAccess(
             mir(MirKind::Ident("s".into())),
@@ -2625,7 +2826,7 @@ mod tests {
     #[test]
     fn pipe_let_name() {
         // use(core) desugars to: Pipe(Import("core"), Let { Name("core"), body })
-        let mut env = TyEnv::new().with_module("test", Ty::Int);
+        let mut env = TyEnv::new().with_module("test", Ty::I64);
         let expr = mir(MirKind::Pipe(
             mir(MirKind::Import("test".into())),
             mir(MirKind::Let {
@@ -2633,13 +2834,13 @@ mod tests {
                 body: mir(MirKind::Ident("t".into())),
             }),
         ));
-        assert_eq!(check(&expr, &mut env).unwrap(), Ty::Int);
+        assert_eq!(check(&expr, &mut env).unwrap(), Ty::I64);
     }
 
     #[test]
     fn method_set_call() {
         let mut env = TyEnv::new();
-        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_I64));
         let fn_ty = Ty::Fn {
             param: Box::new(Ty::Infer(0)),
             ret: Box::new(Ty::Infer(0)),
@@ -2668,14 +2869,14 @@ mod tests {
         ));
 
         let ty = check(&expr, &mut env).unwrap();
-        assert!(matches!(ty, Ty::MethodSet { id: 0, tag_id } if tag_id == TAG_ID_INT));
+        assert!(matches!(ty, Ty::MethodSet { id: 0, tag_id } if tag_id == TAG_ID_I64));
     }
 
     #[test]
     fn method_set_via_field_access() {
         // std.method_set(Int, (add = int_add)) should work the same as bare method_set(...)
         let mut env = TyEnv::new();
-        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_I64));
         let fn_ty = Ty::Fn {
             param: Box::new(Ty::Infer(0)),
             ret: Box::new(Ty::Infer(0)),
@@ -2710,14 +2911,14 @@ mod tests {
         ));
 
         let ty = check(&expr, &mut env).unwrap();
-        assert!(matches!(ty, Ty::MethodSet { id: 0, tag_id } if tag_id == TAG_ID_INT));
+        assert!(matches!(ty, Ty::MethodSet { id: 0, tag_id } if tag_id == TAG_ID_I64));
     }
 
     #[test]
     fn method_set_aliased() {
         // let ms = method_set; ms(Int, (add = int_add)) should also work
         let mut env = TyEnv::new();
-        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_I64));
         let fn_ty = Ty::Fn {
             param: Box::new(Ty::Infer(0)),
             ret: Box::new(Ty::Infer(0)),
@@ -2748,13 +2949,13 @@ mod tests {
         ));
 
         let ty = check(&expr, &mut env).unwrap();
-        assert!(matches!(ty, Ty::MethodSet { id: 0, tag_id } if tag_id == TAG_ID_INT));
+        assert!(matches!(ty, Ty::MethodSet { id: 0, tag_id } if tag_id == TAG_ID_I64));
     }
 
     #[test]
     fn method_set_non_constructor_errors() {
         let mut env = TyEnv::new();
-        env.bind("not_a_ctor".into(), Ty::Int);
+        env.bind("not_a_ctor".into(), Ty::I64);
         env.bind("method_set".into(), Ty::MethodSetConstructor);
 
         let expr = mir(MirKind::Call(
@@ -2779,7 +2980,7 @@ mod tests {
     #[test]
     fn method_set_non_struct_methods_errors() {
         let mut env = TyEnv::new();
-        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_I64));
         env.bind("method_set".into(), Ty::MethodSetConstructor);
 
         let expr = mir(MirKind::Call(
@@ -2806,8 +3007,8 @@ mod tests {
     #[test]
     fn unify_same_primitives() {
         let mut env = TyEnv::new();
-        assert_eq!(unify(&Ty::Int, &Ty::Int, &mut env).unwrap(), Ty::Int);
-        assert_eq!(unify(&Ty::Float, &Ty::Float, &mut env).unwrap(), Ty::Float);
+        assert_eq!(unify(&Ty::I64, &Ty::I64, &mut env).unwrap(), Ty::I64);
+        assert_eq!(unify(&Ty::F64, &Ty::F64, &mut env).unwrap(), Ty::F64);
         assert_eq!(unify(&Ty::Bool, &Ty::Bool, &mut env).unwrap(), Ty::Bool);
         assert_eq!(unify(&Ty::String, &Ty::String, &mut env).unwrap(), Ty::String);
     }
@@ -2815,18 +3016,18 @@ mod tests {
     #[test]
     fn unify_different_primitives_error() {
         let mut env = TyEnv::new();
-        assert!(unify(&Ty::Int, &Ty::Float, &mut env).is_err());
-        assert!(unify(&Ty::Int, &Ty::String, &mut env).is_err());
-        assert!(unify(&Ty::Bool, &Ty::Byte, &mut env).is_err());
+        assert!(unify(&Ty::I64, &Ty::F64, &mut env).is_err());
+        assert!(unify(&Ty::I64, &Ty::String, &mut env).is_err());
+        assert!(unify(&Ty::Bool, &Ty::U8, &mut env).is_err());
     }
 
     #[test]
     fn unify_unknown_with_anything() {
         let mut env = TyEnv::new();
-        assert_eq!(unify(&Ty::Infer(0), &Ty::Int, &mut env).unwrap(), Ty::Int);
+        assert_eq!(unify(&Ty::Infer(0), &Ty::I64, &mut env).unwrap(), Ty::I64);
         // Use fresh env per case to avoid prior bindings interfering
         let mut env2 = TyEnv::new();
-        assert_eq!(unify(&Ty::Float, &Ty::Infer(0), &mut env2).unwrap(), Ty::Float);
+        assert_eq!(unify(&Ty::F64, &Ty::Infer(0), &mut env2).unwrap(), Ty::F64);
         let mut env3 = TyEnv::new();
         assert_eq!(unify(&Ty::Infer(0), &Ty::Infer(0), &mut env3).unwrap(), Ty::Infer(0));
     }
@@ -2834,32 +3035,32 @@ mod tests {
     #[test]
     fn unify_structs_same_shape() {
         let mut env = TyEnv::new();
-        let a = Ty::Struct(vec![("x".into(), Ty::Int), ("y".into(), Ty::Float)]);
-        let b = Ty::Struct(vec![("x".into(), Ty::Int), ("y".into(), Ty::Float)]);
+        let a = Ty::Struct(vec![("x".into(), Ty::I64), ("y".into(), Ty::F64)]);
+        let b = Ty::Struct(vec![("x".into(), Ty::I64), ("y".into(), Ty::F64)]);
         assert_eq!(unify(&a, &b, &mut env).unwrap(), a);
     }
 
     #[test]
     fn unify_structs_different_field_count() {
         let mut env = TyEnv::new();
-        let a = Ty::Struct(vec![("x".into(), Ty::Int)]);
-        let b = Ty::Struct(vec![("x".into(), Ty::Int), ("y".into(), Ty::Float)]);
+        let a = Ty::Struct(vec![("x".into(), Ty::I64)]);
+        let b = Ty::Struct(vec![("x".into(), Ty::I64), ("y".into(), Ty::F64)]);
         assert!(unify(&a, &b, &mut env).is_err());
     }
 
     #[test]
     fn unify_structs_different_field_names() {
         let mut env = TyEnv::new();
-        let a = Ty::Struct(vec![("x".into(), Ty::Int)]);
-        let b = Ty::Struct(vec![("y".into(), Ty::Int)]);
+        let a = Ty::Struct(vec![("x".into(), Ty::I64)]);
+        let b = Ty::Struct(vec![("y".into(), Ty::I64)]);
         assert!(unify(&a, &b, &mut env).is_err());
     }
 
     #[test]
     fn unify_structs_different_field_types() {
         let mut env = TyEnv::new();
-        let a = Ty::Struct(vec![("x".into(), Ty::Int)]);
-        let b = Ty::Struct(vec![("x".into(), Ty::Float)]);
+        let a = Ty::Struct(vec![("x".into(), Ty::I64)]);
+        let b = Ty::Struct(vec![("x".into(), Ty::F64)]);
         assert!(unify(&a, &b, &mut env).is_err());
     }
 
@@ -2868,11 +3069,11 @@ mod tests {
         let mut env = TyEnv::new();
         let a = Ty::MethodSet {
             id: 0,
-            tag_id: TAG_ID_INT,
+            tag_id: TAG_ID_I64,
         };
         let b = Ty::MethodSet {
             id: 0,
-            tag_id: TAG_ID_INT,
+            tag_id: TAG_ID_I64,
         };
         assert_eq!(unify(&a, &b, &mut env).unwrap(), a);
     }
@@ -2882,11 +3083,11 @@ mod tests {
         let mut env = TyEnv::new();
         let a = Ty::MethodSet {
             id: 0,
-            tag_id: TAG_ID_INT,
+            tag_id: TAG_ID_I64,
         };
         let b = Ty::MethodSet {
             id: 1,
-            tag_id: TAG_ID_INT,
+            tag_id: TAG_ID_I64,
         };
         assert!(unify(&a, &b, &mut env).is_err());
     }
@@ -2895,11 +3096,11 @@ mod tests {
     fn unify_functions() {
         let mut env = TyEnv::new();
         let a = Ty::Fn {
-            param: Box::new(Ty::Int),
+            param: Box::new(Ty::I64),
             ret: Box::new(Ty::Bool),
         };
         let b = Ty::Fn {
-            param: Box::new(Ty::Int),
+            param: Box::new(Ty::I64),
             ret: Box::new(Ty::Bool),
         };
         assert_eq!(unify(&a, &b, &mut env).unwrap(), a);
@@ -2913,7 +3114,7 @@ mod tests {
             ret: Box::new(Ty::Infer(1)),
         };
         let b = Ty::Fn {
-            param: Box::new(Ty::Int),
+            param: Box::new(Ty::I64),
             ret: Box::new(Ty::Bool),
         };
         assert_eq!(unify(&a, &b, &mut env).unwrap(), b);
@@ -2924,14 +3125,14 @@ mod tests {
         let mut env = TyEnv::new();
         // IntLiteral + Int = Int
         let int_lit1 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
-        assert_eq!(unify(&int_lit1, &Ty::Int, &mut env).unwrap(), Ty::Int);
+        assert_eq!(unify(&int_lit1, &Ty::I64, &mut env).unwrap(), Ty::I64);
         let int_lit2 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
-        assert_eq!(unify(&Ty::Int, &int_lit2, &mut env).unwrap(), Ty::Int);
+        assert_eq!(unify(&Ty::I64, &int_lit2, &mut env).unwrap(), Ty::I64);
         // IntLiteral + Byte = Byte
         let int_lit3 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
-        assert_eq!(unify(&int_lit3, &Ty::Byte, &mut env).unwrap(), Ty::Byte);
+        assert_eq!(unify(&int_lit3, &Ty::U8, &mut env).unwrap(), Ty::U8);
         let int_lit4 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
-        assert_eq!(unify(&Ty::Byte, &int_lit4, &mut env).unwrap(), Ty::Byte);
+        assert_eq!(unify(&Ty::U8, &int_lit4, &mut env).unwrap(), Ty::U8);
         // IntLiteral + IntLiteral = Infer with IntLiteral constraint (via union-find)
         let int_lit5 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
         let int_lit6 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
@@ -2939,7 +3140,7 @@ mod tests {
         assert!(matches!(result, Ty::Infer(id) if env.infer_constraint(id) == Some(&InferConstraint::IntLiteral)));
         // IntLiteral + Float = error (int and float are distinct)
         let int_lit7 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
-        assert!(unify(&int_lit7, &Ty::Float, &mut env).is_err());
+        assert!(unify(&int_lit7, &Ty::F64, &mut env).is_err());
         // IntLiteral + FloatLiteral = error
         let int_lit8 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
         let float_lit1 = env.fresh_constrained_infer(InferConstraint::FloatLiteral);
@@ -2954,7 +3155,7 @@ mod tests {
         let mut env = TyEnv::new();
         // FloatLiteral + Float = Float
         let float_lit1 = env.fresh_constrained_infer(InferConstraint::FloatLiteral);
-        assert_eq!(unify(&float_lit1, &Ty::Float, &mut env).unwrap(), Ty::Float);
+        assert_eq!(unify(&float_lit1, &Ty::F64, &mut env).unwrap(), Ty::F64);
         // FloatLiteral + FloatLiteral = Infer with FloatLiteral constraint (via union-find)
         let float_lit2 = env.fresh_constrained_infer(InferConstraint::FloatLiteral);
         let float_lit3 = env.fresh_constrained_infer(InferConstraint::FloatLiteral);
@@ -2962,10 +3163,10 @@ mod tests {
         assert!(matches!(result, Ty::Infer(id) if env.infer_constraint(id) == Some(&InferConstraint::FloatLiteral)));
         // FloatLiteral + Int = error (can't coerce float to int)
         let float_lit4 = env.fresh_constrained_infer(InferConstraint::FloatLiteral);
-        assert!(unify(&float_lit4, &Ty::Int, &mut env).is_err());
+        assert!(unify(&float_lit4, &Ty::I64, &mut env).is_err());
         // FloatLiteral + Byte = error
         let float_lit5 = env.fresh_constrained_infer(InferConstraint::FloatLiteral);
-        assert!(unify(&float_lit5, &Ty::Byte, &mut env).is_err());
+        assert!(unify(&float_lit5, &Ty::U8, &mut env).is_err());
     }
 
     #[test]
@@ -2990,7 +3191,7 @@ mod tests {
         match ty {
             Ty::Fn { param, ret } => {
                 assert!(matches!(*param, Ty::Infer(_)));
-                assert_eq!(*ret, Ty::Byte);
+                assert_eq!(*ret, Ty::U8);
             }
             _ => panic!("expected Fn, got {:?}", ty),
         }
@@ -3006,7 +3207,7 @@ mod tests {
             mir(MirKind::Int(5)),
         ]));
         let ty = check(&expr, &mut env).unwrap();
-        assert_eq!(ty, Ty::Array(Box::new(Ty::Byte)));
+        assert_eq!(ty, Ty::Array(Box::new(Ty::U8)));
     }
 
     #[test]
@@ -3014,7 +3215,7 @@ mod tests {
         let mut env = TyEnv::new();
         let ok = Ty::Tagged {
             tag_id: 100,
-            payload: Box::new(Ty::Int),
+            payload: Box::new(Ty::I64),
         };
         let err = Ty::Tagged {
             tag_id: 101,
@@ -3033,14 +3234,14 @@ mod tests {
         };
         let b = Ty::Tagged {
             tag_id: 100,
-            payload: Box::new(Ty::Int),
+            payload: Box::new(Ty::I64),
         };
         let result = unify(&a, &b, &mut env).unwrap();
         assert_eq!(
             result,
             Ty::Tagged {
                 tag_id: 100,
-                payload: Box::new(Ty::Int)
+                payload: Box::new(Ty::I64)
             }
         );
     }
@@ -3050,7 +3251,7 @@ mod tests {
         let mut env = TyEnv::new();
         let ok = Ty::Tagged {
             tag_id: 100,
-            payload: Box::new(Ty::Int),
+            payload: Box::new(Ty::I64),
         };
         let err = Ty::Tagged {
             tag_id: 101,
@@ -3079,12 +3280,12 @@ mod tests {
         let union = Ty::Union(vec![ok, err.clone()]);
         let ok2 = Ty::Tagged {
             tag_id: 100,
-            payload: Box::new(Ty::Int),
+            payload: Box::new(Ty::I64),
         };
         let result = unify(&union, &ok2, &mut env).unwrap();
         let expected_ok = Ty::Tagged {
             tag_id: 100,
-            payload: Box::new(Ty::Int),
+            payload: Box::new(Ty::I64),
         };
         assert_eq!(result, Ty::Union(vec![expected_ok, err]));
     }
@@ -3094,10 +3295,10 @@ mod tests {
         let mut env = TyEnv::new();
         let ok = Ty::Tagged {
             tag_id: 100,
-            payload: Box::new(Ty::Int),
+            payload: Box::new(Ty::I64),
         };
-        let result = unify(&ok, &Ty::Int, &mut env).unwrap();
-        assert_eq!(result, Ty::Union(vec![ok, Ty::Int]));
+        let result = unify(&ok, &Ty::I64, &mut env).unwrap();
+        assert_eq!(result, Ty::Union(vec![ok, Ty::I64]));
     }
 
     // ── Generic type variable tests ──
@@ -3106,9 +3307,9 @@ mod tests {
     fn unify_with_generics_binds_variable() {
         let mut env = TyEnv::new();
         let mut subst = HashMap::new();
-        let result = unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst, &mut env).unwrap();
-        assert_eq!(result, Ty::Int);
-        assert_eq!(subst.get(&0), Some(&Ty::Int));
+        let result = unify_with_generics(&Ty::Generic(0), &Ty::I64, &mut subst, &mut env).unwrap();
+        assert_eq!(result, Ty::I64);
+        assert_eq!(subst.get(&0), Some(&Ty::I64));
     }
 
     #[test]
@@ -3116,19 +3317,19 @@ mod tests {
         let mut env = TyEnv::new();
         let mut subst = HashMap::new();
         // First bind G0 = Int
-        unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst, &mut env).unwrap();
+        unify_with_generics(&Ty::Generic(0), &Ty::I64, &mut subst, &mut env).unwrap();
         // Second use of G0 must also be Int
-        let result = unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst, &mut env).unwrap();
-        assert_eq!(result, Ty::Int);
+        let result = unify_with_generics(&Ty::Generic(0), &Ty::I64, &mut subst, &mut env).unwrap();
+        assert_eq!(result, Ty::I64);
     }
 
     #[test]
     fn unify_with_generics_inconsistent_binding_error() {
         let mut env = TyEnv::new();
         let mut subst = HashMap::new();
-        unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst, &mut env).unwrap();
+        unify_with_generics(&Ty::Generic(0), &Ty::I64, &mut subst, &mut env).unwrap();
         // G0 is already Int, unifying with Float should error
-        assert!(unify_with_generics(&Ty::Generic(0), &Ty::Float, &mut subst, &mut env).is_err());
+        assert!(unify_with_generics(&Ty::Generic(0), &Ty::F64, &mut subst, &mut env).is_err());
     }
 
     #[test]
@@ -3136,9 +3337,9 @@ mod tests {
         let mut env = TyEnv::new();
         let mut subst = HashMap::new();
         // G0 = Int, G1 = String
-        unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst, &mut env).unwrap();
+        unify_with_generics(&Ty::Generic(0), &Ty::I64, &mut subst, &mut env).unwrap();
         unify_with_generics(&Ty::Generic(1), &Ty::String, &mut subst, &mut env).unwrap();
-        assert_eq!(subst.get(&0), Some(&Ty::Int));
+        assert_eq!(subst.get(&0), Some(&Ty::I64));
         assert_eq!(subst.get(&1), Some(&Ty::String));
     }
 
@@ -3148,10 +3349,10 @@ mod tests {
         let mut subst = HashMap::new();
         // Array(G0) vs Array(Int) -> G0 = Int
         let a = Ty::Array(Box::new(Ty::Generic(0)));
-        let b = Ty::Array(Box::new(Ty::Int));
+        let b = Ty::Array(Box::new(Ty::I64));
         let result = unify_with_generics(&a, &b, &mut subst, &mut env).unwrap();
-        assert_eq!(result, Ty::Array(Box::new(Ty::Int)));
-        assert_eq!(subst.get(&0), Some(&Ty::Int));
+        assert_eq!(result, Ty::Array(Box::new(Ty::I64)));
+        assert_eq!(subst.get(&0), Some(&Ty::I64));
     }
 
     #[test]
@@ -3164,25 +3365,25 @@ mod tests {
             ret: Box::new(Ty::Generic(1)),
         };
         let b = Ty::Fn {
-            param: Box::new(Ty::Int),
+            param: Box::new(Ty::I64),
             ret: Box::new(Ty::String),
         };
         let result = unify_with_generics(&a, &b, &mut subst, &mut env).unwrap();
         assert_eq!(
             result,
             Ty::Fn {
-                param: Box::new(Ty::Int),
+                param: Box::new(Ty::I64),
                 ret: Box::new(Ty::String),
             }
         );
-        assert_eq!(subst.get(&0), Some(&Ty::Int));
+        assert_eq!(subst.get(&0), Some(&Ty::I64));
         assert_eq!(subst.get(&1), Some(&Ty::String));
     }
 
     #[test]
     fn substitute_generics_replaces() {
         let mut subst = HashMap::new();
-        subst.insert(0, Ty::Int);
+        subst.insert(0, Ty::I64);
         subst.insert(1, Ty::String);
         // Array(G1) with {1: String} -> Array(String)
         let ty = Ty::Array(Box::new(Ty::Generic(1)));
@@ -3195,7 +3396,7 @@ mod tests {
     #[test]
     fn substitute_generics_in_fn() {
         let mut subst = HashMap::new();
-        subst.insert(0, Ty::Int);
+        subst.insert(0, Ty::I64);
         subst.insert(1, Ty::Bool);
         let ty = Ty::Fn {
             param: Box::new(Ty::Generic(0)),
@@ -3204,7 +3405,7 @@ mod tests {
         assert_eq!(
             substitute_generics(&ty, &subst),
             Ty::Fn {
-                param: Box::new(Ty::Int),
+                param: Box::new(Ty::I64),
                 ret: Box::new(Ty::Bool),
             }
         );
@@ -3314,7 +3515,7 @@ mod tests {
         let input_ty = Ty::Union(vec![
             Ty::Tagged {
                 tag_id: 100,
-                payload: Box::new(Ty::Int),
+                payload: Box::new(Ty::I64),
             },
             Ty::Tagged {
                 tag_id: 101,
@@ -3349,7 +3550,7 @@ mod tests {
         )
         .unwrap();
         // x has type Int (from Ok payload), 0 is Int → unifies to Int
-        assert_eq!(ret, Ty::Int);
+        assert_eq!(ret, Ty::I64);
     }
 
     #[test]
@@ -3362,7 +3563,7 @@ mod tests {
         let input_ty = Ty::Union(vec![
             Ty::Tagged {
                 tag_id: 100,
-                payload: Box::new(Ty::Int),
+                payload: Box::new(Ty::I64),
             },
             Ty::Tagged {
                 tag_id: 101,
@@ -3406,7 +3607,7 @@ mod tests {
     fn q5_two_method_set_calls_in_branch_error() {
         use crate::mir::{MirBranchArm, MirBranchPattern};
         let mut env = TyEnv::new();
-        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_I64));
         let fn_ty = Ty::Fn {
             param: Box::new(Ty::Infer(0)),
             ret: Box::new(Ty::Infer(0)),
@@ -3469,7 +3670,7 @@ mod tests {
             param: Box::new(Ty::Infer(0)),
             ret: Box::new(Ty::Infer(0)),
         };
-        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_I64));
         env.bind("int_to_string".into(), fn_ty.clone());
         env.bind("int_to_string_other".into(), fn_ty.clone());
         env.bind("method_set".into(), Ty::MethodSetConstructor);
@@ -3521,11 +3722,11 @@ mod tests {
     fn method_call_resolves_via_method_set() {
         let mut env = TyEnv::new();
         // Set up: method_set(Int, (add = fn(Unknown->Int)))
-        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_I64));
         let int_add_param = env.fresh_infer();
         let int_add_ty = Ty::Fn {
             param: Box::new(int_add_param),
-            ret: Box::new(Ty::Int),
+            ret: Box::new(Ty::I64),
         };
         env.bind("int_add".into(), int_add_ty);
         env.bind("method_set".into(), Ty::MethodSetConstructor);
@@ -3551,7 +3752,7 @@ mod tests {
             ])),
         ));
         let ms_ty = check(&ms_call, &mut env).unwrap();
-        assert!(matches!(ms_ty, Ty::MethodSet { tag_id, .. } if tag_id == TAG_ID_INT));
+        assert!(matches!(ms_ty, Ty::MethodSet { tag_id, .. } if tag_id == TAG_ID_I64));
 
         // Apply the method set and call 1.add(2)
         let expr = mir(MirKind::Apply {
@@ -3565,18 +3766,18 @@ mod tests {
         // Note: ms_call is checked again inside Apply — this allocates a second ms id,
         // but the Apply handler binds it. We need a fresh env for this test.
         let mut env2 = TyEnv::new();
-        env2.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        env2.bind("Int".into(), Ty::TagConstructor(TAG_ID_I64));
         let int_add_param2 = env2.fresh_infer();
         env2.bind(
             "int_add".into(),
             Ty::Fn {
                 param: Box::new(int_add_param2),
-                ret: Box::new(Ty::Int),
+                ret: Box::new(Ty::I64),
             },
         );
         env2.bind("method_set".into(), Ty::MethodSetConstructor);
         let ty = check(&expr, &mut env2).unwrap();
-        assert_eq!(ty, Ty::Int);
+        assert_eq!(ty, Ty::I64);
     }
 
     #[test]
@@ -3587,7 +3788,7 @@ mod tests {
             "add".into(),
             Ty::Fn {
                 param: Box::new(Ty::Infer(0)),
-                ret: Box::new(Ty::Int),
+                ret: Box::new(Ty::I64),
             },
         )]);
         env.bind("s".into(), struct_ty);
@@ -3598,7 +3799,7 @@ mod tests {
             arg: mir(MirKind::Int(1)),
         });
         let ty = check(&expr, &mut env).unwrap();
-        assert_eq!(ty, Ty::Int);
+        assert_eq!(ty, Ty::I64);
     }
 
     #[test]
@@ -3608,7 +3809,7 @@ mod tests {
         env.bind(
             "f".into(),
             Ty::Fn {
-                param: Box::new(Ty::Int),
+                param: Box::new(Ty::I64),
                 ret: Box::new(Ty::Bool),
             },
         );
@@ -3627,7 +3828,7 @@ mod tests {
         env.bind(
             "f".into(),
             Ty::Fn {
-                param: Box::new(Ty::Int),
+                param: Box::new(Ty::I64),
                 ret: Box::new(Ty::Bool),
             },
         );
@@ -3647,8 +3848,8 @@ mod tests {
         // (x=1, y=2.0, z=true) >> let(x=x, ...rest); rest
         // rest should be Struct([(y, Float), (z, Bool)])
         let input = Ty::Struct(vec![
-            ("x".into(), Ty::Int),
-            ("y".into(), Ty::Float),
+            ("x".into(), Ty::I64),
+            ("y".into(), Ty::F64),
             ("z".into(), Ty::Bool),
         ]);
         let pattern = Pattern::Fields(vec![
@@ -3667,7 +3868,7 @@ mod tests {
         let ty = check_let(&pattern, &body, &input, &mut env).unwrap();
         assert_eq!(
             ty,
-            Ty::Struct(vec![("y".into(), Ty::Float), ("z".into(), Ty::Bool)])
+            Ty::Struct(vec![("y".into(), Ty::F64), ("z".into(), Ty::Bool)])
         );
     }
 
@@ -3692,7 +3893,7 @@ mod tests {
         let get_ty = Ty::Fn {
             param: Box::new(Ty::Struct(vec![
                 ("0".into(), Ty::Array(Box::new(g0.clone()))),
-                ("1".into(), Ty::Int),
+                ("1".into(), Ty::I64),
             ])),
             ret: Box::new(g0),
         };
@@ -3900,7 +4101,7 @@ mod tests {
             ty,
             Ty::Fn {
                 param: Box::new(Ty::Infer(0)),
-                ret: Box::new(Ty::Int)
+                ret: Box::new(Ty::I64)
             }
         );
     }
@@ -3929,7 +4130,7 @@ mod tests {
     #[test]
     fn stored_block_with_body_expr() {
         let mut env = TyEnv::new();
-        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        env.bind("Int".into(), Ty::TagConstructor(TAG_ID_I64));
         // let f = { Int(in) }; f(42) should return Tagged{Int, IntLiteral}
         let expr = mir(MirKind::Bind {
             name: "f".into(),
@@ -3944,7 +4145,7 @@ mod tests {
         });
         let ty = check(&expr, &mut env).unwrap();
         if let Ty::Tagged { tag_id, payload } = &ty {
-            assert_eq!(*tag_id, TAG_ID_INT);
+            assert_eq!(*tag_id, TAG_ID_I64);
             assert!(matches!(payload.as_ref(), Ty::Infer(id) if env.infer_constraint(*id) == Some(&InferConstraint::IntLiteral)));
         } else {
             panic!("expected Tagged, got {:?}", ty);
@@ -3975,15 +4176,15 @@ mod tests {
     #[test]
     fn prepend_arg_ty_unit() {
         // recv.method() — arg is unit, prepend = recv
-        assert_eq!(prepend_arg_ty(&Ty::Int, &Ty::Unit), Ty::Int);
+        assert_eq!(prepend_arg_ty(&Ty::I64, &Ty::Unit), Ty::I64);
     }
 
     #[test]
     fn prepend_arg_ty_single() {
         // recv.method(x) — arg is single value, prepend = (recv, x)
         assert_eq!(
-            prepend_arg_ty(&Ty::Int, &Ty::String),
-            Ty::Struct(vec![("0".into(), Ty::Int), ("1".into(), Ty::String)])
+            prepend_arg_ty(&Ty::I64, &Ty::String),
+            Ty::Struct(vec![("0".into(), Ty::I64), ("1".into(), Ty::String)])
         );
     }
 
@@ -3992,9 +4193,9 @@ mod tests {
         // recv.method(a, b) — arg is struct (0=a, 1=b), prepend = (0=recv, 1=a, 2=b)
         let arg = Ty::Struct(vec![("0".into(), Ty::String), ("1".into(), Ty::Bool)]);
         assert_eq!(
-            prepend_arg_ty(&Ty::Int, &arg),
+            prepend_arg_ty(&Ty::I64, &arg),
             Ty::Struct(vec![
-                ("0".into(), Ty::Int),
+                ("0".into(), Ty::I64),
                 ("1".into(), Ty::String),
                 ("2".into(), Ty::Bool),
             ])
@@ -4004,12 +4205,12 @@ mod tests {
     #[test]
     fn prepend_arg_ty_named_struct() {
         // recv.fold(init=0, f=cb) — named fields stay named, recv is prepended as 0
-        let arg = Ty::Struct(vec![("init".into(), Ty::Int), ("f".into(), Ty::Infer(0))]);
+        let arg = Ty::Struct(vec![("init".into(), Ty::I64), ("f".into(), Ty::Infer(0))]);
         assert_eq!(
-            prepend_arg_ty(&Ty::Array(Box::new(Ty::Int)), &arg),
+            prepend_arg_ty(&Ty::Array(Box::new(Ty::I64)), &arg),
             Ty::Struct(vec![
-                ("0".into(), Ty::Array(Box::new(Ty::Int))),
-                ("init".into(), Ty::Int),
+                ("0".into(), Ty::Array(Box::new(Ty::I64))),
+                ("init".into(), Ty::I64),
                 ("f".into(), Ty::Infer(0)),
             ])
         );
@@ -4059,13 +4260,13 @@ mod tests {
         assert_eq!(
             defaulted,
             Ty::Struct(vec![
-                ("a".into(), Ty::Int),
-                ("b".into(), Ty::Array(Box::new(Ty::Float))),
+                ("a".into(), Ty::I64),
+                ("b".into(), Ty::Array(Box::new(Ty::F64))),
                 (
                     "c".into(),
                     Ty::Fn {
-                        param: Box::new(Ty::Int),
-                        ret: Box::new(Ty::Float),
+                        param: Box::new(Ty::I64),
+                        ret: Box::new(Ty::F64),
                     }
                 ),
             ])
@@ -4084,7 +4285,7 @@ mod tests {
             env.default_constrained_infer(&ty),
             Ty::Tagged {
                 tag_id: 100,
-                payload: Box::new(Ty::Int)
+                payload: Box::new(Ty::I64)
             }
         );
     }
@@ -4109,11 +4310,11 @@ mod tests {
             Ty::Union(vec![
                 Ty::Tagged {
                     tag_id: 100,
-                    payload: Box::new(Ty::Int)
+                    payload: Box::new(Ty::I64)
                 },
                 Ty::Tagged {
                     tag_id: 101,
-                    payload: Box::new(Ty::Float)
+                    payload: Box::new(Ty::F64)
                 },
             ])
         );
@@ -4137,16 +4338,16 @@ mod tests {
         match &ty {
             Ty::Struct(fields) => {
                 let field_names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
-                assert!(field_names.contains(&"Int"));
-                assert!(field_names.contains(&"int_methods"));
+                assert!(field_names.contains(&"I64"));
+                assert!(field_names.contains(&"i64_methods"));
                 assert!(field_names.contains(&"prelude"));
                 assert!(field_names.contains(&"not"));
 
-                // int_methods should be a MethodSet for Int
-                let int_methods = fields.iter().find(|(n, _)| n == "int_methods").unwrap();
+                // i64_methods should be a MethodSet for I64
+                let int_methods = fields.iter().find(|(n, _)| n == "i64_methods").unwrap();
                 match &int_methods.1 {
                     Ty::MethodSet { tag_id, .. } => {
-                        assert_eq!(*tag_id, TAG_ID_INT);
+                        assert_eq!(*tag_id, TAG_ID_I64);
                     }
                     other => panic!("expected MethodSet, got {:?}", other),
                 }

@@ -12,7 +12,7 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | `float` (64-bit) | Implemented | Literals, arithmetic, div-by-zero check |
 | `bool` (`true`/`false`) | Implemented | |
 | `byte` (literal `b'a'`, `0xF4`) | Implemented | `b'a'` is explicit byte literal; `0xF4` is an int literal that coerces to byte via `IntLiteral` unification |
-| `byte` (plain `4` auto-converts) | Implemented | Type checker validates `IntLiteral` → `Byte` coercion; runtime auto-coerces int 0..255 to byte in method dispatch |
+| `byte` (plain `4` auto-converts) | Implemented | Type checker validates int literal → `Byte` coercion via constrained Infer; runtime auto-coerces int 0..255 to byte in method dispatch |
 | Hex integer literals (`0xFF`) | Implemented | Parsed by lexer; underscore separators supported |
 | Binary integer literals (`0b1010`) | Implemented | Parsed by lexer; underscore separators supported |
 | `char` (Unicode scalar) | Implemented | |
@@ -21,13 +21,14 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | Multi-line strings (`\\` prefix, Zig-style) | Implemented | Lexer joins `\\`-prefixed lines, strips leading whitespace |
 | `as_bytes` (string to byte array) | Implemented | String method |
 | `chars()` (string to codepoints) | Implemented | String method |
-| Other bit-size constructors | Not implemented | Spec mentions "other bit sizes via constructors" |
-| Literal-typed numerics / auto-coercion | Implemented | `IntLiteral` coerces to `Int` or `Byte` during unification; `FloatLiteral` coerces to `Float` |
+| `i32` (32-bit signed integer) | Implemented | `I32` type with full arithmetic, comparison, and conversion methods; `i32()` type hint constructor |
+| `f32` (32-bit float) | Implemented | `F32` type with full arithmetic, comparison, rounding, and conversion methods; `f32()` type hint constructor |
+| Literal-typed numerics / auto-coercion | Implemented | Int literals create constrained Infer variables that coerce to `Int`, `Byte`, or `I32`; float literals coerce to `Float` or `F32` |
 | Unit `()` | Implemented | |
 | Arrays `[1,2,3]` | Implemented | Creation, concatenation, destructuring |
 | `arr.get(idx)` element access | Implemented | Method on arrays; bounds-checked |
 | `arr.slice(range)` slicing | Implemented | Method on arrays; takes a range struct |
-| Empty array `[]` type refinement | Implemented | `[]` is `Array(Infer(_))`, which unifies with any `Array(T)` via unification; refined on first use as spec requires |
+| Empty array `[]` type refinement | Implemented | `[]` is `Array(Infer(_))`, which unifies with any `Array(T)` via union-find. Unconstrained element types are defaulted to `Unit` after inference (`default_infer_in_arrays`), so standalone `[]` and `[].map{...}` are valid. |
 | Ranges `1..3` | Implemented | Sugar for `(start=1, end=3)` struct |
 | Structs / Tuples / Records | Implemented | Labeled, positional, spread, trailing commas |
 | `(1)` is grouping, not tuple | Implemented | |
@@ -194,6 +195,8 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 | `int(x)` | Implemented | Builtin; converts float/byte/char/bool to int |
 | `float(x)` | Implemented | Builtin; converts int to float |
 | `char(n)` | Implemented | Builtin; converts int/byte to char (Unicode scalar validation) |
+| `i32(x)` | Implemented | Type hint; I32 → I32 identity, coerces int literals at runtime |
+| `f32(x)` | Implemented | Type hint; F32 → F32 identity, coerces float literals at runtime |
 | `ref_eq(a, b)` | Implemented | Builtin; structural equality for any values including functions |
 
 ---
@@ -237,8 +240,8 @@ Cross-reference of DESIGN.md spec against the current interpreter implementation
 
 | Spec Feature | Status | Notes |
 |---|---|---|
-| Static typing | Implemented | `types.rs`: forward checker with unification validates all expressions — literals, bindings, calls, method dispatch (2-stage: struct field, method set; method-not-found is a type error), branch arm consistency, struct/array construction, destructuring (struct + array patterns), tagged types, precise builtin param+return types, auto-apply prelude on `use(std)`, union/sum types for tagged branches, method param type checking with error propagation, numeric literal coercion; `method_set` tracked as `Ty::MethodSetConstructor` (works through field access and aliasing); `ref_eq`/`val_eq` enforce same-type arguments via generics |
-| Type inference | Implemented | Forward propagation + unification + bidirectional inference for block/branch `in` parameters (inline and stored); `Ty::Infer(u64)` inference variables for deferred type resolution (standalone blocks, empty arrays, pattern fallbacks) — each use site gets a unique ID via `TyEnv::fresh_infer()`; generic type variables (`Ty::Generic(id)`) for parametric methods — type information flows through `map`, `filter`, `fold`, `zip`, `get`, `slice`, `ref_eq`, `val_eq`, etc. via `unify_with_generics` + `substitute_generics`; tagged value method dispatch; built-in comparison fallback for types without method sets; rest pattern struct type propagation; tag payload resolution in branch patterns; numeric literal coercion (`IntLiteral` coerces to `Int`/`Byte`, `FloatLiteral` coerces to `Float`); literal defaulting in bindings; no annotation syntax needed (fully inferred) |
+| Static typing | Implemented | `types.rs`: forward checker with unification validates all expressions — literals, bindings, calls, method dispatch (2-stage: struct field, method set; method-not-found is a type error), branch arm consistency, struct/array construction, destructuring (struct + array patterns), tagged types, precise builtin param+return types, auto-apply prelude on `use(std)`, union/sum types for tagged branches, method param type checking with error propagation, numeric literal coercion via constrained Infer; `method_set` tracked as `Ty::MethodSetConstructor` (works through field access and aliasing); `ref_eq`/`val_eq` enforce same-type arguments via generics |
+| Type inference | Implemented | Forward propagation + unification + bidirectional inference for block/branch `in` parameters (inline and stored); `Ty::Infer(u64)` inference variables for deferred type resolution (standalone blocks, empty arrays, pattern fallbacks) — each use site gets a unique ID via `TyEnv::fresh_infer()`; constrained Infer variables for numeric literals (`InferConstraint::IntLiteral` coerces to `Int`/`Byte`/`I32`, `InferConstraint::FloatLiteral` coerces to `Float`/`F32`); generic type variables (`Ty::Generic(id)`) for parametric methods — type information flows through `map`, `filter`, `fold`, `zip`, `get`, `slice`, `ref_eq`, `val_eq`, etc. via `unify_with_generics` + `substitute_generics`; tagged value method dispatch; built-in comparison fallback for types without method sets; rest pattern struct type propagation; tag payload resolution in branch patterns; literal defaulting in bindings; no annotation syntax needed (fully inferred) |
 | Generic array methods | Implemented | Array method signatures use `Generic(0)`/`Generic(1)` type variables: `get: Array(T)→T`, `map: Array(T)×(T→U)→Array(U)`, `filter: Array(T)×(T→Bool)→Array(T)`, `fold: Array(T)×(U, (acc:U,elem:T)→U)→U`, `zip: Array(T)×Array(U)→Array((T,U))`, etc. |
 | Occurs check | Implemented | Totality maintained by disallowing recursion syntactically; without recursive bindings or Y-combinator, infinite types cannot be constructed, so the occurs check is trivially satisfied |
 | Compilation = evaluation | Implemented | Single pass |
@@ -256,6 +259,9 @@ Programs whose result type contains unresolved inference variables (`Ty::Infer`)
 | `Ty::contains_infer()` recursive check | Implemented | Traverses Array, Fn, Struct, Tagged, Union |
 | Top-level rejection of unresolved Infer | Implemented | `lib.rs` rejects programs whose result type contains Infer |
 | BranchBlock shares `input_ty` with arm checking | Implemented | Was disconnected; now matches Block behavior |
+| `block_bodies` re-check mechanism | Implemented | `let f = { body }` → `f(x)` re-checks body with known arg type. Extended for struct fields (`s.f(x)`) and method sets. |
+| Union-find inference (`infer_subst`) | Implemented | `TyEnv::infer_subst: HashMap<u64, Ty>` records `Infer(id) → resolved type` during unification. `resolve()` chases chains. Constrained Infer variables (`InferConstraint::IntLiteral`, `FloatLiteral`) restrict which concrete types a numeric literal can resolve to. All `unify`/`unify_with_generics` calls now record bindings. |
+| Branch exhaustiveness check | Implemented | `check_branch_block_with_input` validates non-exhaustive branches and undefined tags when input type is known |
 
 ### Actionable Inference Bugs
 
@@ -263,24 +269,24 @@ These are cases where programs that should type-check according to the spec fail
 
 | # | Bug | Tests | Root Cause | Fix |
 |---|---|---|---|---|
-| I1 | Named struct destructuring: `(x=1, y=2) >> let(x, y)` | 6 tests (`dual_let_by_name`, `bug47_*`, `probe17_let_destructure_then_use_both`, `probe18c_destructure_named`) | `check_let` always looks up fields positionally when pattern fields have no explicit label. For `let(x, y)` on `(x=1, y=2)`, it looks for fields "0" and "1" which don't exist, producing Infer. | Add the `bind_by_name` logic from `eval.rs` to `check_let`: when pattern names match struct field names, look up by name instead of position. |
-| I2 | String destructuring via `let[...]` | 10 tests (`string_destructure_*`, `let_array_assign_sugar_*`) | `check_let_array` only handles `Ty::Array(elem)`. When input is `Ty::String`, it falls through to `fresh_infer()`. | Add a `Ty::String` arm to `check_let_array` that yields `Ty::String` as the element type (strings destructure to single-char strings per spec and runtime). |
-| I3 | Struct field function calls: `obj.field(args)` | 15 tests (`bug45_*`, `bug51_*`, `r2_struct_as_module`, `probe22a_*`, `probe22b_struct_as_module`, `probe18b_struct_field_function_takes_priority`, `import_module_with_function`) | Struct fields containing blocks have type `Fn(Infer -> Infer)`. When called via `obj.field(args)`, the generic Fn path cannot resolve the Infer param/ret because there is no `block_bodies` entry for struct fields. | Requires union-find inference (D3). |
-| I4 | Unit destructuring with rest: `() >> let(...rest)` | 3 tests (`bug55_unit_destructure_rest`, `bug55_unit_destructure_only_rest`, `probe24_empty_struct_let_destructure_rest`) | `check_let` rest pattern on a non-`Struct` input (Unit is not `Ty::Struct(vec![])`) returns `fresh_infer()`. | Treat `Ty::Unit` as `Ty::Struct(vec![])` in the rest-pattern branch of `check_let`, yielding `Ty::Unit` for the rest capture. |
-| I5 | Empty array operations: `[].map{...}`, `[].get(0)`, `[] + []`, `[] >> let[...]` | 9 tests (`minor_empty_array`, `edge20_map_empty_array`, `bug19_rest_pattern_empty_array`, `probe18b_array_*_empty`, `probe23_empty_array_*`) | Empty array `[]` has element type `Infer`. Method dispatch and destructuring on `Infer`-element arrays propagates Infer through generics. | Per D2, empty arrays without a constraining context are correctly rejected. Tests that use `[]` in a context that *does* constrain it (e.g., `[] + [1]`) should work once union-find inference is implemented. Tests that use `[]` standalone or only with other empty arrays are correctly errors. Review each test and reclassify. |
-| I6 | Tag branch matching failures | 5 tests (`minor_non_exhaustive_branch`, `edge8_match_untagged_with_tag_pattern`, `probe17_shadowed_tag_old_value_no_match`, `probe17b_undefined_tag_pattern_with_parens`, `probe17b_tag_identity_mismatch`) | Various: tag payload resolution in branch patterns yields Infer when the tag ID is unknown at check time, or when branching over values whose tag type cannot be determined statically. | Per D5, non-exhaustive branches and non-exhaustive `let` destructuring should be type errors. Each test needs individual analysis: some should become `assert_error` tests for non-exhaustiveness, others need the checker to resolve tag payload types from the branch input type. |
-| I7 | Higher-order functions returning closures | 5 tests (`call_with_block`, `probe22b_higher_order_compose`, `probe22b_tagged_option_map`, `probe24_array_of_functions_get`, `probe24_array_of_functions_apply_via_let`) | Closures returned from other closures or retrieved from arrays have type `Fn(Infer -> Infer)`. The `block_bodies` mechanism only tracks direct `let name = { block }` bindings; indirection (function return, array storage, aliasing) breaks the link. | Requires union-find inference (D3/D4). |
-| I8 | Method sets: `method_set(Tag, struct_of_fns)` / `apply(ms)` | 6 tests (`method_set_basic`, `method_set_multiple_methods`, `method_set_shadowing`, `method_set_with_additional_args`, `method_set_design_example`, `std_type_constructors`) | The type checker handles `method_set` and `apply` at a structural level (tracking `Ty::MethodSet` and `Ty::MethodSetConstructor`), but the closures inside the method struct have `Fn(Infer -> Infer)` types that are never resolved because the checker doesn't model the method bodies being called with concrete tag payloads. | Requires union-find inference (D3/D4) for the closure types, plus type-checking method bodies at `apply` time when the tag type is known. |
-| I9 | Standalone closure as program result: `{ in + 1 }` | 1 test (`probe19c_closure_display`) | A block that is never called has type `Fn(Infer -> Infer)`. The `contains_infer` check rejects it. | Per D1, this is correctly rejected. Test should become `assert_error`. |
+| I1 | Named struct destructuring: `(x=1, y=2) >> let(x, y)` | 6 tests (`dual_let_by_name`, `bug47_*`, `probe17_let_destructure_then_use_both`, `probe18c_destructure_named`) | `check_let` always looks up fields positionally when pattern fields have no explicit label. For `let(x, y)` on `(x=1, y=2)`, it looks for fields "0" and "1" which don't exist, producing Infer. | **Fixed.** Added `bind_by_name` logic mirroring `eval.rs` to `check_let`. |
+| I2 | String destructuring via `let[...]` | 10 tests (`string_destructure_*`, `let_array_assign_sugar_*`) | `check_let_array` only handles `Ty::Array(elem)`. When input is `Ty::String`, it falls through to `fresh_infer()`. | **Fixed.** Added `Ty::String` arm to `check_let_array`. |
+| I3 | Struct field function calls: `obj.field(args)` | 15 tests | Struct fields containing blocks have type `Fn(Infer -> Infer)`. When called via `obj.field(args)`, the block body needs re-checking. | **Fixed.** Union-find + struct field `block_bodies` tracking + inline struct literal + FieldAccess in check_call + block body propagation through destructuring and function returns. All 15 tests pass. |
+| I4 | Unit destructuring with rest: `() >> let(...rest)` | 3 tests (`bug55_unit_destructure_rest`, `bug55_unit_destructure_only_rest`, `probe24_empty_struct_let_destructure_rest`) | `check_let` rest pattern on a non-`Struct` input (Unit is not `Ty::Struct(vec![])`) returns `fresh_infer()`. | **Fixed.** Treat `Ty::Unit` as empty struct in rest-pattern branch. |
+| I5 | Empty array operations: `[].map{...}`, `[].get(0)`, `[] + []`, `[] >> let[...]` | 9 tests | Empty array `[]` has element type `Infer`. | **Fixed.** Unconstrained `Infer` inside arrays is defaulted to `Unit` after inference completes (`default_infer_in_arrays`). Empty arrays are valid expressions — D2 revised. All 9 tests pass. |
+| I6 | Tag branch matching failures | 5 tests (`minor_non_exhaustive_branch`, `edge8_match_untagged_with_tag_pattern`, `probe17_shadowed_tag_old_value_no_match`, `probe17b_undefined_tag_pattern_with_parens`, `probe17b_tag_identity_mismatch`) | Various: undefined tags in branch patterns, non-exhaustive branches. | **Fixed.** Per D5, non-exhaustive branches and undefined tags are now type errors. Added exhaustiveness check in `check_branch_block_with_input`. |
+| I7 | Higher-order functions returning closures | 5 tests (`call_with_block`, `probe22b_higher_order_compose`, `probe22b_tagged_option_map`, `probe24_array_of_functions_get`, `probe24_array_of_functions_apply_via_let`) | Closures returned from other closures or retrieved from arrays have type `Fn(Infer -> Infer)`. | **Fixed.** Block body propagation through identity functions (`resolve_to_block_mir`), compose-like tail expressions (`find_tail_expr`), let destructuring (`propagate_block_bodies_to_fields`), tag pattern fix in `bind_branch_pattern`, and array element block body propagation via `"\0arr:name"` keys in `block_bodies`. All 5 tests pass. |
+| I8 | Method sets: `method_set(Tag, struct_of_fns)` / `apply(ms)` | 6 tests | The closures inside the method struct have `Fn(Infer -> Infer)` types. | **Fixed.** Block bodies from method set registration are stored under `"\0ms{id}.{method}"` keys and re-checked when the method is called. All 6 tests pass. |
+| I9 | Standalone closure as program result: `{ in + 1 }` | 1 test (`probe19c_closure_display`) | A block that is never called has type `Fn(Infer -> Infer)`. The `contains_infer` check rejects it. | **Fixed.** Per D1, correctly rejected. Test updated to `assert_error`. |
 
 ### Design Decisions (Resolved)
 
 | # | Decision | Notes |
 |---|---|---|
 | D1 | Standalone closures as program results: **reject**. A program must produce a fully-typed value. Current behavior is correct. | |
-| D2 | Empty arrays without type context: **reject**. `[]` requires a context that constrains the element type (e.g., `[] + [1]`). Current behavior is correct. | |
-| D3 | Closures in data structures: **union-find inference**. Replace the current `Infer` wildcard with linked inference variables so that resolving any occurrence propagates to all references. This subsumes the `block_bodies` re-check mechanism. | Covers I3, I7, I8 |
-| D4 | Higher-order function inference: **same as D3** — union-find inference. Re-checking at call sites (D4:A) would require user-defined generics, which the language doesn't support. | Covers I7 |
+| D2 | Empty arrays: **accept**. Unconstrained `Infer` inside `Array` is defaulted to `Unit` after inference. `[]` is a valid empty array. (Revised from earlier "reject" — defaulting is safe since no elements exist to observe the type.) | |
+| D3 | Closures in data structures: **union-find inference + block body propagation**. Union-find links inference variables across uses. `block_bodies` HashMap stores MIR for deferred re-checking at call sites. Array element blocks propagated via `"\0arr:name"` keys. | Covers I3, I7, I8 |
+| D4 | Higher-order function inference: **same as D3** — union-find inference + block body re-checking. All 5 I7 tests pass. | Covers I7 |
 | D5 | Non-exhaustive branches: **type error**. Non-exhaustive `let` destructuring is also a type error. Note: inside branch arms, partial patterns are fine (the branch itself handles exhaustiveness). An `if let`-style construct may be needed in the future for partial `let` patterns outside branches. | Covers I6 |
 
 ---
@@ -298,6 +304,3 @@ These are cases where programs that should type-check according to the spec fail
 **Large / Architectural:**
 1. Resource types (clone restriction, borrow semantics)
 2. WebAssembly compilation backend
-
-**Small / Stdlib:**
-3. Other bit-size numeric constructors (spec mentions "other bit sizes via constructors" — deferred, requires new Value variants)

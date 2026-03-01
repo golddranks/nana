@@ -3,16 +3,17 @@
 //! A forward type checker operating on the MIR with unification and bidirectional
 //! inference. Validates all expressions: literals, bindings, calls, method dispatch,
 //! branch arm consistency, struct/array construction, destructuring, and method set
-//! generativity. Numeric literal types (`IntLiteral`, `FloatLiteral`) coerce to
-//! concrete types via unification.
+//! generativity. Numeric literals create constrained inference variables that
+//! resolve to concrete types (Int/Byte for int literals, Float for float literals)
+//! via unification.
 
 use std::collections::HashMap;
 
 use crate::ast::{ArrayPat, BranchBinding, Pattern};
 use crate::mir::{Mir, MirBranchPattern, MirKind};
 use crate::value::{
-    TAG_ID_ARRAY, TAG_ID_BOOL, TAG_ID_BYTE, TAG_ID_CHAR, TAG_ID_FLOAT, TAG_ID_INT, TAG_ID_STRING,
-    TAG_ID_UNIT, TagId,
+    TAG_ID_ARRAY, TAG_ID_BOOL, TAG_ID_BYTE, TAG_ID_CHAR, TAG_ID_F32, TAG_ID_FLOAT, TAG_ID_I32,
+    TAG_ID_INT, TAG_ID_STRING, TAG_ID_UNIT, TagId,
 };
 
 // ── Types ───────────────────────────────────────────────────────
@@ -25,6 +26,8 @@ pub enum Ty {
     String,
     Char,
     Byte,
+    I32,
+    F32,
     Unit,
     Array(Box<Ty>),
     Struct(Vec<(std::string::String, Ty)>),
@@ -48,12 +51,6 @@ pub enum Ty {
     /// Sum type: one of several possible types (e.g. `Ok(Int) | Err(String)`).
     /// Variants are always flattened (no nested unions).
     Union(Vec<Ty>),
-    /// Numeric literal types: coerce to compatible types during unification.
-    /// `IntLiteral` coerces to `Int` or `Byte`.
-    /// `FloatLiteral` coerces to `Float`.
-    /// When no context forces coercion, they default to `Int` / `Float`.
-    IntLiteral,
-    FloatLiteral,
     /// Inference variable: type not yet determined. Each use site gets a
     /// unique ID via `TyEnv::fresh_infer()`. Unifies with any concrete type,
     /// resolving to that type. Not a type in the language — only exists
@@ -64,6 +61,17 @@ pub enum Ty {
     /// Used in parametric signatures (e.g. array methods, ref_eq/val_eq).
     /// `Generic(0)` = first type variable T, `Generic(1)` = second U.
     Generic(u64),
+}
+
+/// Constraint on an inference variable, restricting which concrete types it can resolve to.
+/// Numeric literals create constrained Infer variables: int literals can become Int or Byte,
+/// float literals can become Float.
+#[derive(Debug, Clone, PartialEq)]
+enum InferConstraint {
+    /// Can resolve to Int or Byte. Defaults to Int if unconstrained at end.
+    IntLiteral,
+    /// Can resolve to Float only. Defaults to Float if unconstrained at end.
+    FloatLiteral,
 }
 
 impl Ty {
@@ -79,6 +87,93 @@ impl Ty {
             Ty::Union(variants) => variants.iter().any(|ty| ty.contains_infer()),
             _ => false,
         }
+    }
+
+    /// Default unresolved `Infer` variables inside arrays to `Unit`.
+    /// Empty arrays have unknowable element types — this is benign since
+    /// no elements exist. Other Infer positions (closures, structs) are
+    /// left as-is so the `contains_infer` check can reject them.
+    pub fn default_infer_in_arrays(&self) -> Ty {
+        match self {
+            Ty::Array(elem) => Ty::Array(Box::new(elem.default_infer_recursive())),
+            Ty::Fn { param, ret } => Ty::Fn {
+                param: Box::new(param.default_infer_in_arrays()),
+                ret: Box::new(ret.default_infer_in_arrays()),
+            },
+            Ty::Struct(fields) => Ty::Struct(
+                fields.iter().map(|(n, t)| (n.clone(), t.default_infer_in_arrays())).collect(),
+            ),
+            Ty::Tagged { tag_id, payload } => Ty::Tagged {
+                tag_id: *tag_id,
+                payload: Box::new(payload.default_infer_in_arrays()),
+            },
+            Ty::Union(variants) => Ty::Union(
+                variants.iter().map(|t| t.default_infer_in_arrays()).collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
+    /// Replace all `Infer` with `Unit` recursively. Used inside arrays
+    /// where unconstrained element types are acceptable.
+    fn default_infer_recursive(&self) -> Ty {
+        match self {
+            Ty::Infer(_) => Ty::Unit,
+            Ty::Array(elem) => Ty::Array(Box::new(elem.default_infer_recursive())),
+            Ty::Fn { param, ret } => Ty::Fn {
+                param: Box::new(param.default_infer_recursive()),
+                ret: Box::new(ret.default_infer_recursive()),
+            },
+            Ty::Struct(fields) => Ty::Struct(
+                fields.iter().map(|(n, t)| (n.clone(), t.default_infer_recursive())).collect(),
+            ),
+            Ty::Tagged { tag_id, payload } => Ty::Tagged {
+                tag_id: *tag_id,
+                payload: Box::new(payload.default_infer_recursive()),
+            },
+            Ty::Union(variants) => Ty::Union(
+                variants.iter().map(|t| t.default_infer_recursive()).collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+}
+
+/// Infer a Ty from a runtime Value.
+/// Used by the REPL to persist type bindings across lines.
+/// Needs `env` to allocate fresh Infer IDs for unknown types (empty arrays, closures).
+pub fn ty_from_value(val: &crate::value::Value, env: &mut TyEnv) -> Ty {
+    use crate::value::Value;
+    match val {
+        Value::Int(_) => Ty::Int,
+        Value::Float(_) => Ty::Float,
+        Value::Bool(_) => Ty::Bool,
+        Value::Str(_) => Ty::String,
+        Value::Char(_) => Ty::Char,
+        Value::Byte(_) => Ty::Byte,
+        Value::I32(_) => Ty::I32,
+        Value::F32(_) => Ty::F32,
+        Value::Unit => Ty::Unit,
+        Value::Array(elems) => {
+            if let Some(first) = elems.first() {
+                Ty::Array(Box::new(ty_from_value(first, env)))
+            } else {
+                Ty::Array(Box::new(env.fresh_infer()))
+            }
+        }
+        Value::Struct(fields) => Ty::Struct(
+            fields.iter().map(|(n, v)| (n.clone(), ty_from_value(v, env))).collect(),
+        ),
+        Value::Tagged { id, payload, .. } => Ty::Tagged {
+            tag_id: *id,
+            payload: Box::new(ty_from_value(payload, env)),
+        },
+        Value::TagConstructor { id, .. } => Ty::TagConstructor(*id),
+        Value::Closure { .. } | Value::BranchClosure { .. } | Value::BuiltinFn(_) => Ty::Fn {
+            param: Box::new(env.fresh_infer()),
+            ret: Box::new(env.fresh_infer()),
+        },
+        Value::MethodSet { .. } => Ty::Unit, // opaque at type level
     }
 }
 
@@ -102,6 +197,14 @@ pub struct TyEnv {
     /// When `let f = { body }`, we store body here keyed by binding name.
     /// On `f(x)`, we re-check body with `in` bound to arg type.
     block_bodies: HashMap<std::string::String, Mir>,
+    /// Union-find substitution: Infer(id) → resolved type.
+    /// When unify encounters Infer(id), it records the binding here.
+    /// resolve() chases these links to find the concrete type.
+    infer_subst: HashMap<u64, Ty>,
+    /// Constraints on inference variables: id → constraint.
+    /// Numeric literals create constrained Infer vars that can only resolve
+    /// to certain concrete types (e.g. IntLiteral → Int or Byte).
+    infer_constraints: HashMap<u64, InferConstraint>,
 }
 
 impl TyEnv {
@@ -113,6 +216,8 @@ impl TyEnv {
             next_infer_id: 0,
             method_sets: HashMap::new(),
             block_bodies: HashMap::new(),
+            infer_subst: HashMap::new(),
+            infer_constraints: HashMap::new(),
         }
     }
 
@@ -126,6 +231,8 @@ impl TyEnv {
         self.method_sets = other.method_sets.clone();
         self.next_ms_id = other.next_ms_id;
         self.next_infer_id = other.next_infer_id;
+        self.infer_subst = other.infer_subst.clone();
+        self.infer_constraints = other.infer_constraints.clone();
         self
     }
 
@@ -155,6 +262,103 @@ impl TyEnv {
         Ty::Infer(id)
     }
 
+    /// Create a fresh inference variable with a constraint.
+    /// Used for numeric literals: int literals get IntLiteral constraint,
+    /// float literals get FloatLiteral constraint.
+    fn fresh_constrained_infer(&mut self, constraint: InferConstraint) -> Ty {
+        let id = self.next_infer_id;
+        self.next_infer_id += 1;
+        self.infer_constraints.insert(id, constraint);
+        Ty::Infer(id)
+    }
+
+    /// Look up the constraint on an inference variable, if any.
+    fn infer_constraint(&self, id: u64) -> Option<&InferConstraint> {
+        self.infer_constraints.get(&id)
+    }
+
+    /// Default constrained Infer variables to their concrete defaults.
+    /// IntLiteral-constrained → Int, FloatLiteral-constrained → Float.
+    /// Unconstrained Infer is left as-is (for `contains_infer` to catch).
+    pub fn default_constrained_infer(&self, ty: &Ty) -> Ty {
+        match ty {
+            Ty::Infer(id) => {
+                if let Some(resolved) = self.infer_subst.get(id) {
+                    return self.default_constrained_infer(&self.resolve(resolved));
+                }
+                match self.infer_constraint(*id) {
+                    Some(InferConstraint::IntLiteral) => Ty::Int,
+                    Some(InferConstraint::FloatLiteral) => Ty::Float,
+                    None => ty.clone(),
+                }
+            }
+            Ty::Array(elem) => Ty::Array(Box::new(self.default_constrained_infer(elem))),
+            Ty::Fn { param, ret } => Ty::Fn {
+                param: Box::new(self.default_constrained_infer(param)),
+                ret: Box::new(self.default_constrained_infer(ret)),
+            },
+            Ty::Struct(fields) => Ty::Struct(
+                fields.iter().map(|(n, t)| (n.clone(), self.default_constrained_infer(t))).collect(),
+            ),
+            Ty::Tagged { tag_id, payload } => Ty::Tagged {
+                tag_id: *tag_id,
+                payload: Box::new(self.default_constrained_infer(payload)),
+            },
+            Ty::Union(variants) => Ty::Union(
+                variants.iter().map(|t| self.default_constrained_infer(t)).collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
+    /// Default constrained Infer only inside Fn types.
+    /// Used at binding boundaries to freeze function signatures while keeping
+    /// plain values flexible for later unification.
+    fn default_constrained_infer_in_fn(&self, ty: &Ty) -> Ty {
+        match ty {
+            Ty::Fn { param, ret } => Ty::Fn {
+                param: Box::new(self.default_constrained_infer(param)),
+                ret: Box::new(self.default_constrained_infer(ret)),
+            },
+            Ty::Array(elem) => Ty::Array(Box::new(self.default_constrained_infer_in_fn(elem))),
+            Ty::Struct(fields) => Ty::Struct(
+                fields.iter().map(|(n, t)| (n.clone(), self.default_constrained_infer_in_fn(t))).collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
+    /// Resolve a type by chasing Infer links through the substitution table.
+    /// Recursively resolves compound types so that all nested Infer variables
+    /// are replaced with their concrete types (if known).
+    pub fn resolve(&self, ty: &Ty) -> Ty {
+        match ty {
+            Ty::Infer(id) => {
+                if let Some(resolved) = self.infer_subst.get(id) {
+                    self.resolve(resolved)
+                } else {
+                    ty.clone()
+                }
+            }
+            Ty::Array(elem) => Ty::Array(Box::new(self.resolve(elem))),
+            Ty::Fn { param, ret } => Ty::Fn {
+                param: Box::new(self.resolve(param)),
+                ret: Box::new(self.resolve(ret)),
+            },
+            Ty::Struct(fields) => Ty::Struct(
+                fields.iter().map(|(n, t)| (n.clone(), self.resolve(t))).collect(),
+            ),
+            Ty::Tagged { tag_id, payload } => Ty::Tagged {
+                tag_id: *tag_id,
+                payload: Box::new(self.resolve(payload)),
+            },
+            Ty::Union(variants) => Ty::Union(
+                variants.iter().map(|v| self.resolve(v)).collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+
     fn fresh_method_set_id(&mut self) -> u64 {
         let id = self.next_ms_id;
         self.next_ms_id += 1;
@@ -169,7 +373,7 @@ impl TyEnv {
     /// Find a method's type by searching active method sets in scope.
     /// Scans backwards (most recent first) for shadowing semantics,
     /// mirroring `Env::find_method_in_method_sets`.
-    fn find_method_type(&self, tag_id: TagId, method_name: &str) -> Option<Ty> {
+    fn find_method_type_with_id(&self, tag_id: TagId, method_name: &str) -> Option<(u64, Ty)> {
         for (name, ty) in self.bindings.iter().rev() {
             if !name.starts_with("\0ms") {
                 continue;
@@ -185,7 +389,7 @@ impl TyEnv {
                             if let Some((_, method_ty)) =
                                 fields.iter().find(|(n, _)| n == method_name)
                             {
-                                return Some(method_ty.clone());
+                                return Some((*id, method_ty.clone()));
                             }
                         }
                     }
@@ -197,17 +401,24 @@ impl TyEnv {
 }
 
 /// Map a primitive Ty to its built-in TagId for method set dispatch.
-fn ty_to_tag_id(ty: &Ty) -> Option<TagId> {
+fn ty_to_tag_id(ty: &Ty, env: &TyEnv) -> Option<TagId> {
     match ty {
-        Ty::Int | Ty::IntLiteral => Some(TAG_ID_INT),
-        Ty::Float | Ty::FloatLiteral => Some(TAG_ID_FLOAT),
+        Ty::Int => Some(TAG_ID_INT),
+        Ty::Float => Some(TAG_ID_FLOAT),
         Ty::Bool => Some(TAG_ID_BOOL),
         Ty::String => Some(TAG_ID_STRING),
         Ty::Char => Some(TAG_ID_CHAR),
         Ty::Byte => Some(TAG_ID_BYTE),
+        Ty::I32 => Some(TAG_ID_I32),
+        Ty::F32 => Some(TAG_ID_F32),
         Ty::Array(_) => Some(TAG_ID_ARRAY),
         Ty::Unit => Some(TAG_ID_UNIT),
         Ty::Tagged { tag_id, .. } => Some(*tag_id),
+        Ty::Infer(id) => match env.infer_constraint(*id) {
+            Some(InferConstraint::IntLiteral) => Some(TAG_ID_INT),
+            Some(InferConstraint::FloatLiteral) => Some(TAG_ID_FLOAT),
+            None => None,
+        },
         _ => None,
     }
 }
@@ -251,6 +462,8 @@ pub fn core_module_type() -> Ty {
         ("Byte", TAG_ID_BYTE),
         ("Array", TAG_ID_ARRAY),
         ("Unit", TAG_ID_UNIT),
+        ("I32", TAG_ID_I32),
+        ("F32", TAG_ID_F32),
     ];
     for (name, id) in type_constructors {
         fields.push((name.to_string(), Ty::TagConstructor(*id)));
@@ -295,11 +508,13 @@ pub fn core_module_type() -> Ty {
     // Standalone builtins
     fields.push(("print".into(), f(Ty::String, Ty::Unit)));
 
-    // Type constructors (literal → type only)
-    fields.push(("byte".into(), f(Ty::IntLiteral, Ty::Byte)));
-    fields.push(("int".into(), f(Ty::IntLiteral, Ty::Int)));
-    fields.push(("float".into(), f(Ty::FloatLiteral, Ty::Float)));
-    fields.push(("char".into(), f(Ty::IntLiteral, Ty::Char)));
+    // Type hints — identity functions that assert the type at compile time
+    fields.push(("byte".into(), f(Ty::Byte, Ty::Byte)));
+    fields.push(("int".into(), f(Ty::Int, Ty::Int)));
+    fields.push(("float".into(), f(Ty::Float, Ty::Float)));
+    fields.push(("char".into(), f(Ty::Char, Ty::Char)));
+    fields.push(("i32".into(), f(Ty::I32, Ty::I32)));
+    fields.push(("f32".into(), f(Ty::F32, Ty::F32)));
 
     // Equality builtins (standalone, generic — both args must be same type)
     let g0 = Ty::Generic(0);
@@ -454,6 +669,7 @@ pub fn core_module_type() -> Ty {
     fields.push(("int_to_float".into(), unary(Ty::Int, Ty::Float)));
     fields.push(("int_to_byte".into(), unary(Ty::Int, Ty::Byte)));
     fields.push(("int_to_char".into(), unary(Ty::Int, Ty::Char)));
+    fields.push(("int_to_i32".into(), unary(Ty::Int, Ty::I32)));
 
     // Float methods — arithmetic is Float × Float → Float (no cross-type promotion)
     fields.push(("float_add".into(), binop(Ty::Float, Ty::Float)));
@@ -472,6 +688,7 @@ pub fn core_module_type() -> Ty {
     fields.push(("float_floor".into(), unary(Ty::Float, Ty::Int)));
     fields.push(("float_round".into(), unary(Ty::Float, Ty::Int)));
     fields.push(("float_trunc".into(), unary(Ty::Float, Ty::Int)));
+    fields.push(("float_to_f32".into(), unary(Ty::Float, Ty::F32)));
 
     // Bool methods
     fields.push(("bool_eq".into(), binop(Ty::Bool, Ty::Bool)));
@@ -497,6 +714,46 @@ pub fn core_module_type() -> Ty {
     fields.push(("byte_gt_eq".into(), binop(Ty::Byte, Ty::Bool)));
     fields.push(("byte_to_string".into(), unary(Ty::Byte, Ty::String)));
     fields.push(("byte_to_int".into(), unary(Ty::Byte, Ty::Int)));
+    fields.push(("byte_to_i32".into(), unary(Ty::Byte, Ty::I32)));
+
+    // I32 methods — arithmetic is I32 × I32 → I32
+    fields.push(("i32_add".into(), binop(Ty::I32, Ty::I32)));
+    fields.push(("i32_subtract".into(), binop(Ty::I32, Ty::I32)));
+    fields.push(("i32_times".into(), binop(Ty::I32, Ty::I32)));
+    fields.push(("i32_divided_by".into(), binop(Ty::I32, Ty::I32)));
+    fields.push(("i32_negate".into(), unary(Ty::I32, Ty::I32)));
+    fields.push(("i32_eq".into(), binop(Ty::I32, Ty::Bool)));
+    fields.push(("i32_not_eq".into(), binop(Ty::I32, Ty::Bool)));
+    fields.push(("i32_lt".into(), binop(Ty::I32, Ty::Bool)));
+    fields.push(("i32_gt".into(), binop(Ty::I32, Ty::Bool)));
+    fields.push(("i32_lt_eq".into(), binop(Ty::I32, Ty::Bool)));
+    fields.push(("i32_gt_eq".into(), binop(Ty::I32, Ty::Bool)));
+    fields.push(("i32_to_string".into(), unary(Ty::I32, Ty::String)));
+    fields.push(("i32_to_int".into(), unary(Ty::I32, Ty::Int)));
+    fields.push(("i32_to_float".into(), unary(Ty::I32, Ty::Float)));
+    fields.push(("i32_to_f32".into(), unary(Ty::I32, Ty::F32)));
+    fields.push(("i32_to_byte".into(), unary(Ty::I32, Ty::Byte)));
+
+    // F32 methods — arithmetic is F32 × F32 → F32
+    fields.push(("f32_add".into(), binop(Ty::F32, Ty::F32)));
+    fields.push(("f32_subtract".into(), binop(Ty::F32, Ty::F32)));
+    fields.push(("f32_times".into(), binop(Ty::F32, Ty::F32)));
+    fields.push(("f32_divided_by".into(), binop(Ty::F32, Ty::F32)));
+    fields.push(("f32_negate".into(), unary(Ty::F32, Ty::F32)));
+    fields.push(("f32_eq".into(), binop(Ty::F32, Ty::Bool)));
+    fields.push(("f32_not_eq".into(), binop(Ty::F32, Ty::Bool)));
+    fields.push(("f32_lt".into(), binop(Ty::F32, Ty::Bool)));
+    fields.push(("f32_gt".into(), binop(Ty::F32, Ty::Bool)));
+    fields.push(("f32_lt_eq".into(), binop(Ty::F32, Ty::Bool)));
+    fields.push(("f32_gt_eq".into(), binop(Ty::F32, Ty::Bool)));
+    fields.push(("f32_to_string".into(), unary(Ty::F32, Ty::String)));
+    fields.push(("f32_to_float".into(), unary(Ty::F32, Ty::Float)));
+    fields.push(("f32_to_int".into(), unary(Ty::F32, Ty::Int)));
+    fields.push(("f32_to_i32".into(), unary(Ty::F32, Ty::I32)));
+    fields.push(("f32_ceil".into(), unary(Ty::F32, Ty::I32)));
+    fields.push(("f32_floor".into(), unary(Ty::F32, Ty::I32)));
+    fields.push(("f32_round".into(), unary(Ty::F32, Ty::I32)));
+    fields.push(("f32_trunc".into(), unary(Ty::F32, Ty::I32)));
 
     // Unit methods — after prepend_arg(Unit, Unit) = Unit, so param is just Unit
     fields.push(("unit_eq".into(), unary(Ty::Unit, Ty::Bool)));
@@ -508,7 +765,7 @@ pub fn core_module_type() -> Ty {
 // ── Unification ─────────────────────────────────────────────────
 
 /// Add a type to a union, merging same-tag variants. Returns the new union.
-fn union_add(mut variants: Vec<Ty>, ty: Ty) -> Result<Ty, std::string::String> {
+fn union_add(mut variants: Vec<Ty>, ty: Ty, env: &mut TyEnv) -> Result<Ty, std::string::String> {
     // Flatten: if ty is itself a Union, merge all its variants
     let to_add = match ty {
         Ty::Union(inner) => inner,
@@ -530,7 +787,7 @@ fn union_add(mut variants: Vec<Ty>, ty: Ty) -> Result<Ty, std::string::String> {
             ) = (existing, &t)
             {
                 if id1 == id2 {
-                    let unified_payload = unify(p1, p2)?;
+                    let unified_payload = unify(p1, p2, env)?;
                     *p1 = Box::new(unified_payload);
                     merged = true;
                     break;
@@ -551,12 +808,72 @@ fn union_add(mut variants: Vec<Ty>, ty: Ty) -> Result<Ty, std::string::String> {
     }
 }
 
+/// Merge two inference constraints. Returns error if incompatible.
+fn merge_constraints(
+    c1: Option<&InferConstraint>,
+    c2: Option<&InferConstraint>,
+) -> Result<Option<InferConstraint>, std::string::String> {
+    match (c1, c2) {
+        (None, None) => Ok(None),
+        (Some(c), None) | (None, Some(c)) => Ok(Some(c.clone())),
+        (Some(InferConstraint::IntLiteral), Some(InferConstraint::IntLiteral)) => {
+            Ok(Some(InferConstraint::IntLiteral))
+        }
+        (Some(InferConstraint::FloatLiteral), Some(InferConstraint::FloatLiteral)) => {
+            Ok(Some(InferConstraint::FloatLiteral))
+        }
+        _ => Err("type error: cannot unify int literal with float literal".to_string()),
+    }
+}
+
+/// Check that a concrete type is allowed by the constraint on an Infer variable.
+fn check_constraint_allows(env: &TyEnv, id: u64, ty: &Ty) -> Result<(), std::string::String> {
+    if let Some(constraint) = env.infer_constraint(id) {
+        match constraint {
+            InferConstraint::IntLiteral => match ty {
+                Ty::Int | Ty::Byte | Ty::I32 => Ok(()),
+                _ => Err(format!("type error: cannot unify {:?} with {:?}", Ty::Int, ty)),
+            },
+            InferConstraint::FloatLiteral => match ty {
+                Ty::Float | Ty::F32 => Ok(()),
+                _ => Err(format!("type error: cannot unify {:?} with {:?}", Ty::Float, ty)),
+            },
+        }
+    } else {
+        Ok(())
+    }
+}
+
 /// Check if two types are compatible and return the unified type.
-/// `Unknown` is compatible with any type (acts as a wildcard).
-pub fn unify(a: &Ty, b: &Ty) -> Result<Ty, std::string::String> {
-    match (a, b) {
-        // Infer/Generic unify with anything (wildcards)
-        (Ty::Infer(_), other) | (other, Ty::Infer(_)) => Ok(other.clone()),
+/// Records Infer bindings in env.infer_subst (union-find).
+pub fn unify(a: &Ty, b: &Ty, env: &mut TyEnv) -> Result<Ty, std::string::String> {
+    let a = env.resolve(a);
+    let b = env.resolve(b);
+    match (&a, &b) {
+        // Infer: constraint-aware union-find
+        (Ty::Infer(id), Ty::Infer(id2)) if id == id2 => Ok(a.clone()),
+        (Ty::Infer(id1), Ty::Infer(id2)) => {
+            // Merge constraints from both Infer vars
+            let c1 = env.infer_constraint(*id1).cloned();
+            let c2 = env.infer_constraint(*id2).cloned();
+            let merged = merge_constraints(c1.as_ref(), c2.as_ref())?;
+            // Point id1 → id2 (union-find)
+            env.infer_subst.insert(*id1, Ty::Infer(*id2));
+            if let Some(c) = merged {
+                env.infer_constraints.insert(*id2, c);
+            }
+            Ok(Ty::Infer(*id2))
+        }
+        (Ty::Infer(id), other) => {
+            check_constraint_allows(env, *id, other)?;
+            env.infer_subst.insert(*id, other.clone());
+            Ok(other.clone())
+        }
+        (other, Ty::Infer(id)) => {
+            check_constraint_allows(env, *id, other)?;
+            env.infer_subst.insert(*id, other.clone());
+            Ok(other.clone())
+        }
         (Ty::Generic(_), other) | (other, Ty::Generic(_)) => Ok(other.clone()),
 
         // Primitives: must match exactly
@@ -566,16 +883,18 @@ pub fn unify(a: &Ty, b: &Ty) -> Result<Ty, std::string::String> {
         (Ty::String, Ty::String) => Ok(Ty::String),
         (Ty::Char, Ty::Char) => Ok(Ty::Char),
         (Ty::Byte, Ty::Byte) => Ok(Ty::Byte),
+        (Ty::I32, Ty::I32) => Ok(Ty::I32),
+        (Ty::F32, Ty::F32) => Ok(Ty::F32),
         (Ty::Unit, Ty::Unit) => Ok(Ty::Unit),
         (Ty::Array(e1), Ty::Array(e2)) => {
-            let elem = unify(e1, e2)?;
+            let elem = unify(e1, e2, env)?;
             Ok(Ty::Array(Box::new(elem)))
         }
 
         // Functions: unify param and return types
         (Ty::Fn { param: p1, ret: r1 }, Ty::Fn { param: p2, ret: r2 }) => {
-            let param = unify(p1, p2)?;
-            let ret = unify(r1, r2)?;
+            let param = unify(p1, p2, env)?;
+            let ret = unify(r1, r2, env)?;
             Ok(Ty::Fn {
                 param: Box::new(param),
                 ret: Box::new(ret),
@@ -599,7 +918,7 @@ pub fn unify(a: &Ty, b: &Ty) -> Result<Ty, std::string::String> {
                         n1, n2
                     ));
                 }
-                let t = unify(t1, t2)?;
+                let t = unify(t1, t2, env)?;
                 unified.push((n1.clone(), t));
             }
             Ok(Ty::Struct(unified))
@@ -626,7 +945,7 @@ pub fn unify(a: &Ty, b: &Ty) -> Result<Ty, std::string::String> {
             },
         ) => {
             if id1 == id2 {
-                let payload = unify(p1, p2)?;
+                let payload = unify(p1, p2, env)?;
                 Ok(Ty::Tagged {
                     tag_id: *id1,
                     payload: Box::new(payload),
@@ -638,7 +957,7 @@ pub fn unify(a: &Ty, b: &Ty) -> Result<Ty, std::string::String> {
 
         // Union with anything → merge into the union
         (Ty::Union(variants), other) | (other, Ty::Union(variants)) => {
-            union_add(variants.clone(), other.clone())
+            union_add(variants.clone(), other.clone(), env)
         }
 
         // Tagged with non-tagged → union
@@ -669,15 +988,6 @@ pub fn unify(a: &Ty, b: &Ty) -> Result<Ty, std::string::String> {
             }
         }
 
-        // IntLiteral coerces to Int or Byte (not Float — int and float are distinct)
-        (Ty::IntLiteral, Ty::IntLiteral) => Ok(Ty::IntLiteral),
-        (Ty::IntLiteral, Ty::Int) | (Ty::Int, Ty::IntLiteral) => Ok(Ty::Int),
-        (Ty::IntLiteral, Ty::Byte) | (Ty::Byte, Ty::IntLiteral) => Ok(Ty::Byte),
-
-        // FloatLiteral coerces to Float
-        (Ty::FloatLiteral, Ty::FloatLiteral) => Ok(Ty::FloatLiteral),
-        (Ty::FloatLiteral, Ty::Float) | (Ty::Float, Ty::FloatLiteral) => Ok(Ty::Float),
-
         // Everything else: mismatch
         _ => Err(format!("type error: cannot unify {:?} with {:?}", a, b)),
     }
@@ -690,12 +1000,15 @@ fn unify_with_generics(
     a: &Ty,
     b: &Ty,
     subst: &mut HashMap<u64, Ty>,
+    env: &mut TyEnv,
 ) -> Result<Ty, std::string::String> {
-    match (a, b) {
+    let a = env.resolve(a);
+    let b = env.resolve(b);
+    match (&a, &b) {
         (Ty::Generic(id), Ty::Generic(id2)) if id == id2 => Ok(Ty::Generic(*id)),
         (Ty::Generic(id), other) | (other, Ty::Generic(id)) => {
             if let Some(existing) = subst.get(id).cloned() {
-                let unified = unify_with_generics(&existing, other, subst)?;
+                let unified = unify_with_generics(&existing, other, subst, env)?;
                 subst.insert(*id, unified.clone());
                 Ok(unified)
             } else {
@@ -703,16 +1016,14 @@ fn unify_with_generics(
                 Ok(other.clone())
             }
         }
-        // Infer acts as wildcard (for deferred inference)
-        (Ty::Infer(_), other) | (other, Ty::Infer(_)) => Ok(other.clone()),
         // Recurse into compound types
         (Ty::Array(e1), Ty::Array(e2)) => {
-            let elem = unify_with_generics(e1, e2, subst)?;
+            let elem = unify_with_generics(e1, e2, subst, env)?;
             Ok(Ty::Array(Box::new(elem)))
         }
         (Ty::Fn { param: p1, ret: r1 }, Ty::Fn { param: p2, ret: r2 }) => {
-            let param = unify_with_generics(p1, p2, subst)?;
-            let ret = unify_with_generics(r1, r2, subst)?;
+            let param = unify_with_generics(p1, p2, subst, env)?;
+            let ret = unify_with_generics(r1, r2, subst, env)?;
             Ok(Ty::Fn {
                 param: Box::new(param),
                 ret: Box::new(ret),
@@ -734,13 +1045,13 @@ fn unify_with_generics(
                         n1, n2
                     ));
                 }
-                let t = unify_with_generics(t1, t2, subst)?;
+                let t = unify_with_generics(t1, t2, subst, env)?;
                 unified.push((n1.clone(), t));
             }
             Ok(Ty::Struct(unified))
         }
         // Delegate all other cases to regular unify
-        _ => unify(a, b),
+        _ => unify(&a, &b, env),
     }
 }
 
@@ -773,30 +1084,260 @@ fn substitute_generics(ty: &Ty, subst: &HashMap<u64, Ty>) -> Ty {
     }
 }
 
-/// Default unresolved literal types to their concrete forms.
-/// `IntLiteral` → `Int`, `FloatLiteral` → `Float`.
-/// Applied recursively through compound types.
-fn default_literals(ty: Ty) -> Ty {
-    match ty {
-        Ty::IntLiteral => Ty::Int,
-        Ty::FloatLiteral => Ty::Float,
-        Ty::Array(elem) => Ty::Array(Box::new(default_literals(*elem))),
-        Ty::Struct(fields) => Ty::Struct(
-            fields
-                .into_iter()
-                .map(|(n, t)| (n, default_literals(t)))
-                .collect(),
-        ),
-        Ty::Fn { param, ret } => Ty::Fn {
-            param: Box::new(default_literals(*param)),
-            ret: Box::new(default_literals(*ret)),
-        },
-        Ty::Tagged { tag_id, payload } => Ty::Tagged {
-            tag_id,
-            payload: Box::new(default_literals(*payload)),
-        },
-        Ty::Union(variants) => Ty::Union(variants.into_iter().map(default_literals).collect()),
-        other => other,
+
+/// Find a block body for a struct field method call.
+/// Checks: 1) block_bodies["name.field"] for Ident receivers
+///         2) inline struct literal fields for Struct receivers
+fn find_field_block_body(receiver: &Mir, field: &str, env: &TyEnv) -> Option<Mir> {
+    match receiver.as_ref() {
+        MirKind::Ident(recv_name) => {
+            let key = format!("{}.{}", recv_name, field);
+            env.block_bodies.get(&key).cloned()
+        }
+        MirKind::Struct(fields) => {
+            let mut positional_idx = 0u64;
+            for f in fields {
+                if f.is_spread {
+                    continue;
+                }
+                let label = match &f.label {
+                    Some(name) => name.clone(),
+                    None => {
+                        let l = positional_idx.to_string();
+                        positional_idx += 1;
+                        l
+                    }
+                };
+                if label == field {
+                    match f.value.as_ref() {
+                        MirKind::Block(_) | MirKind::BranchBlock(_) => {
+                            return Some(f.value.clone());
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Store block/branch bodies from struct literal fields under "structname.fieldname" keys.
+/// This enables re-checking when the field is later called: `s.f(arg)`.
+fn store_struct_field_bodies(struct_name: &str, fields: &[crate::mir::MirField], env: &mut TyEnv) {
+    let mut positional_idx = 0u64;
+    for field in fields {
+        if field.is_spread {
+            continue;
+        }
+        let label = match &field.label {
+            Some(name) => name.clone(),
+            None => {
+                let label = positional_idx.to_string();
+                positional_idx += 1;
+                label
+            }
+        };
+        let key = format!("{}.{}", struct_name, label);
+        match field.value.as_ref() {
+            MirKind::Block(_) | MirKind::BranchBlock(_) => {
+                env.block_bodies.insert(key, field.value.clone());
+            }
+            _ => {
+                // Try to resolve the field value to a block (e.g., Ident referencing a block)
+                if let Some(resolved) = resolve_to_block_mir(&field.value, env) {
+                    env.block_bodies.insert(key, resolved);
+                }
+            }
+        }
+    }
+}
+
+/// Propagate block bodies from a struct LHS to destructured pattern fields.
+/// When `(a, { block }) >> let(x, f); f(5)`, we store `block_bodies["f"]` = the block MIR.
+/// Handles both inline struct MIR and Ident references with stored field block_bodies.
+fn propagate_block_bodies_to_fields(
+    lhs: &Mir,
+    pat_fields: &[crate::ast::PatField],
+    env: &mut TyEnv,
+) {
+    // Collect (position_index, block_mir) from the LHS
+    match lhs.as_ref() {
+        MirKind::Struct(mir_fields) => {
+            // Direct struct literal — extract blocks from fields
+            for pat_field in pat_fields {
+                if pat_field.is_rest || pat_field.binding == "_" {
+                    continue;
+                }
+                let mir_field = find_mir_field_for_pattern(mir_fields, pat_field, pat_fields);
+                if let Some(mf) = mir_field {
+                    match mf.value.as_ref() {
+                        MirKind::Block(_) | MirKind::BranchBlock(_) => {
+                            env.block_bodies
+                                .insert(pat_field.binding.clone(), mf.value.clone());
+                        }
+                        MirKind::Struct(inner_fields) => {
+                            // Struct of blocks — store field-level block bodies
+                            store_struct_field_bodies(&pat_field.binding, inner_fields, env);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        MirKind::Ident(name) => {
+            // Ident reference — look up stored block_bodies with "name.field" keys
+            let mut positional_idx = 0u64;
+            for pat_field in pat_fields {
+                if pat_field.is_rest || pat_field.binding == "_" {
+                    if !pat_field.is_rest && pat_field.label.is_none() {
+                        positional_idx += 1;
+                    }
+                    continue;
+                }
+                // Try looking up by explicit label, by binding name, or by positional index
+                let lookup_key = if let Some(label) = &pat_field.label {
+                    label.clone()
+                } else {
+                    pat_field.binding.clone()
+                };
+                let key_by_name = format!("{}.{}", name, lookup_key);
+                let key_by_pos = format!("{}.{}", name, positional_idx);
+                if let Some(body) = env
+                    .block_bodies
+                    .get(&key_by_name)
+                    .or_else(|| env.block_bodies.get(&key_by_pos))
+                    .cloned()
+                {
+                    env.block_bodies.insert(pat_field.binding.clone(), body);
+                }
+                if pat_field.label.is_none() {
+                    positional_idx += 1;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Find the MIR field corresponding to a pattern field in a struct destructuring.
+fn find_mir_field_for_pattern<'a>(
+    mir_fields: &'a [crate::mir::MirField],
+    pat_field: &crate::ast::PatField,
+    all_pat_fields: &[crate::ast::PatField],
+) -> Option<&'a crate::mir::MirField> {
+    if let Some(label) = &pat_field.label {
+        // Explicit label — match by name
+        mir_fields.iter().find(|f| f.label.as_deref() == Some(label))
+    } else {
+        // Positional — find the position of this pat_field among non-rest fields
+        let pos = all_pat_fields
+            .iter()
+            .filter(|f| !f.is_rest)
+            .position(|f| std::ptr::eq(f, pat_field));
+        pos.and_then(|idx| {
+            let mut positional_idx = 0usize;
+            for mf in mir_fields {
+                if mf.label.is_none() {
+                    if positional_idx == idx {
+                        return Some(mf);
+                    }
+                    positional_idx += 1;
+                }
+            }
+            // Also try matching by stringified index for labeled fields
+            let key = idx.to_string();
+            mir_fields.iter().find(|f| f.label.as_deref() == Some(&key[..]))
+        })
+    }
+}
+
+/// Try to resolve a MIR expression to a Block/BranchBlock, following simple patterns.
+/// This enables propagation of block bodies through calls and binds.
+fn resolve_to_block_mir(mir: &Mir, env: &TyEnv) -> Option<Mir> {
+    match mir.as_ref() {
+        MirKind::Block(_) | MirKind::BranchBlock(_) => Some(mir.clone()),
+        MirKind::Ident(name) => env.block_bodies.get(name).cloned(),
+        MirKind::Call(func, arg) => {
+            // Get the function's block body (if known)
+            let func_body = match func.as_ref() {
+                MirKind::Ident(name) => env.block_bodies.get(name).cloned(),
+                MirKind::Block(_) | MirKind::BranchBlock(_) => Some(func.clone()),
+                _ => None,
+            };
+            if let Some(body_mir) = func_body {
+                if let MirKind::Block(inner) = body_mir.as_ref() {
+                    if matches!(inner.as_ref(), MirKind::Ident(n) if n == "in") {
+                        // Identity function: f(x) = x
+                        return resolve_to_block_mir(arg, env);
+                    }
+                    // Check if the block body's tail expression is a Block
+                    // (function that returns a closure, like compose)
+                    if let Some(tail) = find_tail_expr(inner) {
+                        return resolve_to_block_mir(tail, env);
+                    }
+                }
+            }
+            None
+        }
+        MirKind::FieldAccess(expr, field) => {
+            if let MirKind::Ident(name) = expr.as_ref() {
+                let key = format!("{}.{}", name, field);
+                env.block_bodies.get(&key).cloned()
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Find the tail (final) expression in a MIR chain.
+/// Follows through Bind, Pipe, and Let to find what the expression ultimately evaluates to.
+fn find_tail_expr(mir: &Mir) -> Option<&Mir> {
+    match mir.as_ref() {
+        MirKind::Bind { body, .. } => find_tail_expr(body),
+        MirKind::Pipe(_, rhs) => {
+            match rhs.as_ref() {
+                MirKind::Let { body, .. } => find_tail_expr(body),
+                MirKind::LetArray { body, .. } => find_tail_expr(body),
+                MirKind::Apply { body, .. } => find_tail_expr(body),
+                _ => Some(rhs),
+            }
+        }
+        MirKind::Block(_) | MirKind::BranchBlock(_) => Some(mir),
+        _ => None,
+    }
+}
+
+/// Re-check a stored block/branch body with a known arg type and MIR.
+/// Binds `in` to arg_ty and propagates block_bodies from arg_mir.
+fn recheck_block_body(
+    stored_body: &Mir,
+    arg_ty: Ty,
+    arg_mir: &Mir,
+    env: &mut TyEnv,
+) -> Result<Ty, String> {
+    // Propagate block bodies from the arg MIR to "in" scope
+    match arg_mir.as_ref() {
+        MirKind::Block(_) | MirKind::BranchBlock(_) => {
+            env.block_bodies.insert("in".to_string(), arg_mir.clone());
+        }
+        MirKind::Struct(fields) => {
+            store_struct_field_bodies("in", fields, env);
+        }
+        _ => {}
+    }
+    match stored_body.as_ref() {
+        MirKind::Block(body) => {
+            env.bind("in".to_string(), arg_ty);
+            let body_ty = check(body, env)?;
+            env.pop_binding();
+            Ok(body_ty)
+        }
+        MirKind::BranchBlock(arms) => check_branch_block_with_input(arms, &arg_ty, env),
+        _ => unreachable!("block_bodies only stores Block/BranchBlock"),
     }
 }
 
@@ -805,8 +1346,8 @@ fn default_literals(ty: Ty) -> Ty {
 pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
     match mir.as_ref() {
         // ── Literals ──
-        MirKind::Int(_) => Ok(Ty::IntLiteral),
-        MirKind::Float(_) => Ok(Ty::FloatLiteral),
+        MirKind::Int(_) => Ok(env.fresh_constrained_infer(InferConstraint::IntLiteral)),
+        MirKind::Float(_) => Ok(env.fresh_constrained_infer(InferConstraint::FloatLiteral)),
         MirKind::Bool(_) => Ok(Ty::Bool),
         MirKind::Str(_) => Ok(Ty::String),
         MirKind::Char(_) => Ok(Ty::Char),
@@ -814,10 +1355,14 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
         MirKind::Unit => Ok(Ty::Unit),
 
         // ── Ident ──
-        MirKind::Ident(name) => env
-            .get(name)
-            .cloned()
-            .ok_or_else(|| format!("type error: undefined variable: {}", name)),
+        MirKind::Ident(name) => {
+            let ty = env
+                .get(name)
+                .cloned()
+                .ok_or_else(|| format!("type error: undefined variable: {}", name))?;
+            let resolved = env.resolve(&ty);
+            Ok(resolved)
+        }
 
         // ── Import ──
         MirKind::Import(name) => env
@@ -835,7 +1380,7 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                     .find(|(name, _)| name == field)
                     .map(|(_, ty)| ty.clone())
                     .ok_or_else(|| format!("type error: field '{}' not found in struct", field)),
-                Ty::Infer(_) => Err(format!(
+                Ty::Infer(id) if env.infer_constraint(id).is_none() => Err(format!(
                     "type error: field access '{}' on value of unknown type",
                     field
                 )),
@@ -893,11 +1438,67 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                 MirKind::Block(_) | MirKind::BranchBlock(_) => {
                     env.block_bodies.insert(name.clone(), value.clone());
                 }
+                MirKind::Struct(fields) => {
+                    env.block_bodies.remove(name);
+                    store_struct_field_bodies(name, fields, env);
+                }
+                MirKind::Array(elems) => {
+                    // Store a representative block body from the first block element.
+                    // When .get() returns an element, we can re-check it at the call site.
+                    env.block_bodies.remove(name);
+                    for elem in elems {
+                        match elem.as_ref() {
+                            MirKind::Block(_) | MirKind::BranchBlock(_) => {
+                                let key = format!("\0arr:{}", name);
+                                env.block_bodies.insert(key, elem.clone());
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                MirKind::Ident(other_name) => {
+                    // Alias: `let g = f` — copy block body if available
+                    env.block_bodies.remove(name);
+                    if let Some(body_mir) = env.block_bodies.get(other_name).cloned() {
+                        env.block_bodies.insert(name.clone(), body_mir);
+                    }
+                    // Also copy struct field block bodies ("other.field" → "name.field")
+                    let prefix = format!("{}.", other_name);
+                    let copies: Vec<(String, Mir)> = env
+                        .block_bodies
+                        .iter()
+                        .filter(|(k, _)| k.starts_with(&prefix))
+                        .map(|(k, v)| {
+                            let suffix = &k[prefix.len()..];
+                            (format!("{}.{}", name, suffix), v.clone())
+                        })
+                        .collect();
+                    for (k, v) in copies {
+                        env.block_bodies.insert(k, v);
+                    }
+                    // Copy array element block body if aliasing an array
+                    let arr_key = format!("\0arr:{}", other_name);
+                    if let Some(arr_body) = env.block_bodies.get(&arr_key).cloned() {
+                        env.block_bodies.insert(format!("\0arr:{}", name), arr_body);
+                    }
+                }
+                MirKind::MethodCall { receiver, method, .. } if method == "get" => {
+                    // .get() on an array — propagate the array's element block body
+                    env.block_bodies.remove(name);
+                    if let MirKind::Ident(arr_name) = receiver.as_ref() {
+                        let arr_key = format!("\0arr:{}", arr_name);
+                        if let Some(arr_body) = env.block_bodies.get(&arr_key).cloned() {
+                            env.block_bodies.insert(name.clone(), arr_body);
+                        }
+                    }
+                }
                 _ => {
                     env.block_bodies.remove(name);
                 }
             }
-            let val_ty = default_literals(check(value, env)?);
+            let val_ty = check(value, env)?;
+            let val_ty = env.default_constrained_infer_in_fn(&val_ty);
             env.bind(name.clone(), val_ty);
             let body_ty = check(body, env)?;
             env.pop_binding();
@@ -962,7 +1563,7 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                 }
                 result_ty = Some(match result_ty {
                     None => arm_ty,
-                    Some(prev) => unify(&prev, &arm_ty)?,
+                    Some(prev) => unify(&prev, &arm_ty, env)?,
                 });
             }
             env.pop_binding(); // pop "in"
@@ -980,7 +1581,7 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                 let ty = check(elem, env)?;
                 elem_ty = Some(match elem_ty {
                     None => ty,
-                    Some(prev) => unify(&prev, &ty)?,
+                    Some(prev) => unify(&prev, &ty, env)?,
                 });
             }
             Ok(Ty::Array(Box::new(elem_ty.unwrap_or_else(|| env.fresh_infer()))))
@@ -1006,13 +1607,21 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                     return match field_ty {
                         Ty::MethodSetConstructor => check_method_set_call(arg, env),
                         _ => {
+                            // Check for stored block body (struct field function)
+                            let block_body = find_field_block_body(receiver, method, env);
+                            if let Some(stored_body) = block_body {
+                                let arg_ty = check(arg, env)?;
+                                return recheck_block_body(&stored_body, arg_ty, arg, env);
+                            }
                             let arg_ty = check(arg, env)?;
                             match field_ty {
                                 Ty::Fn { param, ret } => {
-                                    unify(&arg_ty, param)?;
-                                    Ok(*ret.clone())
+                                    unify(&arg_ty, param, env)?;
+                                    Ok(env.resolve(ret))
                                 }
-                                Ty::Infer(_) => Ok(env.fresh_infer()),
+                                Ty::Infer(id) if env.infer_constraint(*id).is_none() => {
+                                    Ok(env.fresh_infer())
+                                }
                                 _ => Err(format!(
                                     "type error: cannot call non-function field '{}'",
                                     method
@@ -1024,15 +1633,35 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
             }
 
             // Stage 2: method set lookup
-            if let Some(tag_id) = ty_to_tag_id(&recv_ty) {
-                if let Some(method_ty) = env.find_method_type(tag_id, method) {
+            if let Some(tag_id) = ty_to_tag_id(&recv_ty, env) {
+                if let Some((ms_id, method_ty)) = env.find_method_type_with_id(tag_id, method) {
+                    // Check if we have a stored block body for this method
+                    let ms_key = format!("\0ms{}.{}", ms_id, method);
+                    if let Some(stored_body) = env.block_bodies.get(&ms_key).cloned() {
+                        // Re-check the method body with the actual receiver as arg
+                        let arg_ty = check(arg, env)?;
+                        let actual_arg = prepend_arg_ty(&recv_ty, &arg_ty);
+                        return match stored_body.as_ref() {
+                            MirKind::Block(body) => {
+                                env.bind("in".to_string(), actual_arg);
+                                let body_ty = check(body, env)?;
+                                env.pop_binding();
+                                Ok(body_ty)
+                            }
+                            MirKind::BranchBlock(arms) => {
+                                check_branch_block_with_input(arms, &actual_arg, env)
+                            }
+                            _ => unreachable!("block_bodies only stores Block/BranchBlock"),
+                        };
+                    }
+
                     let ret = match &method_ty {
                         Ty::Fn { param, ret } => {
                             // Phase 1: Check arg with blocks deferred (placeholder types).
                             let arg_ty = check_arg_defer_blocks(arg, env)?;
                             let actual_prepended = prepend_arg_ty(&recv_ty, &arg_ty);
                             let mut subst = HashMap::new();
-                            unify_with_generics(&actual_prepended, param, &mut subst)
+                            unify_with_generics(&actual_prepended, param, &mut subst, env)
                                 .map_err(|e| format!("type error in .{}(): {}", method, e))?;
 
                             // Phase 2: Re-check deferred blocks with resolved param types.
@@ -1040,7 +1669,7 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                             if let Some(refined_arg_ty) = refined {
                                 let refined_prepended = prepend_arg_ty(&recv_ty, &refined_arg_ty);
                                 subst.clear();
-                                unify_with_generics(&refined_prepended, param, &mut subst)
+                                unify_with_generics(&refined_prepended, param, &mut subst, env)
                                     .map_err(|e| format!("type error in .{}(): {}", method, e))?;
                             }
 
@@ -1053,15 +1682,19 @@ pub fn check(mir: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::String> {
                             ));
                         }
                     };
-                    return Ok(ret);
+                    return Ok(env.resolve(&ret));
                 }
             }
 
-            // Infer: receiver type not yet known — check arg but return Infer.
+            // Unconstrained Infer: receiver type not yet known — check arg but return Infer.
             // The block will be re-checked with a concrete type at the call site.
-            if matches!(recv_ty, Ty::Infer(_)) {
-                let _arg_ty = check(arg, env)?;
-                return Ok(env.fresh_infer());
+            // Constrained Infer (IntLiteral/FloatLiteral) should NOT use this path —
+            // they have a known tag_id and should have found a method set above.
+            if let Ty::Infer(id) = &recv_ty {
+                if env.infer_constraint(*id).is_none() {
+                    let _arg_ty = check(arg, env)?;
+                    return Ok(env.fresh_infer());
+                }
             }
 
             // Fallback: built-in comparison for types without explicit method sets.
@@ -1276,18 +1909,71 @@ fn check_pipe(lhs: &Mir, rhs: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::
     // When `{ body } >> let(name); ...`, store the block under `name`
     // so that `name(arg)` can re-check the body with a known arg type.
     if let MirKind::Let { pattern, .. } = rhs.as_ref() {
-        if let Pattern::Name(name) = pattern {
-            match lhs.as_ref() {
-                MirKind::Block(_) | MirKind::BranchBlock(_) => {
-                    env.block_bodies.insert(name.clone(), lhs.clone());
-                }
-                _ => {
-                    env.block_bodies.remove(name);
+        match pattern {
+            Pattern::Name(name) => {
+                match lhs.as_ref() {
+                    MirKind::Block(_) | MirKind::BranchBlock(_) => {
+                        env.block_bodies.insert(name.clone(), lhs.clone());
+                    }
+                    MirKind::Struct(fields) => {
+                        env.block_bodies.remove(name);
+                        store_struct_field_bodies(name, fields, env);
+                    }
+                    MirKind::Array(elems) => {
+                        // Store a representative block body from the first block element.
+                        // When .get() returns an element, we can re-check it at the call site.
+                        env.block_bodies.remove(name);
+                        for elem in elems {
+                            match elem.as_ref() {
+                                MirKind::Block(_) | MirKind::BranchBlock(_) => {
+                                    let key = format!("\0arr:{}", name);
+                                    env.block_bodies.insert(key, elem.clone());
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    MirKind::Ident(other) => {
+                        // Alias: propagate block body from the other name
+                        env.block_bodies.remove(name);
+                        if let Some(body) = env.block_bodies.get(other).cloned() {
+                            env.block_bodies.insert(name.clone(), body);
+                        }
+                        // Copy array element block body if aliasing an array
+                        let arr_key = format!("\0arr:{}", other);
+                        if let Some(arr_body) = env.block_bodies.get(&arr_key).cloned() {
+                            env.block_bodies.insert(format!("\0arr:{}", name), arr_body);
+                        }
+                    }
+                    MirKind::MethodCall { receiver, method, .. } if method == "get" => {
+                        // .get() on an array — propagate the array's element block body
+                        env.block_bodies.remove(name);
+                        if let MirKind::Ident(arr_name) = receiver.as_ref() {
+                            let arr_key = format!("\0arr:{}", arr_name);
+                            if let Some(arr_body) = env.block_bodies.get(&arr_key).cloned() {
+                                env.block_bodies.insert(name.clone(), arr_body);
+                            }
+                        }
+                    }
+                    _ => {
+                        // Try to resolve the LHS MIR to find an underlying block
+                        env.block_bodies.remove(name);
+                        if let Some(resolved) = resolve_to_block_mir(lhs, env) {
+                            env.block_bodies.insert(name.clone(), resolved);
+                        }
+                    }
                 }
             }
+            Pattern::Fields(pat_fields) => {
+                // Propagate block bodies from struct LHS fields to destructured names.
+                propagate_block_bodies_to_fields(lhs, pat_fields, env);
+            }
+            _ => {}
         }
     }
-    let lhs_ty = default_literals(check(lhs, env)?);
+    let lhs_ty = check(lhs, env)?;
+    let lhs_ty = env.default_constrained_infer_in_fn(&lhs_ty);
     match rhs.as_ref() {
         // Pipe into let: `expr >> let(pattern); body`
         // The lhs value is bound to the pattern.
@@ -1538,50 +2224,56 @@ fn check_call(func: &Mir, arg: &Mir, env: &mut TyEnv) -> Result<Ty, std::string:
     // Bidirectional: when calling a Block or BranchBlock, check the arg first
     // so we can bind `in` to the arg's type instead of Unknown.
     match func.as_ref() {
-        MirKind::Block(body) => {
+        MirKind::Block(_) | MirKind::BranchBlock(_) => {
             let arg_ty = check(arg, env)?;
-            env.bind("in".to_string(), arg_ty);
-            let body_ty = check(body, env)?;
-            env.pop_binding();
-            Ok(body_ty)
-        }
-        MirKind::BranchBlock(arms) => {
-            let arg_ty = check(arg, env)?;
-            check_branch_block_with_input(arms, &arg_ty, env)
+            recheck_block_body(func, arg_ty, arg, env)
         }
         // Ident referring to a stored block/branch — re-check with known arg type
         MirKind::Ident(name) if env.block_bodies.contains_key(name) => {
             let stored_body = env.block_bodies.get(name).unwrap().clone();
             let arg_ty = check(arg, env)?;
-            match stored_body.as_ref() {
-                MirKind::Block(body) => {
-                    env.bind("in".to_string(), arg_ty);
-                    let body_ty = check(body, env)?;
-                    env.pop_binding();
-                    Ok(body_ty)
+            recheck_block_body(&stored_body, arg_ty, arg, env)
+        }
+        // FieldAccess on a struct where the field has a stored block body
+        MirKind::FieldAccess(expr, field) => {
+            if let MirKind::Ident(struct_name) = expr.as_ref() {
+                let key = format!("{}.{}", struct_name, field);
+                if let Some(stored_body) = env.block_bodies.get(&key).cloned() {
+                    let arg_ty = check(arg, env)?;
+                    return recheck_block_body(&stored_body, arg_ty, arg, env);
                 }
-                MirKind::BranchBlock(arms) => check_branch_block_with_input(arms, &arg_ty, env),
-                _ => unreachable!("block_bodies only stores Block/BranchBlock"),
             }
+            // Fall through to general case
+            let func_ty = check(func, env)?;
+            let arg_ty = check(arg, env)?;
+            check_call_by_type(func_ty, arg_ty, arg, env)
         }
         _ => {
             let func_ty = check(func, env)?;
             let arg_ty = check(arg, env)?;
-            match func_ty {
-                Ty::Fn { param, ret } => {
-                    let mut subst = HashMap::new();
-                    unify_with_generics(&arg_ty, &param, &mut subst)?;
-                    Ok(substitute_generics(&ret, &subst))
-                }
-                Ty::TagConstructor(tag_id) => Ok(Ty::Tagged {
-                    tag_id,
-                    payload: Box::new(arg_ty),
-                }),
-                Ty::MethodSetConstructor => check_method_set_call(arg, env),
-                Ty::Infer(_) => Ok(env.fresh_infer()),
-                _ => Err(format!("type error: cannot call non-function")),
-            }
+            check_call_by_type(func_ty, arg_ty, arg, env)
         }
+    }
+}
+
+/// Given a resolved function type and arg type, produce the call result.
+/// Unconstrained Infer is allowed (type not yet known); constrained Infer
+/// (IntLiteral/FloatLiteral) is treated as a concrete non-function type.
+fn check_call_by_type(func_ty: Ty, arg_ty: Ty, arg: &Mir, env: &mut TyEnv) -> Result<Ty, String> {
+    match func_ty {
+        Ty::Fn { param, ret } => {
+            let mut subst = HashMap::new();
+            unify_with_generics(&arg_ty, &param, &mut subst, env)?;
+            let ret = substitute_generics(&ret, &subst);
+            Ok(env.resolve(&ret))
+        }
+        Ty::TagConstructor(tag_id) => Ok(Ty::Tagged {
+            tag_id,
+            payload: Box::new(arg_ty),
+        }),
+        Ty::MethodSetConstructor => check_method_set_call(arg, env),
+        Ty::Infer(id) if env.infer_constraint(id).is_none() => Ok(env.fresh_infer()),
+        _ => Err(format!("type error: cannot call non-function")),
     }
 }
 
@@ -1593,8 +2285,10 @@ fn check_branch_block_with_input(
     env: &mut TyEnv,
 ) -> Result<Ty, std::string::String> {
     // Per D5: when the input type is known (non-Infer), check for undefined tags
-    // and exhaustiveness.
-    if !matches!(input_ty, Ty::Infer(_)) {
+    // and exhaustiveness. Constrained Infer (IntLiteral/FloatLiteral) counts as
+    // known — only unconstrained Infer is truly unknown.
+    let is_unconstrained_infer = matches!(input_ty, Ty::Infer(id) if env.infer_constraint(*id).is_none());
+    if !is_unconstrained_infer {
         // First: check for undefined tag names in patterns
         for arm in arms {
             if let crate::mir::MirBranchPattern::Tag(tag_name, _) = &arm.pattern {
@@ -1636,7 +2330,7 @@ fn check_branch_block_with_input(
         }
         result_ty = Some(match result_ty {
             None => arm_ty,
-            Some(prev) => unify(&prev, &arm_ty)?,
+            Some(prev) => unify(&prev, &arm_ty, env)?,
         });
     }
     env.pop_binding(); // pop "in"
@@ -1693,9 +2387,16 @@ fn bind_branch_pattern(
             }
         }
         MirBranchPattern::Binding(n) => {
-            // Catch-all binding gets the input type
-            env.bind(n.clone(), input_ty.clone());
-            Ok(1)
+            // The parser stores bare identifiers as Binding — but they might be
+            // tag names without payload (e.g., `None -> ...`). Check the env first.
+            if matches!(env.get(n), Some(Ty::TagConstructor(_))) {
+                // It's a tag pattern with no payload — don't bind, just match.
+                Ok(0)
+            } else {
+                // Catch-all binding gets the input type
+                env.bind(n.clone(), input_ty.clone());
+                Ok(1)
+            }
         }
         MirBranchPattern::Discard => Ok(0),
     }
@@ -1769,6 +2470,33 @@ fn check_method_set_call(arg: &Mir, env: &mut TyEnv) -> Result<Ty, std::string::
 
             let id = env.fresh_method_set_id();
             env.register_method_set(id, tag_id, methods_ty.clone());
+
+            // Store block bodies from the methods struct for deferred re-checking.
+            // The method_set arg MIR is Struct([ctor, methods_struct]).
+            // Extract block bodies from methods_struct fields.
+            if let MirKind::Struct(arg_fields) = arg.as_ref() {
+                if arg_fields.len() == 2 {
+                    let methods_mir = &arg_fields[1].value;
+                    if let MirKind::Struct(method_fields) = methods_mir.as_ref() {
+                        let ms_key = format!("\0ms{}", id);
+                        for field in method_fields {
+                            if field.is_spread {
+                                continue;
+                            }
+                            if let Some(label) = &field.label {
+                                match field.value.as_ref() {
+                                    MirKind::Block(_) | MirKind::BranchBlock(_) => {
+                                        let key = format!("{}.{}", ms_key, label);
+                                        env.block_bodies.insert(key, field.value.clone());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             Ok(Ty::MethodSet { id, tag_id })
         }
         _ => Err("type error: method_set expects (constructor, struct_of_functions)".to_string()),
@@ -1789,14 +2517,10 @@ mod tests {
     #[test]
     fn literal_types() {
         let mut env = TyEnv::new();
-        assert_eq!(
-            check(&mir(MirKind::Int(42)), &mut env).unwrap(),
-            Ty::IntLiteral
-        );
-        assert_eq!(
-            check(&mir(MirKind::Float(1.0)), &mut env).unwrap(),
-            Ty::FloatLiteral
-        );
+        let int_ty = check(&mir(MirKind::Int(42)), &mut env).unwrap();
+        assert!(matches!(int_ty, Ty::Infer(id) if env.infer_constraint(id) == Some(&InferConstraint::IntLiteral)));
+        let float_ty = check(&mir(MirKind::Float(1.0)), &mut env).unwrap();
+        assert!(matches!(float_ty, Ty::Infer(id) if env.infer_constraint(id) == Some(&InferConstraint::FloatLiteral)));
         assert_eq!(
             check(&mir(MirKind::Bool(true)), &mut env).unwrap(),
             Ty::Bool
@@ -1875,10 +2599,14 @@ mod tests {
             },
         ]));
         let ty = check(&expr, &mut env).unwrap();
-        assert_eq!(
-            ty,
-            Ty::Struct(vec![("a".into(), Ty::IntLiteral), ("0".into(), Ty::Bool)])
-        );
+        if let Ty::Struct(fields) = &ty {
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].0, "a");
+            assert!(matches!(&fields[0].1, Ty::Infer(id) if env.infer_constraint(*id) == Some(&InferConstraint::IntLiteral)));
+            assert_eq!(fields[1], ("0".into(), Ty::Bool));
+        } else {
+            panic!("expected Struct, got {:?}", ty);
+        }
     }
 
     #[test]
@@ -1889,8 +2617,9 @@ mod tests {
             value: mir(MirKind::Int(42)),
             body: mir(MirKind::Ident("x".into())),
         });
-        // IntLiteral defaults to Int when bound via let
-        assert_eq!(check(&expr, &mut env).unwrap(), Ty::Int);
+        // Constrained Infer stays as-is — defaulted only at final result level
+        let ty = check(&expr, &mut env).unwrap();
+        assert!(matches!(ty, Ty::Infer(id) if env.infer_constraint(id) == Some(&InferConstraint::IntLiteral)));
     }
 
     #[test]
@@ -2076,56 +2805,67 @@ mod tests {
 
     #[test]
     fn unify_same_primitives() {
-        assert_eq!(unify(&Ty::Int, &Ty::Int).unwrap(), Ty::Int);
-        assert_eq!(unify(&Ty::Float, &Ty::Float).unwrap(), Ty::Float);
-        assert_eq!(unify(&Ty::Bool, &Ty::Bool).unwrap(), Ty::Bool);
-        assert_eq!(unify(&Ty::String, &Ty::String).unwrap(), Ty::String);
+        let mut env = TyEnv::new();
+        assert_eq!(unify(&Ty::Int, &Ty::Int, &mut env).unwrap(), Ty::Int);
+        assert_eq!(unify(&Ty::Float, &Ty::Float, &mut env).unwrap(), Ty::Float);
+        assert_eq!(unify(&Ty::Bool, &Ty::Bool, &mut env).unwrap(), Ty::Bool);
+        assert_eq!(unify(&Ty::String, &Ty::String, &mut env).unwrap(), Ty::String);
     }
 
     #[test]
     fn unify_different_primitives_error() {
-        assert!(unify(&Ty::Int, &Ty::Float).is_err());
-        assert!(unify(&Ty::Int, &Ty::String).is_err());
-        assert!(unify(&Ty::Bool, &Ty::Byte).is_err());
+        let mut env = TyEnv::new();
+        assert!(unify(&Ty::Int, &Ty::Float, &mut env).is_err());
+        assert!(unify(&Ty::Int, &Ty::String, &mut env).is_err());
+        assert!(unify(&Ty::Bool, &Ty::Byte, &mut env).is_err());
     }
 
     #[test]
     fn unify_unknown_with_anything() {
-        assert_eq!(unify(&Ty::Infer(0), &Ty::Int).unwrap(), Ty::Int);
-        assert_eq!(unify(&Ty::Float, &Ty::Infer(0)).unwrap(), Ty::Float);
-        assert_eq!(unify(&Ty::Infer(0), &Ty::Infer(0)).unwrap(), Ty::Infer(0));
+        let mut env = TyEnv::new();
+        assert_eq!(unify(&Ty::Infer(0), &Ty::Int, &mut env).unwrap(), Ty::Int);
+        // Use fresh env per case to avoid prior bindings interfering
+        let mut env2 = TyEnv::new();
+        assert_eq!(unify(&Ty::Float, &Ty::Infer(0), &mut env2).unwrap(), Ty::Float);
+        let mut env3 = TyEnv::new();
+        assert_eq!(unify(&Ty::Infer(0), &Ty::Infer(0), &mut env3).unwrap(), Ty::Infer(0));
     }
 
     #[test]
     fn unify_structs_same_shape() {
+        let mut env = TyEnv::new();
         let a = Ty::Struct(vec![("x".into(), Ty::Int), ("y".into(), Ty::Float)]);
         let b = Ty::Struct(vec![("x".into(), Ty::Int), ("y".into(), Ty::Float)]);
-        assert_eq!(unify(&a, &b).unwrap(), a);
+        assert_eq!(unify(&a, &b, &mut env).unwrap(), a);
     }
 
     #[test]
     fn unify_structs_different_field_count() {
+        let mut env = TyEnv::new();
         let a = Ty::Struct(vec![("x".into(), Ty::Int)]);
         let b = Ty::Struct(vec![("x".into(), Ty::Int), ("y".into(), Ty::Float)]);
-        assert!(unify(&a, &b).is_err());
+        assert!(unify(&a, &b, &mut env).is_err());
     }
 
     #[test]
     fn unify_structs_different_field_names() {
+        let mut env = TyEnv::new();
         let a = Ty::Struct(vec![("x".into(), Ty::Int)]);
         let b = Ty::Struct(vec![("y".into(), Ty::Int)]);
-        assert!(unify(&a, &b).is_err());
+        assert!(unify(&a, &b, &mut env).is_err());
     }
 
     #[test]
     fn unify_structs_different_field_types() {
+        let mut env = TyEnv::new();
         let a = Ty::Struct(vec![("x".into(), Ty::Int)]);
         let b = Ty::Struct(vec![("x".into(), Ty::Float)]);
-        assert!(unify(&a, &b).is_err());
+        assert!(unify(&a, &b, &mut env).is_err());
     }
 
     #[test]
     fn unify_method_sets_same_id() {
+        let mut env = TyEnv::new();
         let a = Ty::MethodSet {
             id: 0,
             tag_id: TAG_ID_INT,
@@ -2134,11 +2874,12 @@ mod tests {
             id: 0,
             tag_id: TAG_ID_INT,
         };
-        assert_eq!(unify(&a, &b).unwrap(), a);
+        assert_eq!(unify(&a, &b, &mut env).unwrap(), a);
     }
 
     #[test]
     fn unify_method_sets_different_id() {
+        let mut env = TyEnv::new();
         let a = Ty::MethodSet {
             id: 0,
             tag_id: TAG_ID_INT,
@@ -2147,11 +2888,12 @@ mod tests {
             id: 1,
             tag_id: TAG_ID_INT,
         };
-        assert!(unify(&a, &b).is_err());
+        assert!(unify(&a, &b, &mut env).is_err());
     }
 
     #[test]
     fn unify_functions() {
+        let mut env = TyEnv::new();
         let a = Ty::Fn {
             param: Box::new(Ty::Int),
             ret: Box::new(Ty::Bool),
@@ -2160,56 +2902,70 @@ mod tests {
             param: Box::new(Ty::Int),
             ret: Box::new(Ty::Bool),
         };
-        assert_eq!(unify(&a, &b).unwrap(), a);
+        assert_eq!(unify(&a, &b, &mut env).unwrap(), a);
     }
 
     #[test]
     fn unify_functions_unknown_fills() {
+        let mut env = TyEnv::new();
         let a = Ty::Fn {
             param: Box::new(Ty::Infer(0)),
-            ret: Box::new(Ty::Infer(0)),
+            ret: Box::new(Ty::Infer(1)),
         };
         let b = Ty::Fn {
             param: Box::new(Ty::Int),
             ret: Box::new(Ty::Bool),
         };
-        assert_eq!(unify(&a, &b).unwrap(), b);
+        assert_eq!(unify(&a, &b, &mut env).unwrap(), b);
     }
 
     #[test]
     fn unify_int_literal_coercion() {
+        let mut env = TyEnv::new();
         // IntLiteral + Int = Int
-        assert_eq!(unify(&Ty::IntLiteral, &Ty::Int).unwrap(), Ty::Int);
-        assert_eq!(unify(&Ty::Int, &Ty::IntLiteral).unwrap(), Ty::Int);
+        let int_lit1 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
+        assert_eq!(unify(&int_lit1, &Ty::Int, &mut env).unwrap(), Ty::Int);
+        let int_lit2 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
+        assert_eq!(unify(&Ty::Int, &int_lit2, &mut env).unwrap(), Ty::Int);
         // IntLiteral + Byte = Byte
-        assert_eq!(unify(&Ty::IntLiteral, &Ty::Byte).unwrap(), Ty::Byte);
-        assert_eq!(unify(&Ty::Byte, &Ty::IntLiteral).unwrap(), Ty::Byte);
-        // IntLiteral + IntLiteral = IntLiteral
-        assert_eq!(
-            unify(&Ty::IntLiteral, &Ty::IntLiteral).unwrap(),
-            Ty::IntLiteral
-        );
+        let int_lit3 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
+        assert_eq!(unify(&int_lit3, &Ty::Byte, &mut env).unwrap(), Ty::Byte);
+        let int_lit4 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
+        assert_eq!(unify(&Ty::Byte, &int_lit4, &mut env).unwrap(), Ty::Byte);
+        // IntLiteral + IntLiteral = Infer with IntLiteral constraint (via union-find)
+        let int_lit5 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
+        let int_lit6 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
+        let result = unify(&int_lit5, &int_lit6, &mut env).unwrap();
+        assert!(matches!(result, Ty::Infer(id) if env.infer_constraint(id) == Some(&InferConstraint::IntLiteral)));
         // IntLiteral + Float = error (int and float are distinct)
-        assert!(unify(&Ty::IntLiteral, &Ty::Float).is_err());
+        let int_lit7 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
+        assert!(unify(&int_lit7, &Ty::Float, &mut env).is_err());
         // IntLiteral + FloatLiteral = error
-        assert!(unify(&Ty::IntLiteral, &Ty::FloatLiteral).is_err());
+        let int_lit8 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
+        let float_lit1 = env.fresh_constrained_infer(InferConstraint::FloatLiteral);
+        assert!(unify(&int_lit8, &float_lit1, &mut env).is_err());
         // IntLiteral + String = error
-        assert!(unify(&Ty::IntLiteral, &Ty::String).is_err());
+        let int_lit9 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
+        assert!(unify(&int_lit9, &Ty::String, &mut env).is_err());
     }
 
     #[test]
     fn unify_float_literal_coercion() {
+        let mut env = TyEnv::new();
         // FloatLiteral + Float = Float
-        assert_eq!(unify(&Ty::FloatLiteral, &Ty::Float).unwrap(), Ty::Float);
-        // FloatLiteral + FloatLiteral = FloatLiteral
-        assert_eq!(
-            unify(&Ty::FloatLiteral, &Ty::FloatLiteral).unwrap(),
-            Ty::FloatLiteral
-        );
+        let float_lit1 = env.fresh_constrained_infer(InferConstraint::FloatLiteral);
+        assert_eq!(unify(&float_lit1, &Ty::Float, &mut env).unwrap(), Ty::Float);
+        // FloatLiteral + FloatLiteral = Infer with FloatLiteral constraint (via union-find)
+        let float_lit2 = env.fresh_constrained_infer(InferConstraint::FloatLiteral);
+        let float_lit3 = env.fresh_constrained_infer(InferConstraint::FloatLiteral);
+        let result = unify(&float_lit2, &float_lit3, &mut env).unwrap();
+        assert!(matches!(result, Ty::Infer(id) if env.infer_constraint(id) == Some(&InferConstraint::FloatLiteral)));
         // FloatLiteral + Int = error (can't coerce float to int)
-        assert!(unify(&Ty::FloatLiteral, &Ty::Int).is_err());
+        let float_lit4 = env.fresh_constrained_infer(InferConstraint::FloatLiteral);
+        assert!(unify(&float_lit4, &Ty::Int, &mut env).is_err());
         // FloatLiteral + Byte = error
-        assert!(unify(&Ty::FloatLiteral, &Ty::Byte).is_err());
+        let float_lit5 = env.fresh_constrained_infer(InferConstraint::FloatLiteral);
+        assert!(unify(&float_lit5, &Ty::Byte, &mut env).is_err());
     }
 
     #[test]
@@ -2255,6 +3011,7 @@ mod tests {
 
     #[test]
     fn unify_tagged_different_ids_produces_union() {
+        let mut env = TyEnv::new();
         let ok = Ty::Tagged {
             tag_id: 100,
             payload: Box::new(Ty::Int),
@@ -2263,12 +3020,13 @@ mod tests {
             tag_id: 101,
             payload: Box::new(Ty::String),
         };
-        let result = unify(&ok, &err).unwrap();
+        let result = unify(&ok, &err, &mut env).unwrap();
         assert_eq!(result, Ty::Union(vec![ok, err]));
     }
 
     #[test]
     fn unify_tagged_same_id_unifies_payload() {
+        let mut env = TyEnv::new();
         let a = Ty::Tagged {
             tag_id: 100,
             payload: Box::new(Ty::Infer(0)),
@@ -2277,7 +3035,7 @@ mod tests {
             tag_id: 100,
             payload: Box::new(Ty::Int),
         };
-        let result = unify(&a, &b).unwrap();
+        let result = unify(&a, &b, &mut env).unwrap();
         assert_eq!(
             result,
             Ty::Tagged {
@@ -2289,6 +3047,7 @@ mod tests {
 
     #[test]
     fn unify_union_with_new_tag() {
+        let mut env = TyEnv::new();
         let ok = Ty::Tagged {
             tag_id: 100,
             payload: Box::new(Ty::Int),
@@ -2302,12 +3061,13 @@ mod tests {
             tag_id: 102,
             payload: Box::new(Ty::Unit),
         };
-        let result = unify(&union, &none).unwrap();
+        let result = unify(&union, &none, &mut env).unwrap();
         assert_eq!(result, Ty::Union(vec![ok, err, none]));
     }
 
     #[test]
     fn unify_union_with_existing_tag_merges() {
+        let mut env = TyEnv::new();
         let ok = Ty::Tagged {
             tag_id: 100,
             payload: Box::new(Ty::Infer(0)),
@@ -2321,7 +3081,7 @@ mod tests {
             tag_id: 100,
             payload: Box::new(Ty::Int),
         };
-        let result = unify(&union, &ok2).unwrap();
+        let result = unify(&union, &ok2, &mut env).unwrap();
         let expected_ok = Ty::Tagged {
             tag_id: 100,
             payload: Box::new(Ty::Int),
@@ -2331,11 +3091,12 @@ mod tests {
 
     #[test]
     fn unify_tagged_with_non_tagged_produces_union() {
+        let mut env = TyEnv::new();
         let ok = Ty::Tagged {
             tag_id: 100,
             payload: Box::new(Ty::Int),
         };
-        let result = unify(&ok, &Ty::Int).unwrap();
+        let result = unify(&ok, &Ty::Int, &mut env).unwrap();
         assert_eq!(result, Ty::Union(vec![ok, Ty::Int]));
     }
 
@@ -2343,53 +3104,59 @@ mod tests {
 
     #[test]
     fn unify_with_generics_binds_variable() {
+        let mut env = TyEnv::new();
         let mut subst = HashMap::new();
-        let result = unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst).unwrap();
+        let result = unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst, &mut env).unwrap();
         assert_eq!(result, Ty::Int);
         assert_eq!(subst.get(&0), Some(&Ty::Int));
     }
 
     #[test]
     fn unify_with_generics_consistent_binding() {
+        let mut env = TyEnv::new();
         let mut subst = HashMap::new();
         // First bind G0 = Int
-        unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst).unwrap();
+        unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst, &mut env).unwrap();
         // Second use of G0 must also be Int
-        let result = unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst).unwrap();
+        let result = unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst, &mut env).unwrap();
         assert_eq!(result, Ty::Int);
     }
 
     #[test]
     fn unify_with_generics_inconsistent_binding_error() {
+        let mut env = TyEnv::new();
         let mut subst = HashMap::new();
-        unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst).unwrap();
+        unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst, &mut env).unwrap();
         // G0 is already Int, unifying with Float should error
-        assert!(unify_with_generics(&Ty::Generic(0), &Ty::Float, &mut subst).is_err());
+        assert!(unify_with_generics(&Ty::Generic(0), &Ty::Float, &mut subst, &mut env).is_err());
     }
 
     #[test]
     fn unify_with_generics_two_variables() {
+        let mut env = TyEnv::new();
         let mut subst = HashMap::new();
         // G0 = Int, G1 = String
-        unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst).unwrap();
-        unify_with_generics(&Ty::Generic(1), &Ty::String, &mut subst).unwrap();
+        unify_with_generics(&Ty::Generic(0), &Ty::Int, &mut subst, &mut env).unwrap();
+        unify_with_generics(&Ty::Generic(1), &Ty::String, &mut subst, &mut env).unwrap();
         assert_eq!(subst.get(&0), Some(&Ty::Int));
         assert_eq!(subst.get(&1), Some(&Ty::String));
     }
 
     #[test]
     fn unify_with_generics_in_array() {
+        let mut env = TyEnv::new();
         let mut subst = HashMap::new();
         // Array(G0) vs Array(Int) -> G0 = Int
         let a = Ty::Array(Box::new(Ty::Generic(0)));
         let b = Ty::Array(Box::new(Ty::Int));
-        let result = unify_with_generics(&a, &b, &mut subst).unwrap();
+        let result = unify_with_generics(&a, &b, &mut subst, &mut env).unwrap();
         assert_eq!(result, Ty::Array(Box::new(Ty::Int)));
         assert_eq!(subst.get(&0), Some(&Ty::Int));
     }
 
     #[test]
     fn unify_with_generics_in_fn() {
+        let mut env = TyEnv::new();
         let mut subst = HashMap::new();
         // Fn(G0 -> G1) vs Fn(Int -> String) -> G0=Int, G1=String
         let a = Ty::Fn {
@@ -2400,7 +3167,7 @@ mod tests {
             param: Box::new(Ty::Int),
             ret: Box::new(Ty::String),
         };
-        let result = unify_with_generics(&a, &b, &mut subst).unwrap();
+        let result = unify_with_generics(&a, &b, &mut subst, &mut env).unwrap();
         assert_eq!(
             result,
             Ty::Fn {
@@ -2455,13 +3222,13 @@ mod tests {
     #[test]
     fn block_types_as_fn() {
         let mut env = TyEnv::new();
-        // { 42 } is a lambda that returns IntLiteral
+        // { 42 } is a lambda that returns a constrained Infer (IntLiteral)
         let expr = mir(MirKind::Block(mir(MirKind::Int(42))));
         let ty = check(&expr, &mut env).unwrap();
         match ty {
             Ty::Fn { param, ret } => {
                 assert!(matches!(*param, Ty::Infer(_)));
-                assert_eq!(*ret, Ty::IntLiteral);
+                assert!(matches!(*ret, Ty::Infer(id) if env.infer_constraint(id) == Some(&InferConstraint::IntLiteral)));
             }
             _ => panic!("expected Fn, got {:?}", ty),
         }
@@ -2471,7 +3238,7 @@ mod tests {
     fn branch_same_type_arms() {
         use crate::mir::{MirBranchArm, MirBranchPattern};
         let mut env = TyEnv::new();
-        // { true -> 1, false -> 2 } — both arms are IntLiteral, unifies to IntLiteral
+        // { true -> 1, false -> 2 } — both arms are constrained Infer (IntLiteral), unifies to Infer with IntLiteral constraint
         let expr = mir(MirKind::BranchBlock(vec![
             MirBranchArm {
                 pattern: MirBranchPattern::Literal(mir(MirKind::Bool(true))),
@@ -2488,7 +3255,7 @@ mod tests {
         match ty {
             Ty::Fn { param, ret } => {
                 assert!(matches!(*param, Ty::Infer(_)));
-                assert_eq!(*ret, Ty::IntLiteral);
+                assert!(matches!(*ret, Ty::Infer(id) if env.infer_constraint(id) == Some(&InferConstraint::IntLiteral)));
             }
             _ => panic!("expected Fn, got {:?}", ty),
         }
@@ -2755,8 +3522,9 @@ mod tests {
         let mut env = TyEnv::new();
         // Set up: method_set(Int, (add = fn(Unknown->Int)))
         env.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        let int_add_param = env.fresh_infer();
         let int_add_ty = Ty::Fn {
-            param: Box::new(Ty::Infer(0)),
+            param: Box::new(int_add_param),
             ret: Box::new(Ty::Int),
         };
         env.bind("int_add".into(), int_add_ty);
@@ -2798,10 +3566,11 @@ mod tests {
         // but the Apply handler binds it. We need a fresh env for this test.
         let mut env2 = TyEnv::new();
         env2.bind("Int".into(), Ty::TagConstructor(TAG_ID_INT));
+        let int_add_param2 = env2.fresh_infer();
         env2.bind(
             "int_add".into(),
             Ty::Fn {
-                param: Box::new(Ty::Infer(0)),
+                param: Box::new(int_add_param2),
                 ret: Box::new(Ty::Int),
             },
         );
@@ -2950,7 +3719,7 @@ mod tests {
             arg: mir(MirKind::Int(0)),
         });
         let ty = check(&expr, &mut env).unwrap();
-        assert_eq!(ty, Ty::IntLiteral);
+        assert!(matches!(ty, Ty::Infer(id) if env.infer_constraint(id) == Some(&InferConstraint::IntLiteral)));
     }
 
     #[test]
@@ -3046,19 +3815,24 @@ mod tests {
             ])),
         });
         let ty = check(&expr, &mut env).unwrap();
-        assert_eq!(
-            ty,
-            Ty::Array(Box::new(Ty::Struct(vec![
-                ("0".into(), Ty::IntLiteral),
-                ("1".into(), Ty::String),
-            ])))
-        );
+        if let Ty::Array(elem) = &ty {
+            if let Ty::Struct(fields) = elem.as_ref() {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, "0");
+                assert!(matches!(&fields[0].1, Ty::Infer(id) if env.infer_constraint(*id) == Some(&InferConstraint::IntLiteral)));
+                assert_eq!(fields[1], ("1".into(), Ty::String));
+            } else {
+                panic!("expected Struct element, got {:?}", elem);
+            }
+        } else {
+            panic!("expected Array, got {:?}", ty);
+        }
     }
 
     // ── Literal defaulting tests ──
 
     #[test]
-    fn bind_defaults_literal_in_struct() {
+    fn bind_keeps_literal_in_struct() {
         let mut env = TyEnv::new();
         // let s = (x=1, y=2.0); s
         let expr = mir(MirKind::Bind {
@@ -3078,15 +3852,20 @@ mod tests {
             body: mir(MirKind::Ident("s".into())),
         });
         let ty = check(&expr, &mut env).unwrap();
-        // IntLiteral and FloatLiteral should default to Int and Float in bindings
-        assert_eq!(
-            ty,
-            Ty::Struct(vec![("x".into(), Ty::Int), ("y".into(), Ty::Float)])
-        );
+        // Constrained Infer vars stay as-is in bindings — defaulted only at final result
+        if let Ty::Struct(fields) = &ty {
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].0, "x");
+            assert!(matches!(&fields[0].1, Ty::Infer(id) if env.infer_constraint(*id) == Some(&InferConstraint::IntLiteral)));
+            assert_eq!(fields[1].0, "y");
+            assert!(matches!(&fields[1].1, Ty::Infer(id) if env.infer_constraint(*id) == Some(&InferConstraint::FloatLiteral)));
+        } else {
+            panic!("expected Struct, got {:?}", ty);
+        }
     }
 
     #[test]
-    fn bind_defaults_literal_in_array() {
+    fn bind_keeps_literal_in_array() {
         let mut env = TyEnv::new();
         // let a = [1, 2, 3]; a
         let expr = mir(MirKind::Bind {
@@ -3099,13 +3878,18 @@ mod tests {
             body: mir(MirKind::Ident("a".into())),
         });
         let ty = check(&expr, &mut env).unwrap();
-        assert_eq!(ty, Ty::Array(Box::new(Ty::Int)));
+        if let Ty::Array(elem) = &ty {
+            assert!(matches!(elem.as_ref(), Ty::Infer(id) if env.infer_constraint(*id) == Some(&InferConstraint::IntLiteral)));
+        } else {
+            panic!("expected Array, got {:?}", ty);
+        }
     }
 
     #[test]
     fn bind_defaults_literal_in_fn() {
         let mut env = TyEnv::new();
         // let f = { 42 }; f
+        // Function param/return types get defaulted at binding time
         let expr = mir(MirKind::Bind {
             name: "f".into(),
             value: mir(MirKind::Block(mir(MirKind::Int(42)))),
@@ -3139,7 +3923,7 @@ mod tests {
             )),
         });
         let ty = check(&expr, &mut env).unwrap();
-        assert_eq!(ty, Ty::IntLiteral);
+        assert!(matches!(ty, Ty::Infer(id) if env.infer_constraint(id) == Some(&InferConstraint::IntLiteral)));
     }
 
     #[test]
@@ -3159,21 +3943,20 @@ mod tests {
             )),
         });
         let ty = check(&expr, &mut env).unwrap();
-        assert_eq!(
-            ty,
-            Ty::Tagged {
-                tag_id: TAG_ID_INT,
-                payload: Box::new(Ty::IntLiteral)
-            }
-        );
+        if let Ty::Tagged { tag_id, payload } = &ty {
+            assert_eq!(*tag_id, TAG_ID_INT);
+            assert!(matches!(payload.as_ref(), Ty::Infer(id) if env.infer_constraint(*id) == Some(&InferConstraint::IntLiteral)));
+        } else {
+            panic!("expected Tagged, got {:?}", ty);
+        }
     }
 
     #[test]
     fn stored_block_cleared_on_rebind() {
         let mut env = TyEnv::new();
         // let f = { in }; let f = 42; f
-        // After rebinding f to 42, f should be Int, not a block.
-        // And calling f should fail because Int is not callable.
+        // After rebinding f to 42, f should be IntLiteral (no premature defaulting),
+        // not a block. And calling f should fail because IntLiteral is not callable.
         let expr = mir(MirKind::Bind {
             name: "f".into(),
             value: mir(MirKind::Block(mir(MirKind::Ident("in".into())))),
@@ -3184,7 +3967,7 @@ mod tests {
             }),
         });
         let ty = check(&expr, &mut env).unwrap();
-        assert_eq!(ty, Ty::Int);
+        assert!(matches!(ty, Ty::Infer(id) if env.infer_constraint(id) == Some(&InferConstraint::IntLiteral)));
     }
 
     // ── prepend_arg_ty tests ──
@@ -3238,37 +4021,41 @@ mod tests {
     fn tag_constructor_wraps_literal() {
         let mut env = TyEnv::new();
         env.bind("Ok".into(), Ty::TagConstructor(100));
-        // Ok(42) should return Tagged{100, IntLiteral}
+        // Ok(42) should return Tagged{100, constrained Infer (IntLiteral)}
         let expr = mir(MirKind::Call(
             mir(MirKind::Ident("Ok".into())),
             mir(MirKind::Int(42)),
         ));
         let ty = check(&expr, &mut env).unwrap();
-        assert_eq!(
-            ty,
-            Ty::Tagged {
-                tag_id: 100,
-                payload: Box::new(Ty::IntLiteral)
-            }
-        );
+        if let Ty::Tagged { tag_id, payload } = &ty {
+            assert_eq!(*tag_id, 100);
+            assert!(matches!(payload.as_ref(), Ty::Infer(id) if env.infer_constraint(*id) == Some(&InferConstraint::IntLiteral)));
+        } else {
+            panic!("expected Tagged, got {:?}", ty);
+        }
     }
 
     // ── default_literals function ──
 
     #[test]
     fn default_literals_recursive() {
+        let mut env = TyEnv::new();
+        let int_lit = env.fresh_constrained_infer(InferConstraint::IntLiteral);
+        let float_lit1 = env.fresh_constrained_infer(InferConstraint::FloatLiteral);
+        let int_lit2 = env.fresh_constrained_infer(InferConstraint::IntLiteral);
+        let float_lit2 = env.fresh_constrained_infer(InferConstraint::FloatLiteral);
         let ty = Ty::Struct(vec![
-            ("a".into(), Ty::IntLiteral),
-            ("b".into(), Ty::Array(Box::new(Ty::FloatLiteral))),
+            ("a".into(), int_lit),
+            ("b".into(), Ty::Array(Box::new(float_lit1))),
             (
                 "c".into(),
                 Ty::Fn {
-                    param: Box::new(Ty::IntLiteral),
-                    ret: Box::new(Ty::FloatLiteral),
+                    param: Box::new(int_lit2),
+                    ret: Box::new(float_lit2),
                 },
             ),
         ]);
-        let defaulted = default_literals(ty);
+        let defaulted = env.default_constrained_infer(&ty);
         assert_eq!(
             defaulted,
             Ty::Struct(vec![
@@ -3287,12 +4074,14 @@ mod tests {
 
     #[test]
     fn default_literals_in_tagged() {
+        let mut env = TyEnv::new();
+        let int_lit = env.fresh_constrained_infer(InferConstraint::IntLiteral);
         let ty = Ty::Tagged {
             tag_id: 100,
-            payload: Box::new(Ty::IntLiteral),
+            payload: Box::new(int_lit),
         };
         assert_eq!(
-            default_literals(ty),
+            env.default_constrained_infer(&ty),
             Ty::Tagged {
                 tag_id: 100,
                 payload: Box::new(Ty::Int)
@@ -3302,18 +4091,21 @@ mod tests {
 
     #[test]
     fn default_literals_in_union() {
+        let mut env = TyEnv::new();
+        let int_lit = env.fresh_constrained_infer(InferConstraint::IntLiteral);
+        let float_lit = env.fresh_constrained_infer(InferConstraint::FloatLiteral);
         let ty = Ty::Union(vec![
             Ty::Tagged {
                 tag_id: 100,
-                payload: Box::new(Ty::IntLiteral),
+                payload: Box::new(int_lit),
             },
             Ty::Tagged {
                 tag_id: 101,
-                payload: Box::new(Ty::FloatLiteral),
+                payload: Box::new(float_lit),
             },
         ]);
         assert_eq!(
-            default_literals(ty),
+            env.default_constrained_infer(&ty),
             Ty::Union(vec![
                 Ty::Tagged {
                     tag_id: 100,

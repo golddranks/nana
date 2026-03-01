@@ -18,6 +18,7 @@ let _int_methods = method_set(core.Int, (
     to_float = core.int_to_float,
     to_byte = core.int_to_byte,
     to_char = core.int_to_char,
+    to_i32 = core.int_to_i32,
 ));
 
 let _float_methods = method_set(core.Float, (
@@ -37,6 +38,7 @@ let _float_methods = method_set(core.Float, (
     floor = core.float_floor,
     round = core.float_round,
     trunc = core.float_trunc,
+    to_f32 = core.float_to_f32,
 ));
 
 let _bool_methods = method_set(core.Bool, (
@@ -65,6 +67,48 @@ let _byte_methods = method_set(core.Byte, (
     gt_eq = core.byte_gt_eq,
     to_string = core.byte_to_string,
     to_int = core.byte_to_int,
+    to_i32 = core.byte_to_i32,
+));
+
+let _i32_methods = method_set(core.I32, (
+    add = core.i32_add,
+    subtract = core.i32_subtract,
+    times = core.i32_times,
+    divided_by = core.i32_divided_by,
+    negate = core.i32_negate,
+    eq = core.i32_eq,
+    not_eq = core.i32_not_eq,
+    lt = core.i32_lt,
+    gt = core.i32_gt,
+    lt_eq = core.i32_lt_eq,
+    gt_eq = core.i32_gt_eq,
+    to_string = core.i32_to_string,
+    to_int = core.i32_to_int,
+    to_float = core.i32_to_float,
+    to_f32 = core.i32_to_f32,
+    to_byte = core.i32_to_byte,
+));
+
+let _f32_methods = method_set(core.F32, (
+    add = core.f32_add,
+    subtract = core.f32_subtract,
+    times = core.f32_times,
+    divided_by = core.f32_divided_by,
+    negate = core.f32_negate,
+    eq = core.f32_eq,
+    not_eq = core.f32_not_eq,
+    lt = core.f32_lt,
+    gt = core.f32_gt,
+    lt_eq = core.f32_lt_eq,
+    gt_eq = core.f32_gt_eq,
+    to_string = core.f32_to_string,
+    to_float = core.f32_to_float,
+    to_int = core.f32_to_int,
+    to_i32 = core.f32_to_i32,
+    ceil = core.f32_ceil,
+    floor = core.f32_floor,
+    round = core.f32_round,
+    trunc = core.f32_trunc,
 ));
 
 let _unit_methods = method_set(core.Unit, (
@@ -119,6 +163,8 @@ let _string_methods = method_set(core.String, (
     Char = core.Char,
     Byte = core.Byte,
     Unit = core.Unit,
+    I32 = core.I32,
+    F32 = core.F32,
 
     int_methods = _int_methods,
     float_methods = _float_methods,
@@ -128,6 +174,8 @@ let _string_methods = method_set(core.String, (
     unit_methods = _unit_methods,
     array_methods = _array_methods,
     string_methods = _string_methods,
+    i32_methods = _i32_methods,
+    f32_methods = _f32_methods,
 
     prelude = (
         int_methods = _int_methods,
@@ -138,6 +186,8 @@ let _string_methods = method_set(core.String, (
         unit_methods = _unit_methods,
         array_methods = _array_methods,
         string_methods = _string_methods,
+        i32_methods = _i32_methods,
+        f32_methods = _f32_methods,
     ),
 
     not = core.not,
@@ -148,6 +198,8 @@ let _string_methods = method_set(core.String, (
     int = core.int,
     float = core.float,
     char = core.char,
+    i32 = core.i32,
+    f32 = core.f32,
     ref_eq = core.ref_eq,
     val_eq = core.val_eq,
     method_set = core.method_set,

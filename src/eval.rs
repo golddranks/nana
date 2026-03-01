@@ -146,7 +146,7 @@ pub fn eval(expr: &Mir, env: &Env, input: &Value) -> Result<Value, String> {
                     let func = func.clone();
                     let arg_val = eval(arg, env, input)?;
                     // Auto-coerce int to byte when calling byte methods
-                    let arg_val = coerce_int_to_byte_if_needed(&recv, arg_val);
+                    let arg_val = coerce_literal_if_needed(&recv, arg_val);
                     let combined = prepend_arg(&recv, arg_val);
                     return apply(&func, combined);
                 }
@@ -664,6 +664,46 @@ fn extract_receiver_float(arg: &Value, name: &str) -> Result<(f64, Value), Strin
     }
 }
 
+fn extract_receiver_i32(arg: &Value, name: &str) -> Result<(i32, Value), String> {
+    match arg {
+        Value::I32(n) => Ok((*n, Value::Unit)),
+        Value::Struct(fields) if fields.len() >= 1 => {
+            match &fields[0].1 {
+                Value::I32(n) => {
+                    let rest = if fields.len() == 2 {
+                        fields[1].1.clone()
+                    } else {
+                        Value::Struct(fields[1..].to_vec())
+                    };
+                    Ok((*n, rest))
+                }
+                _ => Err(format!("{}: expected i32 receiver", name)),
+            }
+        }
+        _ => Err(format!("{}: expected i32 receiver", name)),
+    }
+}
+
+fn extract_receiver_f32(arg: &Value, name: &str) -> Result<(f32, Value), String> {
+    match arg {
+        Value::F32(f) => Ok((*f, Value::Unit)),
+        Value::Struct(fields) if fields.len() >= 1 => {
+            match &fields[0].1 {
+                Value::F32(f) => {
+                    let rest = if fields.len() == 2 {
+                        fields[1].1.clone()
+                    } else {
+                        Value::Struct(fields[1..].to_vec())
+                    };
+                    Ok((*f, rest))
+                }
+                _ => Err(format!("{}: expected f32 receiver", name)),
+            }
+        }
+        _ => Err(format!("{}: expected f32 receiver", name)),
+    }
+}
+
 /// Extract the receiver (field "0") as a bool, and the remaining arg.
 fn extract_receiver_bool(arg: &Value, name: &str) -> Result<(bool, Value), String> {
     match arg {
@@ -791,15 +831,23 @@ fn extract_range(arg: &Value, name: &str) -> Result<(i64, i64), String> {
     }
 }
 
-/// Auto-coerce `Value::Int` to `Value::Byte` when calling methods on a byte receiver.
+/// Auto-coerce numeric literals to the required type when calling methods.
 /// This implements the spec's "numeric literals convert automatically to the required type".
-fn coerce_int_to_byte_if_needed(recv: &Value, arg: Value) -> Value {
-    if !matches!(recv, Value::Byte(_)) {
-        return arg;
-    }
-    match arg {
-        Value::Int(n) if n >= 0 && n <= 255 => Value::Byte(n as u8),
-        other => other,
+fn coerce_literal_if_needed(recv: &Value, arg: Value) -> Value {
+    match recv {
+        Value::Byte(_) => match &arg {
+            Value::Int(n) if *n >= 0 && *n <= 255 => Value::Byte(*n as u8),
+            _ => arg,
+        },
+        Value::I32(_) => match &arg {
+            Value::Int(n) if *n >= i32::MIN as i64 && *n <= i32::MAX as i64 => Value::I32(*n as i32),
+            _ => arg,
+        },
+        Value::F32(_) => match &arg {
+            Value::Float(f) => Value::F32(*f as f32),
+            _ => arg,
+        },
+        _ => arg,
     }
 }
 
@@ -845,6 +893,8 @@ fn eval_compare(op: CmpOp, lhs: &Value, rhs: &Value) -> Result<Value, String> {
     match (lhs, rhs) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Bool(compare_partial(op, a, b)?)),
+        (Value::I32(a), Value::I32(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
+        (Value::F32(a), Value::F32(b)) => Ok(Value::Bool(compare_partial(op, a, b)?)),
         (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
         (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
         (Value::Char(a), Value::Char(b)) => Ok(Value::Bool(compare_ord(op, a, b))),
@@ -1037,7 +1087,10 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
             println!("{}", arg.print_string());
             Ok(Value::Unit)
         }
+        // Type hints — identity functions that assert the type.
+        // At runtime, IntLiteral values arrive as Value::Int, so we coerce.
         "byte" => match arg {
+            Value::Byte(b) => Ok(Value::Byte(b)),
             Value::Int(n) => {
                 if n < 0 || n > 255 {
                     Err(format!("byte: value {} out of range (0..255)", n))
@@ -1045,17 +1098,18 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
                     Ok(Value::Byte(n as u8))
                 }
             }
-            _ => Err("byte: expected int literal".to_string()),
+            _ => Err(format!("byte: expected byte, got {}", arg)),
         },
         "int" => match arg {
             Value::Int(n) => Ok(Value::Int(n)),
-            _ => Err(format!("int: expected int literal, got {}", arg)),
+            _ => Err(format!("int: expected int, got {}", arg)),
         },
         "float" => match arg {
             Value::Float(f) => Ok(Value::Float(f)),
-            _ => Err(format!("float: expected float literal, got {}", arg)),
+            _ => Err(format!("float: expected float, got {}", arg)),
         },
         "char" => match arg {
+            Value::Char(c) => Ok(Value::Char(c)),
             Value::Int(n) => {
                 if n < 0 {
                     return Err(format!("char: negative value {}", n));
@@ -1065,7 +1119,23 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
                     .map(Value::Char)
                     .ok_or_else(|| format!("char: value {} is not a valid Unicode scalar value", n))
             }
-            _ => Err(format!("char: expected int literal, got {}", arg)),
+            _ => Err(format!("char: expected char, got {}", arg)),
+        },
+        "i32" => match arg {
+            Value::I32(n) => Ok(Value::I32(n)),
+            Value::Int(n) => {
+                if n < i32::MIN as i64 || n > i32::MAX as i64 {
+                    Err(format!("i32: value {} out of range", n))
+                } else {
+                    Ok(Value::I32(n as i32))
+                }
+            }
+            _ => Err(format!("i32: expected i32, got {}", arg)),
+        },
+        "f32" => match arg {
+            Value::F32(f) => Ok(Value::F32(f)),
+            Value::Float(f) => Ok(Value::F32(f as f32)),
+            _ => Err(format!("f32: expected f32, got {}", arg)),
         },
         // ── Conversion methods (receiver is first arg) ──
         "int_to_float" => match arg {
@@ -1117,6 +1187,24 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
         "byte_to_int" => match arg {
             Value::Byte(b) => Ok(Value::Int(b as i64)),
             _ => Err(format!("to_int: expected byte, got {}", arg)),
+        },
+        "int_to_i32" => match arg {
+            Value::Int(n) => {
+                if n < i32::MIN as i64 || n > i32::MAX as i64 {
+                    Err(format!("to_i32: value {} out of range", n))
+                } else {
+                    Ok(Value::I32(n as i32))
+                }
+            }
+            _ => Err(format!("to_i32: expected int, got {}", arg)),
+        },
+        "float_to_f32" => match arg {
+            Value::Float(f) => Ok(Value::F32(f as f32)),
+            _ => Err(format!("to_f32: expected float, got {}", arg)),
+        },
+        "byte_to_i32" => match arg {
+            Value::Byte(b) => Ok(Value::I32(b as i32)),
+            _ => Err(format!("to_i32: expected byte, got {}", arg)),
         },
         "ref_eq" => match arg {
             Value::Struct(fields) if fields.len() == 2 => {
@@ -1401,6 +1489,177 @@ fn eval_builtin(name: &str, arg: Value) -> Result<Value, String> {
         "int_to_string" => {
             let (a, _) = extract_receiver_int(&arg, "int_to_string")?;
             Ok(Value::Str(a.to_string()))
+        }
+
+        // ── I32 operator builtins ──
+        "i32_add" => {
+            let (a, rest) = extract_receiver_i32(&arg, "i32_add")?;
+            match rest {
+                Value::I32(b) => a.checked_add(b).map(Value::I32)
+                    .ok_or_else(|| "integer overflow in i32 addition".to_string()),
+                _ => Err("add: expected i32 argument".to_string()),
+            }
+        }
+        "i32_subtract" => {
+            let (a, rest) = extract_receiver_i32(&arg, "i32_subtract")?;
+            match rest {
+                Value::I32(b) => a.checked_sub(b).map(Value::I32)
+                    .ok_or_else(|| "integer overflow in i32 subtraction".to_string()),
+                _ => Err("subtract: expected i32 argument".to_string()),
+            }
+        }
+        "i32_times" => {
+            let (a, rest) = extract_receiver_i32(&arg, "i32_times")?;
+            match rest {
+                Value::I32(b) => a.checked_mul(b).map(Value::I32)
+                    .ok_or_else(|| "integer overflow in i32 multiplication".to_string()),
+                _ => Err("times: expected i32 argument".to_string()),
+            }
+        }
+        "i32_divided_by" => {
+            let (a, rest) = extract_receiver_i32(&arg, "i32_divided_by")?;
+            match rest {
+                Value::I32(0) => Err("division by zero".to_string()),
+                Value::I32(b) => a.checked_div(b).map(Value::I32)
+                    .ok_or_else(|| "integer overflow in i32 division".to_string()),
+                _ => Err("divided_by: expected i32 argument".to_string()),
+            }
+        }
+        "i32_negate" => {
+            let (a, _) = extract_receiver_i32(&arg, "i32_negate")?;
+            a.checked_neg().map(Value::I32)
+                .ok_or_else(|| "integer overflow in i32 negation".to_string())
+        }
+        "i32_eq" | "i32_not_eq" | "i32_lt" | "i32_gt" | "i32_lt_eq" | "i32_gt_eq" => {
+            let (a, rest) = extract_receiver_i32(&arg, name)?;
+            match rest {
+                Value::I32(b) => {
+                    let result = match name {
+                        "i32_eq" => a == b,
+                        "i32_not_eq" => a != b,
+                        "i32_lt" => a < b,
+                        "i32_gt" => a > b,
+                        "i32_lt_eq" => a <= b,
+                        "i32_gt_eq" => a >= b,
+                        _ => unreachable!(),
+                    };
+                    Ok(Value::Bool(result))
+                }
+                _ => Err(format!("{}: expected i32 argument", name)),
+            }
+        }
+        "i32_to_string" => {
+            let (a, _) = extract_receiver_i32(&arg, "i32_to_string")?;
+            Ok(Value::Str(format!("{}i32", a)))
+        }
+        "i32_to_int" => {
+            let (a, _) = extract_receiver_i32(&arg, "i32_to_int")?;
+            Ok(Value::Int(a as i64))
+        }
+        "i32_to_float" => {
+            let (a, _) = extract_receiver_i32(&arg, "i32_to_float")?;
+            Ok(Value::Float(a as f64))
+        }
+        "i32_to_f32" => {
+            let (a, _) = extract_receiver_i32(&arg, "i32_to_f32")?;
+            Ok(Value::F32(a as f32))
+        }
+        "i32_to_byte" => {
+            let (a, _) = extract_receiver_i32(&arg, "i32_to_byte")?;
+            if a < 0 || a > 255 {
+                Err(format!("to_byte: value {} out of range (0..255)", a))
+            } else {
+                Ok(Value::Byte(a as u8))
+            }
+        }
+
+        // ── F32 operator builtins ──
+        "f32_add" => {
+            let (a, rest) = extract_receiver_f32(&arg, "f32_add")?;
+            match rest {
+                Value::F32(b) => Ok(Value::F32(a + b)),
+                _ => Err("add: expected f32 argument".to_string()),
+            }
+        }
+        "f32_subtract" => {
+            let (a, rest) = extract_receiver_f32(&arg, "f32_subtract")?;
+            match rest {
+                Value::F32(b) => Ok(Value::F32(a - b)),
+                _ => Err("subtract: expected f32 argument".to_string()),
+            }
+        }
+        "f32_times" => {
+            let (a, rest) = extract_receiver_f32(&arg, "f32_times")?;
+            match rest {
+                Value::F32(b) => Ok(Value::F32(a * b)),
+                _ => Err("times: expected f32 argument".to_string()),
+            }
+        }
+        "f32_divided_by" => {
+            let (a, rest) = extract_receiver_f32(&arg, "f32_divided_by")?;
+            match rest {
+                Value::F32(b) if b == 0.0 => Err("division by zero".to_string()),
+                Value::F32(b) => Ok(Value::F32(a / b)),
+                _ => Err("divided_by: expected f32 argument".to_string()),
+            }
+        }
+        "f32_negate" => {
+            let (a, _) = extract_receiver_f32(&arg, "f32_negate")?;
+            Ok(Value::F32(-a))
+        }
+        "f32_eq" | "f32_not_eq" | "f32_lt" | "f32_gt" | "f32_lt_eq" | "f32_gt_eq" => {
+            let (a, rest) = extract_receiver_f32(&arg, name)?;
+            match rest {
+                Value::F32(b) => {
+                    let result = match name {
+                        "f32_eq" => a == b,
+                        "f32_not_eq" => a != b,
+                        "f32_lt" => a < b,
+                        "f32_gt" => a > b,
+                        "f32_lt_eq" => a <= b,
+                        "f32_gt_eq" => a >= b,
+                        _ => unreachable!(),
+                    };
+                    Ok(Value::Bool(result))
+                }
+                _ => Err(format!("{}: expected f32 argument", name)),
+            }
+        }
+        "f32_to_string" => {
+            let (a, _) = extract_receiver_f32(&arg, "f32_to_string")?;
+            if a.fract() == 0.0 {
+                Ok(Value::Str(format!("{}.0f32", a)))
+            } else {
+                Ok(Value::Str(format!("{}f32", a)))
+            }
+        }
+        "f32_to_float" => {
+            let (a, _) = extract_receiver_f32(&arg, "f32_to_float")?;
+            Ok(Value::Float(a as f64))
+        }
+        "f32_to_int" => {
+            let (a, _) = extract_receiver_f32(&arg, "f32_to_int")?;
+            Ok(Value::Int(a as i64))
+        }
+        "f32_to_i32" => {
+            let (a, _) = extract_receiver_f32(&arg, "f32_to_i32")?;
+            Ok(Value::I32(a as i32))
+        }
+        "f32_ceil" => {
+            let (a, _) = extract_receiver_f32(&arg, "f32_ceil")?;
+            Ok(Value::I32(a.ceil() as i32))
+        }
+        "f32_floor" => {
+            let (a, _) = extract_receiver_f32(&arg, "f32_floor")?;
+            Ok(Value::I32(a.floor() as i32))
+        }
+        "f32_round" => {
+            let (a, _) = extract_receiver_f32(&arg, "f32_round")?;
+            Ok(Value::I32(a.round() as i32))
+        }
+        "f32_trunc" => {
+            let (a, _) = extract_receiver_f32(&arg, "f32_trunc")?;
+            Ok(Value::I32(a.trunc() as i32))
         }
 
         // ── Float operator builtins ──
@@ -1771,6 +2030,8 @@ pub fn build_core_module() -> Value {
         ("Byte", TAG_ID_BYTE),
         ("Array", TAG_ID_ARRAY),
         ("Unit", TAG_ID_UNIT),
+        ("I32", TAG_ID_I32),
+        ("F32", TAG_ID_F32),
     ];
     for (name, id) in &type_constructors {
         fields.push((name.to_string(), Value::TagConstructor {
@@ -1782,7 +2043,7 @@ pub fn build_core_module() -> Value {
     // All builtin functions
     let builtins = [
         "not", "and", "or", "print",
-        "byte", "int", "float", "char", "ref_eq", "val_eq", "method_set",
+        "byte", "int", "float", "char", "i32", "f32", "ref_eq", "val_eq", "method_set",
         // Array method builtins (receiver as first arg)
         "array_get", "array_slice", "array_len", "array_map", "array_filter",
         "array_fold", "array_zip",
@@ -1800,6 +2061,15 @@ pub fn build_core_module() -> Value {
         "int_add", "int_subtract", "int_times", "int_divided_by", "int_negate",
         "int_eq", "int_not_eq", "int_lt", "int_gt", "int_lt_eq", "int_gt_eq",
         "int_to_string", "int_to_float", "int_to_byte", "int_to_char",
+        // I32 operator builtins
+        "i32_add", "i32_subtract", "i32_times", "i32_divided_by", "i32_negate",
+        "i32_eq", "i32_not_eq", "i32_lt", "i32_gt", "i32_lt_eq", "i32_gt_eq",
+        "i32_to_string", "i32_to_int", "i32_to_float", "i32_to_f32", "i32_to_byte",
+        // F32 operator builtins
+        "f32_add", "f32_subtract", "f32_times", "f32_divided_by", "f32_negate",
+        "f32_eq", "f32_not_eq", "f32_lt", "f32_gt", "f32_lt_eq", "f32_gt_eq",
+        "f32_to_string", "f32_to_float", "f32_to_int", "f32_to_i32",
+        "f32_ceil", "f32_floor", "f32_round", "f32_trunc",
         // Float operator builtins
         "float_add", "float_subtract", "float_times", "float_divided_by", "float_negate",
         "float_eq", "float_not_eq", "float_lt", "float_gt", "float_lt_eq", "float_gt_eq",
@@ -1814,6 +2084,8 @@ pub fn build_core_module() -> Value {
         "byte_to_string", "byte_to_int",
         // Unit operator builtins
         "unit_eq", "unit_not_eq",
+        // Cross-type conversions
+        "int_to_i32", "float_to_f32", "byte_to_i32",
     ];
     for name in &builtins {
         fields.push((name.to_string(), Value::BuiltinFn(name.to_string())));

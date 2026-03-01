@@ -18,7 +18,7 @@ fn run_file(path: &str) {
         eprintln!("error reading {}: {}", path, e);
         std::process::exit(1);
     });
-    match nana::run_with_warnings(&source) {
+    match nana::run_with_std_and_warnings(&source) {
         Ok((val, warnings)) => {
             for w in &warnings {
                 eprintln!("{}", w);
@@ -38,7 +38,7 @@ fn run_stdin() {
         eprintln!("error reading stdin: {}", e);
         std::process::exit(1);
     });
-    match nana::run_with_warnings(&buf) {
+    match nana::run_with_std_and_warnings(&buf) {
         Ok((val, warnings)) => {
             for w in &warnings {
                 eprintln!("{}", w);
@@ -55,7 +55,10 @@ fn run_stdin() {
 fn repl() {
     let stdin = io::stdin();
     let mut reader = stdin.lock();
-    let mut env = nana::default_env();
+    let (mut env, mut ty_env) = nana::env_with_std_and_ty_env().unwrap_or_else(|e| {
+        eprintln!("error loading std: {}", e);
+        std::process::exit(1);
+    });
 
     eprintln!("nana repl — type expressions, press enter to evaluate. Ctrl-D to exit.");
     loop {
@@ -78,7 +81,7 @@ fn repl() {
         }
 
         let prev_len = env.len();
-        match nana::run_in_env(line, &env) {
+        match nana::run_in_env_checked(line, &env, &mut ty_env) {
             Ok((val, new_env)) => {
                 for w in new_env.unused_warnings_from(prev_len) {
                     eprintln!("{}", w);

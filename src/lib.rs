@@ -169,6 +169,65 @@ pub fn env_with_std() -> Result<Env, String> {
     Ok(env)
 }
 
+/// Create both a runtime Env and a TyEnv with std loaded.
+/// Used by the REPL to persist type checking state across lines.
+pub fn env_with_std_and_ty_env() -> Result<(Env, types::TyEnv), String> {
+    let (env, std_ty, std_ty_env) = env_with_std_and_types()?;
+    let mut ty_env = types::TyEnv::new()
+        .with_module("core", types::core_module_type())
+        .with_module("std", std_ty.clone())
+        .with_method_sets_from(&std_ty_env);
+    ty_env.bind_external("std".to_string(), std_ty.clone());
+    if let types::Ty::Struct(fields) = &std_ty {
+        for (label, ty) in fields {
+            if label == "prelude" {
+                if let types::Ty::Struct(prelude_fields) = ty {
+                    for (_, ms_ty) in prelude_fields {
+                        if matches!(ms_ty, types::Ty::MethodSet { .. }) {
+                            ty_env.bind_external("\0ms".to_string(), ms_ty.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok((env, ty_env))
+}
+
+/// Type-check and evaluate source code within existing runtime and type environments.
+/// After evaluation, new bindings are added to `ty_env` so they're visible in subsequent calls.
+/// Used by the REPL.
+pub fn run_in_env_checked(
+    source: &str,
+    env: &Env,
+    ty_env: &mut types::TyEnv,
+) -> Result<(Value, Env), String> {
+    let mir = parse_and_lower(source)?;
+    let result_ty = types::check(&mir, ty_env)?;
+    let result_ty = ty_env.resolve(&result_ty);
+    let result_ty = ty_env.default_constrained_infer(&result_ty);
+    let result_ty = result_ty.default_infer_in_arrays();
+    if result_ty.contains_infer() {
+        return Err(format!(
+            "type error: unresolved inference variable in result type {:?}",
+            result_ty
+        ));
+    }
+
+    let prev_len = env.len();
+    let (val, new_env) = eval::eval_toplevel(&mir, env, &Value::Unit)
+        .map_err(|e| format!("runtime error: {}", e))?;
+    // Persist new runtime bindings into the type env for subsequent REPL lines
+    let new_bindings: Vec<_> = new_env
+        .bindings_from(prev_len)
+        .map(|(name, value)| (name.to_string(), types::ty_from_value(value, ty_env)))
+        .collect();
+    for (name, ty) in new_bindings {
+        ty_env.bind_external(name, ty);
+    }
+    Ok((val, new_env))
+}
+
 /// Run source code with core and std modules available.
 pub fn run_with_std(source: &str) -> Result<Value, String> {
     let (val, _warnings) = run_with_std_and_warnings(source)?;
@@ -201,6 +260,11 @@ pub fn run_with_std_and_warnings(source: &str) -> Result<(Value, Vec<String>), S
         }
     }
     let result_ty = types::check(&mir, &mut ty_env)?;
+    let result_ty = ty_env.resolve(&result_ty);
+    let result_ty = ty_env.default_constrained_infer(&result_ty);
+    // Default unconstrained Infer inside arrays (empty array element types).
+    // Reject Infer in other positions (standalone closures, unused blocks).
+    let result_ty = result_ty.default_infer_in_arrays();
     if result_ty.contains_infer() {
         return Err(format!(
             "type error: unresolved inference variable in result type {:?}",

@@ -18,6 +18,8 @@ pub const TAG_ID_BYTE: TagId = 5;
 pub const TAG_ID_ARRAY: TagId = 6;
 pub const TAG_ID_UNIT: TagId = 7;
 pub const TAG_ID_STRUCT: TagId = 8;
+pub const TAG_ID_I32: TagId = 9;
+pub const TAG_ID_F32: TagId = 10;
 
 /// Map a primitive Value to its built-in TagId for method set dispatch.
 pub fn builtin_tag_id(value: &Value) -> Option<TagId> {
@@ -28,6 +30,8 @@ pub fn builtin_tag_id(value: &Value) -> Option<TagId> {
         Value::Str(_) => Some(TAG_ID_STRING),
         Value::Char(_) => Some(TAG_ID_CHAR),
         Value::Byte(_) => Some(TAG_ID_BYTE),
+        Value::I32(_) => Some(TAG_ID_I32),
+        Value::F32(_) => Some(TAG_ID_F32),
         Value::Array(_) => Some(TAG_ID_ARRAY),
         Value::Unit => Some(TAG_ID_UNIT),
         Value::Struct(_) => Some(TAG_ID_STRUCT),
@@ -137,6 +141,12 @@ impl Env {
         self.bindings.len()
     }
 
+    /// Iterate over bindings added after position `from`.
+    /// Returns (name, value) pairs for each new binding.
+    pub fn bindings_from(&self, from: usize) -> impl Iterator<Item = (&str, &Value)> {
+        self.bindings.iter().skip(from).map(|b| (b.name.as_str(), &b.value))
+    }
+
     /// Find a method in active method sets for a given tag ID.
     /// Only considers method sets activated via `apply` (bound with `\0ms` prefix).
     /// Scans backwards (most recent first) for shadowing semantics.
@@ -166,6 +176,8 @@ pub enum Value {
     Str(String),
     Char(char),
     Byte(u8),
+    I32(i32),
+    F32(f32),
     Unit,
     Array(Vec<Value>),
     Struct(Vec<(String, Value)>),
@@ -270,6 +282,14 @@ impl fmt::Display for Value {
                 0x20..=0x7e => write!(f, "b'{}'", *b as char),
                 _ => write!(f, "b'\\x{:02x}'", b),
             },
+            Value::I32(n) => write!(f, "{}i32", n),
+            Value::F32(n) => {
+                if n.fract() == 0.0 {
+                    write!(f, "{}.0f32", n)
+                } else {
+                    write!(f, "{}f32", n)
+                }
+            }
             Value::Unit => write!(f, "()"),
             Value::Array(elems) => {
                 write!(f, "[")?;
@@ -338,6 +358,8 @@ impl PartialEq for Value {
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Char(a), Value::Char(b)) => a == b,
             (Value::Byte(a), Value::Byte(b)) => a == b,
+            (Value::I32(a), Value::I32(b)) => a == b,
+            (Value::F32(a), Value::F32(b)) => a == b,
             (Value::Unit, Value::Unit) => true,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Struct(a), Value::Struct(b)) => a == b,
